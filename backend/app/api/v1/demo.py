@@ -197,7 +197,7 @@ async def demo_state(
         _forecast_cached(city_id),
     )
     (wards, resources, incidents, needs, decisions, events, facilities,
-     blocks, routes, alerts, reports) = snapshot
+     blocks, routes, alerts, reports, agency_requests) = snapshot
 
     return {
         "running": st.running,
@@ -215,6 +215,15 @@ async def demo_state(
         "roadBlocks": blocks,
         "routes": routes,
         "forecast": forecast,
+        "agencyRequests": agency_requests,
+        # Who can be asked for what. Reference data, from the taxonomy cache, so
+        # the handoff board offers real agencies rather than a free-text field.
+        "agencies": [
+            {"id": a.id, "name": a.name, "kind": a.kind,
+             "capabilities": list(a.capabilities)}
+            for a in taxonomy.cache.agencies.values()
+            if getattr(a, "active", True)
+        ],
         "alerts": alerts,
         "reports": reports,
         "citizenRoute": st.citizen_route,
@@ -287,6 +296,26 @@ select a.id::text, a.resource_id, a.incident_id::text incident_id,
    and a.status in ('proposed','approved','en_route','on_site')
    and a.route is not null
  order by a.created_at desc
+ limit 40
+"""
+
+#: Inter-agency handoff. PS20 asks for a coordination workflow and the workflow
+#: existed, but nothing rendered it, so the one requirement the whole system is
+#: named after was invisible. It reads from the same snapshot as everything else
+#: so the handoff board cannot disagree with the map about what is uncovered.
+_AGENCY_SQL = """
+select r.id::text, r.incident_id::text incident_id, r.ward_id,
+       r.from_agency, r.to_agency, r.capability_id, r.quantity,
+       r.status, r.note, r.requested_at, r.responded_at, r.responded_by,
+       i.title incident_title, i.severity incident_severity,
+       w.name ward_name,
+       f.name from_name, t.name to_name
+  from agency_requests r
+  left join incidents i on i.id = r.incident_id
+  left join wards w on w.id = r.ward_id
+  left join agencies f on f.id = r.from_agency
+  left join agencies t on t.id = r.to_agency
+ order by (r.status = 'requested') desc, r.requested_at desc
  limit 40
 """
 
@@ -501,7 +530,7 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
     (
         risk_rows, resource_rows, incident_rows, need_rows,
         decision_rows, event_rows, facility_rows, block_rows,
-        route_rows, alert_rows, report_rows,
+        route_rows, alert_rows, report_rows, agency_rows,
     ) = await asyncio.gather(
         db.fetch(_WARD_RISK_SQL),
         db.fetch(_RESOURCES_SQL, city_id),
@@ -514,6 +543,7 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
         db.fetch(_ROUTES_SQL),
         db.fetch(_ALERTS_SQL),
         db.fetch(_REPORTS_SQL, city_id),
+        db.fetch(_AGENCY_SQL),
     )
 
     risk = {r["ward_id"]: r for r in risk_rows}
@@ -638,5 +668,19 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          "location": [float(r["lng"]), float(r["lat"])]}
         for r in block_rows
     ]
+    agency_requests = [
+        {"id": r["id"], "incidentId": r["incident_id"], "wardId": r["ward_id"],
+         "wardName": r["ward_name"],
+         "fromAgency": r["from_agency"], "fromName": r["from_name"],
+         "toAgency": r["to_agency"], "toName": r["to_name"],
+         "capability": r["capability_id"], "quantity": r["quantity"],
+         "status": r["status"], "note": r["note"],
+         "incidentTitle": r["incident_title"],
+         "incidentSeverity": r["incident_severity"],
+         "requestedAt": r["requested_at"].isoformat() if r["requested_at"] else None,
+         "respondedAt": r["responded_at"].isoformat() if r["responded_at"] else None,
+         "respondedBy": r["responded_by"]}
+        for r in agency_rows
+    ]
     return (wards, resources, incidents, needs, decisions, events, facilities,
-            blocks, routes, alerts, reports)
+            blocks, routes, alerts, reports, agency_requests)

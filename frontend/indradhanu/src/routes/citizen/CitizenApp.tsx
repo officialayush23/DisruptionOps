@@ -35,6 +35,10 @@ type State = {
                 location: [number, number]; distanceM: number }[]
   unitsNearby: { id: string; kind: string; label: string; status: string
                  location: [number, number]; etaMinutes: number | null }[]
+  /** Roads crews have declared impassable near you. The most actionable thing
+   *  on this screen: not "your ward is at severity four" but "not that street". */
+  roadBlocks: { id: string; reason: string; reportedBy: string
+                radiusM: number; location: [number, number] }[]
   categories: { id: string; label: string; lifeSafety: boolean }[]
 }
 

@@ -104,6 +104,18 @@ export type ForecastState = {
     availableNow: number; committedNow: number; shortfall: number
   }[]
 }
+export type AgencyRequest = {
+  id: string; incidentId: string | null; wardId: string; wardName: string | null
+  fromAgency: string; fromName: string | null
+  toAgency: string; toName: string | null
+  capability: string; quantity: number; status: string; note: string | null
+  incidentTitle: string | null; incidentSeverity: number | null
+  requestedAt: string | null; respondedAt: string | null
+  respondedBy: string | null
+}
+export type AgencyRef = {
+  id: string; name: string; kind: string; capabilities: string[]
+}
 export type Duplicate = {
   kind: string; incidentIds: string[]; wardId: string | null
   agencies: string[]; detail: string; wastedUnits: number
@@ -132,6 +144,7 @@ export type DemoState = {
   routes: UnitRoute[]; alerts: Alert[]; reports: RawReport[]
   citizenRoute: CitizenRoute | null
   forecast: ForecastState | null
+  agencyRequests: AgencyRequest[]; agencies: AgencyRef[]
   plan: Plan | null
   beats: Beat[]
 }
@@ -142,6 +155,7 @@ export const EMPTY_DEMO: DemoState = {
   wards: [], resources: [], incidents: [], needs: [], decisions: [],
   events: [], duplicates: [], facilities: [], roadBlocks: [],
   routes: [], alerts: [], reports: [], citizenRoute: null, forecast: null,
+  agencyRequests: [], agencies: [],
   plan: null, beats: [],
 }
 

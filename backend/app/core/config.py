@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     #: backs the report parser when its keyword pass is not confident.
     hf_api_token: str = ""
     hf_zero_shot_model: str = "joeddav/xlm-roberta-large-xnli"
+    #: A vision model hosted elsewhere. Ours only has to post an image and read
+    #: back the JSON in `app/incidents/vision.py`. Empty means photos are
+    #: accepted and simply not looked at, which is a fine state to ship in.
+    vlm_url: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = ""
+    vlm_timeout_seconds: float = 25.0
+
     #: Google Flood Hub, if a key is present. Without one the flood forecast
     #: comes from GloFAS through Open-Meteo, which needs no key.
     google_flood_hub_key: str = ""

@@ -3,6 +3,7 @@ import {
   Activity,
   ClipboardCheck,
   Gauge,
+  Handshake,
   History,
   Inbox,
   Radar,
@@ -38,6 +39,7 @@ const NAV = [
   { to: "/admin/forecast", label: "Forecast", icon: TrendingUp },
   { to: "/admin/incidents", label: "Incident queue", icon: Siren },
   { to: "/admin/allocation", label: "Allocation planner", icon: Route },
+  { to: "/admin/handoff", label: "Agency handoff", icon: Handshake },
   { to: "/admin/decisions", label: "Decision gate", icon: ClipboardCheck },
   { to: "/admin/agent", label: "Agent trace", icon: Activity },
   { to: "/admin/resources", label: "Resources", icon: Truck },
@@ -76,6 +78,22 @@ function LiveBadge() {
         <span className="tabular-nums opacity-70">{latencyMs} ms</span>
       )}
     </div>
+  )
+}
+
+/** Requests another agency has not answered yet. Coordination that has stalled
+ *  is the thing this screen exists to make impossible to miss. */
+function HandoffCount() {
+  const { state } = useDemo()
+  const open = state.agencyRequests.filter((r) => r.status === "requested").length
+  if (!open) return null
+  return (
+    <Badge
+      variant="secondary"
+      className="ml-auto h-5 min-w-5 px-1.5 group-data-[collapsible=icon]:hidden"
+    >
+      {open}
+    </Badge>
   )
 }
 
@@ -164,6 +182,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
                         <item.icon />
                         <span>{item.label}</span>
                         {item.to === "/admin/decisions" && <GateCount />}
+                        {item.to === "/admin/handoff" && <HandoffCount />}
                       </NavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

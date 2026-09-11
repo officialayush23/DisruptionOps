@@ -9,6 +9,7 @@ import FieldApp from "@/routes/field/FieldApp"
 import IntakeInbox from "@/routes/admin/IntakeInbox"
 import RiskBoard from "@/routes/admin/RiskBoard"
 import Forecast from "@/routes/admin/Forecast"
+import AgencyHandoff from "@/routes/admin/AgencyHandoff"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
 import DecisionGate from "@/routes/admin/DecisionGate"
@@ -56,6 +57,7 @@ export function App() {
                 <Route path="forecast" element={<Forecast />} />
                 <Route path="incidents" element={<IncidentQueue />} />
                 <Route path="allocation" element={<AllocationPlanner />} />
+                <Route path="handoff" element={<AgencyHandoff />} />
                 <Route path="decisions" element={<DecisionGate />} />
                 <Route path="agent" element={<AgentTrace />} />
                 <Route path="resources" element={<ResourcesPage />} />

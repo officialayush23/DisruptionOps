@@ -29,7 +29,7 @@ from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.db.repositories import queries as q
 from app.guidance import router as guidance
-from app.incidents import intake, parse, vision
+from app.incidents import intake, parse, vision, vision_client
 from app.schemas.domain import Camel, CategoryId, LngLat
 from app.taxonomy import UnknownTaxonomyValue
 from app.taxonomy import cache as taxonomy
@@ -189,6 +189,77 @@ class VisionIn(Camel):
     category: CategoryId = "flooded_road"
 
 
+class VisionAnalyseIn(Camel):
+    """Ask the configured service to look at a photo for us."""
+
+    image_url: str | None = None
+    image_base64: str | None = None
+    category: CategoryId = "flooded_road"
+    report_id: str | None = None
+
+
+@router.post("/citizen/vision/analyse")
+async def citizen_vision_analyse(
+    body: VisionAnalyseIn, _: CurrentPrincipal
+) -> dict:
+    """Run the hosted model, if one is configured, and return the assessment.
+
+    The app calls this when it did *not* run the model itself. The result goes
+    through exactly the same validation as one that came from a phone, and is
+    subject to exactly the same ceiling on what it may change.
+    """
+    if not vision_client.configured():
+        raise BadRequest(
+            "No vision service is configured. Set VLM_URL, or run the model on "
+            "the device and post the result to /citizen/vision."
+        )
+    call = await vision_client.analyse(
+        image_url=body.image_url,
+        image_base64=body.image_base64,
+        category=body.category,
+    )
+    if not call.ok or call.evidence is None:
+        raise BadRequest(
+            f"The vision service did not return a usable answer ({call.error}). "
+            "The report stands exactly as it would have with no photo."
+        )
+    if body.report_id:
+        await _record_photo_evidence(body.report_id, call.evidence)
+    return {
+        "accepted": True,
+        "latencyMs": call.latency_ms,
+        "evidence": vision.as_dict(call.evidence),
+    }
+
+
+async def _record_photo_evidence(
+    report_id: str, evidence: vision.PhotoEvidence
+) -> None:
+    """Write the agreement where the trust model will read it, and log it."""
+    await db.execute(
+        """
+        update citizen_reports
+           set trust_breakdown = coalesce(trust_breakdown, '{}'::jsonb)
+                                 || jsonb_build_object('photo_agreement', $2::numeric)
+         where id = $1::uuid
+        """,
+        report_id, evidence.agreement,
+    )
+    await ev.append(
+        clock=clocks.WALL, kind="report.photo_assessed",
+        actor=f"agent:vision:{evidence.ran_on}",
+        subject_type="report", subject_id=report_id,
+        payload={
+            "agreement": evidence.agreement,
+            "hazards": evidence.hazards,
+            "depth_band": evidence.depth_band,
+            "model": evidence.model,
+            "ran_on": evidence.ran_on,
+            "life_safety_signal": evidence.life_safety_signal,
+        },
+    )
+
+
 @router.get("/citizen/vision-contract")
 async def vision_contract(_: CurrentPrincipal) -> dict:
     """The prompt and the accepted shape, served to the client.
@@ -205,6 +276,7 @@ async def vision_contract(_: CurrentPrincipal) -> dict:
         "imageQuality": list(vision.QUALITY),
         "categoriesCovered": vision.known_categories(),
         "maxImageEdge": 1024,
+        "hostedAvailable": vision_client.configured(),
         "notes": [
             "A photo is corroboration, never the claim. It can raise or lower "
             "trust in what the reporter typed; it cannot set the category or "
@@ -236,28 +308,7 @@ async def citizen_vision(body: VisionIn, _: CurrentPrincipal) -> dict:
     evidence = vision.assess(evidence, category=body.category)
 
     if body.report_id:
-        await db.execute(
-            """
-            update citizen_reports
-               set trust_breakdown = coalesce(trust_breakdown, '{}'::jsonb)
-                                     || jsonb_build_object('photo_agreement', $2::numeric)
-             where id = $1::uuid
-            """,
-            body.report_id, evidence.agreement,
-        )
-        await ev.append(
-            clock=clocks.WALL, kind="report.photo_assessed",
-            actor=f"agent:vision:{evidence.ran_on}",
-            subject_type="report", subject_id=body.report_id,
-            payload={
-                "agreement": evidence.agreement,
-                "hazards": evidence.hazards,
-                "depth_band": evidence.depth_band,
-                "model": evidence.model,
-                "ran_on": evidence.ran_on,
-                "life_safety_signal": evidence.life_safety_signal,
-            },
-        )
+        await _record_photo_evidence(body.report_id, evidence)
 
     return {
         "accepted": True,
@@ -288,7 +339,9 @@ async def citizen_state(
     loc = await q.locate_ward(lng, lat, city_id)
     metres = radius_km * 1000
 
-    nearby, alerts, facilities, units = await _citizen_scope(lng, lat, city_id, metres)
+    nearby, alerts, facilities, units, blocks = await _citizen_scope(
+        lng, lat, city_id, metres
+    )
 
     return {
         "ward": (
@@ -302,6 +355,7 @@ async def citizen_state(
         "alerts": alerts,
         "facilities": facilities,
         "unitsNearby": units,
+        "roadBlocks": blocks,
         "categories": [
             {"id": c.id, "label": c.display_name, "lifeSafety": c.life_safety}
             for c in taxonomy.categories.values()
@@ -414,7 +468,30 @@ async def _citizen_scope(lng: float, lat: float, city_id: str, metres: float):
             lng, lat, city_id, metres,
         )
     ]
-    return incidents, alerts, facilities, units
+    # Roads crews have declared impassable. A resident is shown these because
+    # they are the single most actionable thing in the whole snapshot: not "your
+    # ward is at severity four", but "do not take that street".
+    blocks = [
+        {"id": r["id"], "reason": r["reason"], "reportedBy": r["reported_by"],
+         "radiusM": r["radius_m"],
+         "location": [float(r["lng"]), float(r["lat"])]}
+        for r in await db.fetch(
+            """
+            with me as (select extensions.ST_SetSRID(
+                          extensions.ST_MakePoint($1,$2),4326)::extensions.geography g)
+            select b.id::text, b.reason, b.reported_by, b.radius_m,
+                   extensions.ST_X(b.location::extensions.geometry) lng,
+                   extensions.ST_Y(b.location::extensions.geometry) lat
+              from road_blocks b, me
+             where b.city_id = $3 and b.active
+               and extensions.ST_DWithin(b.location, me.g, $4)
+             order by extensions.ST_Distance(b.location, me.g)
+             limit 30
+            """,
+            lng, lat, city_id, metres,
+        )
+    ]
+    return incidents, alerts, facilities, units, blocks
 
 
 # ============================================================= field =========

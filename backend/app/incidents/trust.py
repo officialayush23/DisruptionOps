@@ -79,6 +79,9 @@ class TrustInputs:
     #: Implied speed between this reporter's last report and this one, km/h.
     implied_speed_kmh: float | None
     mesh_hops: int | None = None
+    #: Agreement between an attached photo and what was reported, -1..1, from
+    #: `vision.assess`. None when there was no photo or no analysis of it.
+    photo_agreement: float | None = None
 
 
 @dataclass(slots=True)
@@ -139,8 +142,27 @@ def score(inputs: TrustInputs, *, life_safety: bool = False) -> Trust:
     if n >= 2:
         reasons.append(f"{n} independent reports describe the same thing.")
 
-    # 5. Evidence attached.
+    # 5. Evidence attached, and whether it agrees.
+    #
+    # A photo used to be worth the same whatever it showed, which is the wrong
+    # shape: attaching *a* photo is easy and attaching one that matches the claim
+    # is not. When a vision model has looked at it, the agreement it found moves
+    # this component in both directions — a picture of a dry street against a
+    # "road is flooded" report should cost the report, not flatter it.
+    #
+    # Bounded deliberately. At full agreement this reaches 0.95, which is high
+    # but not enough on its own to clear the auto-confirm floor: a photo still
+    # cannot carry a report past the gate by itself.
     c["evidence"] = 0.85 if inputs.has_photo else 0.45
+    if inputs.photo_agreement is not None:
+        c["evidence"] = _clamp(0.65 + 0.30 * inputs.photo_agreement, 0.15, 0.95)
+        if inputs.photo_agreement > 0.15:
+            reasons.append("The attached photo shows what was reported.")
+        elif inputs.photo_agreement < -0.15:
+            reasons.append(
+                "The attached photo does not show what was reported, which is "
+                "also what a fabricated report looks like."
+            )
 
     # 6. Anomaly. This one discounts everything above it.
     anomaly = 0.0
