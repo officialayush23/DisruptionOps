@@ -393,13 +393,21 @@ select id, kind, actor, subject_type, subject_id, ward_id, payload,
  order by id desc limit 150
 """
 
+#: Every lifeline kind, not a hardcoded three. The kinds are rows in
+#: `lifeline_kinds` precisely so a deployment can add one — a filter listing
+#: three of them here is the enum this system spent a migration removing, and
+#: it is why relief centres, water points, kitchens and medical camps existed
+#: in the database but never reached the map.
 _FACILITIES_SQL = """
-select id, name, kind, status, capacity, occupancy, accepts_casualties,
-       extensions.ST_X(location::extensions.geometry) lng,
-       extensions.ST_Y(location::extensions.geometry) lat
-  from lifelines
- where city_id = $1 and kind in ('hospital','shelter','pump_station')
- order by kind, name
+select l.id, l.name, l.kind, l.status, l.capacity, l.occupancy,
+       l.accepts_casualties, l.ward_id, l.supplies, l.people_served_per_hour,
+       k.display_name kind_label,
+       extensions.ST_X(l.location::extensions.geometry) lng,
+       extensions.ST_Y(l.location::extensions.geometry) lat
+  from lifelines l
+  left join lifeline_kinds k on k.id = l.kind
+ where l.city_id = $1
+ order by l.kind, l.name
 """
 
 _BLOCKS_SQL = """

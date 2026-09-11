@@ -557,19 +557,23 @@ async def _citizen_scope(lng: float, lat: float, city_id: str, metres: float):
         {"id": r["id"], "name": r["name"], "kind": r["kind"],
          "location": [float(r["lng"]), float(r["lat"])],
          "capacity": r["capacity"], "occupancy": r["occupancy"],
+         "kindLabel": r["kind_label"],
          "status": r["status"], "specialities": list(r["specialities"] or []),
+         "supplies": r["supplies"] or {},
          "distanceM": round(float(r["m"]))}
         for r in await db.fetch(
             """
             with me as (select extensions.ST_SetSRID(
                           extensions.ST_MakePoint($1,$2),4326)::extensions.geography g)
-            select l.id, l.name, l.kind, l.capacity, l.occupancy, l.status, l.specialities,
+            select l.id, l.name, l.kind, l.capacity, l.occupancy, l.status,
+                   l.specialities, l.supplies, k.display_name kind_label,
                    extensions.ST_X(l.location::extensions.geometry) lng,
                    extensions.ST_Y(l.location::extensions.geometry) lat,
                    extensions.ST_Distance(l.location, me.g) m
-              from lifelines l, me
-             where l.city_id = $3 and l.kind in ('shelter','hospital')
-             order by m limit 12
+              from lifelines l
+              join lifeline_kinds k on k.id = l.kind, me
+             where l.city_id = $3 and k.serves_public
+             order by m limit 16
             """,
             lng, lat, city_id,
         )
@@ -854,15 +858,20 @@ async def field_state(
     tasks = await q.list_field_tasks(scope)
     facilities = [
         {"id": r["id"], "name": r["name"], "kind": r["kind"], "status": r["status"],
+         "kindLabel": r["kind_label"] or r["kind"].replace("_", " ").title(),
          "capacity": r["capacity"], "occupancy": r["occupancy"],
+         "supplies": r["supplies"] or {},
          "location": [float(r["lng"]), float(r["lat"])]}
         for r in await db.fetch(
             """
-            select id, name, kind, status, capacity, occupancy,
-                   extensions.ST_X(location::extensions.geometry) lng,
-                   extensions.ST_Y(location::extensions.geometry) lat
-              from lifelines where city_id = $1 and kind in ('hospital','shelter')
-             order by kind, name
+            select l.id, l.name, l.kind, l.status, l.capacity, l.occupancy,
+                   l.supplies, k.display_name kind_label,
+                   extensions.ST_X(l.location::extensions.geometry) lng,
+                   extensions.ST_Y(l.location::extensions.geometry) lat
+              from lifelines l
+              left join lifeline_kinds k on k.id = l.kind
+             where l.city_id = $1
+             order by l.kind, l.name
             """,
             city_id,
         )

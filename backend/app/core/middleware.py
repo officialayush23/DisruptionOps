@@ -46,7 +46,11 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
             response = problem_response(exc)
             response.headers["X-Request-ID"] = rid
-            request_id_ctx.reset(token)
+            # No reset here: the `finally` below is the single reset. Resetting
+            # a context token twice raises `RuntimeError: Token has already been
+            # used once`, and that exception escapes the boundary this class
+            # exists to be -- so the 500 never travels back out through
+            # CORSMiddleware and the browser blames CORS for a bug in a query.
             return response
         finally:
             request_id_ctx.reset(token)
