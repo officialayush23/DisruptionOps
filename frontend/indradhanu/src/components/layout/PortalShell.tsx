@@ -1,5 +1,4 @@
 import { PersonaSwitcher } from "./PersonaSwitcher"
-import { ScenarioBar } from "@/scenario/ScenarioBar"
 
 /** Shell for the two non-administration interfaces. Deliberately plain: a
  *  resident on a phone and a field operator in the rain do not need chrome. */
@@ -26,9 +25,6 @@ export function PortalShell({
           <PersonaSwitcher />
         </div>
       </header>
-      <div data-tour="scenario">
-        <ScenarioBar />
-      </div>
       <main className="min-h-0 flex-1 overflow-auto">{children}</main>
     </div>
   )

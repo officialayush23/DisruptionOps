@@ -854,6 +854,52 @@ export function LiveMap({
     }
   }, [ready, me, followMe])
 
+  /** Keep the canvas the size of its box.
+   *
+   *  Mapbox measures the container once, at construction, and never again. Any
+   *  layout change after that — going full screen, a panel collapsing, the
+   *  window being dragged to another monitor — leaves the canvas at its old
+   *  dimensions, painted into a corner of a box that is now much larger. That
+   *  is the black L-shape around a full-screen map, and it is a missing
+   *  `resize()` rather than anything to do with zoom or centre.
+   *
+   *  A ResizeObserver on the container catches every one of those causes,
+   *  including the ones no event fires for. `requestAnimationFrame` defers the
+   *  call by a frame so it measures the box after the browser has laid it out
+   *  rather than during the transition into it.
+   */
+  useEffect(() => {
+    // Deliberately not gated on `ready`. `ready` means the style finished
+    // loading, and a map whose tiles are blocked or slow still has a canvas
+    // sitting in a box that can change size — gating on it is how this came
+    // back the first time it was fixed.
+    if (!container.current) return
+    const el = container.current
+    let frame = 0
+    const resize = () => {
+      // Twice, on purpose. The immediate call handles the common case and
+      // works in a background tab, where `requestAnimationFrame` is throttled
+      // to never — a console left on a second monitor and brought forward is
+      // exactly the case a deferred-only resize gets wrong. The deferred call
+      // then measures again after the browser has finished laying the new box
+      // out, which the immediate one is a frame too early for.
+      map.current?.resize()
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => map.current?.resize())
+    }
+    const observer = new ResizeObserver(resize)
+    observer.observe(el)
+    // The observer fires on its own for the element, but a monitor change or a
+    // devtools dock can move the page without changing this box's size.
+    window.addEventListener("resize", resize)
+    resize()
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener("resize", resize)
+    }
+  }, [])
+
   if (failed) {
     return (
       <div className={`bg-muted/30 flex items-center justify-center rounded-lg border p-6 text-center text-sm ${className ?? "h-[520px]"}`}>

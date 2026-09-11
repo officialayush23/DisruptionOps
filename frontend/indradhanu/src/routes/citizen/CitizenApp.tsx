@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  AlertTriangle, Compass, Droplets, Hospital, Loader2, Mic, Navigation,
-  Pill, Send, ShieldCheck, Siren, Square, Utensils,
+  AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass,
+  Droplets, Hospital, Loader2, Mic, Navigation, Pill, Send, ShieldCheck,
+  Siren, Square, Utensils, WifiOff,
 } from "lucide-react"
-import { request } from "@/api/httpClient"
+import { apiBaseUrl, request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
 import { MapStage } from "@/components/map/MapStage"
 import { OfflineBar } from "@/components/common/OfflineBar"
+import { DemoCredentials } from "@/auth/DemoCredentials"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -64,6 +66,88 @@ type Guidance = {
 const STEP = 0.0035
 const ALANDI: [number, number] = [73.8989, 18.6773]
 
+/** Metres between two lng/lat pairs. Equirectangular rather than haversine:
+ *  over the few kilometres a person walks it agrees to well under a metre, and
+ *  this runs on every position change. */
+function metres(a: [number, number], b: [number, number]): number {
+  const R = 6371000
+  const la = (a[1] * Math.PI) / 180
+  const lb = (b[1] * Math.PI) / 180
+  const x = ((b[0] - a[0]) * Math.PI) / 180 * Math.cos((la + lb) / 2)
+  const y = lb - la
+  return Math.sqrt(x * x + y * y) * R
+}
+
+/** Where along the route this person actually is.
+ *
+ *  Returns how far they have travelled measured along the line, and how far
+ *  they are from it. The second number is the one that matters: a route is only
+ *  advice, and somebody who has walked around a flooded corner is not lost, but
+ *  somebody 300 metres off it is being given directions for a street they are
+ *  not on, which is worse than no directions.
+ */
+function progressAlong(route: number[][], at: [number, number]) {
+  if (!route || route.length < 2) return { travelled: 0, offBy: 0, total: 0 }
+  let total = 0
+  let travelled = 0
+  let offBy = Infinity
+  let running = 0
+  for (let i = 0; i < route.length - 1; i++) {
+    const a = route[i] as [number, number]
+    const b = route[i + 1] as [number, number]
+    const segment = metres(a, b)
+    // Project onto the segment in flat lng/lat, which is fine at this scale.
+    const dx = b[0] - a[0]
+    const dy = b[1] - a[1]
+    const len2 = dx * dx + dy * dy
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1,
+      ((at[0] - a[0]) * dx + (at[1] - a[1]) * dy) / len2))
+    const foot: [number, number] = [a[0] + t * dx, a[1] + t * dy]
+    const d = metres(at, foot)
+    if (d < offBy) {
+      offBy = d
+      travelled = running + segment * t
+    }
+    running += segment
+    total += segment
+  }
+  return { travelled, offBy, total }
+}
+
+/** Which instruction applies right now, and how far until the next one.
+ *
+ *  The steps carry a distance each and no coordinates, so the position is
+ *  matched to them by walking the cumulative distances rather than by looking
+ *  for the nearest turn. That is also the honest reading of the data: a step
+ *  says "in 240 m, turn left", and 240 m along the line is exactly where that
+ *  stops being true.
+ */
+function currentStep(
+  steps: { instruction: string; street: string; distanceM: number }[],
+  travelled: number
+) {
+  if (!steps?.length) return null
+  let acc = 0
+  for (let i = 0; i < steps.length; i++) {
+    const end = acc + steps[i].distanceM
+    if (travelled < end || i === steps.length - 1) {
+      return {
+        index: i,
+        step: steps[i],
+        next: steps[i + 1] ?? null,
+        toNextM: Math.max(0, Math.round(end - travelled)),
+        remaining: steps.length - i - 1,
+      }
+    }
+    acc = end
+  }
+  return null
+}
+
+function readable(m: number) {
+  return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m / 10) * 10} m`
+}
+
 export default function CitizenApp() {
   const [pos, setPos] = useState<{ lng: number; lat: number }>({ lng: ALANDI[0], lat: ALANDI[1] })
   const [state, setState] = useState<State | null>(null)
@@ -76,15 +160,48 @@ export default function CitizenApp() {
   const [filed, setFiled] = useState<Record<string, unknown> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [gpsNote, setGpsNote] = useState<string | null>(null)
+  /** Set when the API cannot be reached at all, as opposed to refusing us.
+   *  Distinct from `error` because the remedy is different and a resident being
+   *  told "failed to fetch" learns nothing. */
+  const [unreachable, setUnreachable] = useState(false)
+  /** Alert ids already shown, so a new one can announce itself rather than
+   *  appearing silently at the top of a page nobody is looking at. */
+  const seenAlerts = useRef<Set<string>>(new Set())
+  const [newAlert, setNewAlert] = useState<string | null>(null)
+  /** Turn-by-turn is on only when the person asked to go somewhere. */
+  const [navOn, setNavOn] = useState(false)
 
   const load = useCallback(async (p: { lng: number; lat: number }) => {
     try {
-      setState(await request<State>("/citizen/state", {
+      const next = await request<State>("/citizen/state", {
         query: { lng: p.lng, lat: p.lat, cityId: "pune" },
-      }))
+      })
+      setState(next)
+      setUnreachable(false)
       setError(null)
+
+      // Anything new since the last poll announces itself. A resident is not
+      // watching this screen; the whole reason an alert exists is that
+      // something changed while they were doing something else.
+      const fresh = (next.alerts ?? []).find((a) => !seenAlerts.current.has(a.id))
+      ;(next.alerts ?? []).forEach((a) => seenAlerts.current.add(a.id))
+      if (fresh) {
+        setNewAlert(fresh.headline)
+        try {
+          navigator.vibrate?.([120, 60, 120])
+          if ("Notification" in window && Notification.permission === "granted") {
+            new Notification(fresh.headline, { body: fresh.action, tag: fresh.id })
+          }
+        } catch { /* a browser that will not buzz is not an error worth showing */ }
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const message = e instanceof Error ? e.message : String(e)
+      // `TypeError: Failed to fetch` is what a browser says when nothing
+      // answered. It is the most common state during development and the least
+      // informative message in it.
+      const dead = /failed to fetch|networkerror|load failed/i.test(message)
+      setUnreachable(dead)
+      setError(dead ? null : message)
     }
   }, [])
 
@@ -103,6 +220,14 @@ export default function CitizenApp() {
       () => setGpsNote("Location is off, so the map is starting in Alandi. Arrow keys move you."),
       { enableHighAccuracy: true, timeout: 8000 }
     )
+  }, [])
+
+  // Asked once, quietly. Declining is fine: the banner above still appears,
+  // it just will not reach them on a locked phone.
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      void Notification.requestPermission().catch(() => {})
+    }
   }, [])
 
   useEffect(() => {
@@ -191,10 +316,12 @@ export default function CitizenApp() {
   async function ask(intent: string, condition?: string) {
     setBusy(intent)
     try {
-      setGuide(await request<Guidance>("/citizen/guide", {
+      const g = await request<Guidance>("/citizen/guide", {
         method: "POST",
         body: { lng: pos.lng, lat: pos.lat, intent, condition, cityId: "pune" },
-      }))
+      })
+      setGuide(g)
+      setNavOn(Boolean(g.shouldMove && g.route?.length))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally { setBusy(null) }
@@ -202,6 +329,26 @@ export default function CitizenApp() {
 
   async function fileReport() {
     if (!text.trim()) return
+    // The button used to be disabled whenever `state.inside` was not true,
+    // which meant it was also dead whenever `state` was null — that is, every
+    // time the API was unreachable, with nothing on screen saying so. A button
+    // that cannot be pressed cannot explain itself, so it is pressable now and
+    // the refusal is a sentence instead.
+    if (!state) {
+      setError(
+        "Your report has not been sent: this app cannot reach the server yet. " +
+        "Your text is still here — try again in a moment."
+      )
+      return
+    }
+    if (!state.inside) {
+      setError(
+        state.note ||
+        "You are outside the area this deployment covers, so there is no ward " +
+        "to file this against. Move the marker into the city, or call 112."
+      )
+      return
+    }
     setBusy("report")
     try {
       const r = await request<Record<string, unknown>>("/citizen/report", {
@@ -216,6 +363,27 @@ export default function CitizenApp() {
   }
 
   const sev = state?.risk?.severity ?? 0
+
+  /** Recomputed on every position change, which is what makes it navigation
+   *  rather than a printed list of directions. */
+  const nav = (() => {
+    if (!navOn || !guide?.route?.length || !guide.routeSteps?.length) return null
+    const { travelled, offBy, total } = progressAlong(guide.route, [pos.lng, pos.lat])
+    const cur = currentStep(guide.routeSteps, travelled)
+    if (!cur) return null
+    return {
+      ...cur,
+      offBy: Math.round(offBy),
+      remainingM: Math.max(0, Math.round(total - travelled)),
+      arrived: total - travelled < 40,
+      strayed: offBy > 120,
+    }
+  })()
+
+  /** One step of movement, shared by the keyboard and the on-screen pad. */
+  const nudge = useCallback((dx: number, dy: number) => {
+    setPos((p) => ({ lng: p.lng + dx * STEP, lat: p.lat + dy * STEP }))
+  }, [])
 
   return (
     <div className="mx-auto max-w-6xl space-y-3 p-4">
@@ -243,6 +411,37 @@ export default function CitizenApp() {
       )}
       {error && (
         <Alert variant="destructive"><AlertDescription className="text-xs">{error}</AlertDescription></Alert>
+      )}
+
+      {/* Nothing answered. Said plainly, with the address it tried, because the
+          person who most often sees this is the one who can start the server. */}
+      {unreachable && (
+        <Alert variant="destructive">
+          <WifiOff className="size-4" />
+          <AlertDescription className="text-xs">
+            Cannot reach the service at <code>{apiBaseUrl}</code>. The map and
+            your reports will not update until it answers. Nothing you type is
+            lost — it stays in the box and sends when the connection is back.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* A new alert, announced. Dismissible, because it has been read by the
+          time somebody is deciding to close it. */}
+      {newAlert && (
+        <Alert variant="destructive" className="border-2">
+          <Siren className="size-4 animate-pulse" />
+          <AlertDescription className="flex items-start justify-between gap-3">
+            <span className="text-sm font-medium">{newAlert}</span>
+            <button
+              type="button"
+              className="shrink-0 text-xs underline"
+              onClick={() => setNewAlert(null)}
+            >
+              Dismiss
+            </button>
+          </AlertDescription>
+        </Alert>
       )}
 
       {state?.alerts?.[0] && (
@@ -293,12 +492,45 @@ export default function CitizenApp() {
               />
             )}
             footer={
-              <p className="text-muted-foreground text-xs">
-                Arrow keys or WASD move you. The green line is the route the
-                agent recommends, on real streets, chosen against every hazard
-                that has been reported rather than for being shortest. Open the
-                legend for what the colours mean.
-              </p>
+              /* The keys have always worked. They were also invisible, needed a
+                 focused window, and did nothing at all on a phone — which is
+                 the device this screen is for. Buttons, then, with the keys
+                 kept for anyone at a desk. */
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="grid w-[132px] shrink-0 grid-cols-3 gap-1">
+                  <span />
+                  <Button size="icon" variant="secondary" aria-label="Move north"
+                          className="size-10" onClick={() => nudge(0, 1)}>
+                    <ChevronUp className="size-5" />
+                  </Button>
+                  <span />
+                  <Button size="icon" variant="secondary" aria-label="Move west"
+                          className="size-10" onClick={() => nudge(-1, 0)}>
+                    <ChevronLeft className="size-5" />
+                  </Button>
+                  <Button size="icon" variant="outline" aria-label="Recentre on me"
+                          className="size-10"
+                          onClick={() => setPos((pp) => ({ ...pp }))}>
+                    <Navigation className="size-4" />
+                  </Button>
+                  <Button size="icon" variant="secondary" aria-label="Move east"
+                          className="size-10" onClick={() => nudge(1, 0)}>
+                    <ChevronRight className="size-5" />
+                  </Button>
+                  <span />
+                  <Button size="icon" variant="secondary" aria-label="Move south"
+                          className="size-10" onClick={() => nudge(0, -1)}>
+                    <ChevronDown className="size-5" />
+                  </Button>
+                  <span />
+                </div>
+                <p className="text-muted-foreground min-w-[220px] flex-1 text-xs">
+                  These buttons, or WASD and the arrow keys, move you. The green
+                  line is the route the agent recommends, on real streets, chosen
+                  against every hazard that has been reported rather than for
+                  being shortest. Open the legend for what the colours mean.
+                </p>
+              </div>
             }
           />
         </div>
@@ -351,6 +583,57 @@ export default function CitizenApp() {
                   Medicine
                 </Button>
               </div>
+
+              {/* Turn by turn, as you move.
+                  The static list is still below, because a person wants to see
+                  the whole way before they set off. This is the one instruction
+                  that is true right now, in the size you can read while
+                  walking, and it changes as the position does. */}
+              {nav && (
+                <div className="space-y-2 rounded-lg border-2 border-emerald-500/50 bg-emerald-500/5 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Badge variant="secondary" className="gap-1">
+                      <Navigation className="size-3" /> Navigating
+                    </Badge>
+                    <button type="button" className="text-muted-foreground text-xs underline"
+                            onClick={() => setNavOn(false)}>
+                      Stop
+                    </button>
+                  </div>
+
+                  {nav.arrived ? (
+                    <p className="text-base font-semibold">
+                      You have arrived at {guide?.destination?.name ?? "your destination"}.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="text-2xl font-semibold tabular-nums leading-tight">
+                        {readable(nav.toNextM)}
+                      </div>
+                      <p className="text-base leading-snug">{nav.step.instruction}</p>
+                      {nav.next && (
+                        <p className="text-muted-foreground text-xs">
+                          Then: {nav.next.instruction}
+                        </p>
+                      )}
+                      <p className="text-muted-foreground text-xs tabular-nums">
+                        {readable(nav.remainingM)} left · {nav.remaining} turn(s) to go
+                      </p>
+                    </>
+                  )}
+
+                  {/* Being off the line is not a failure, but it does mean the
+                      instruction above is about a street you are not on. */}
+                  {nav.strayed && !nav.arrived && (
+                    <Alert variant="destructive" className="py-2">
+                      <AlertDescription className="text-xs">
+                        You are about {readable(nav.offBy)} off this route. Ask
+                        again to get one from where you are now.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </div>
+              )}
 
               {guide && (
                 <div className="space-y-2 rounded border p-2">
@@ -469,10 +752,16 @@ export default function CitizenApp() {
                 rows={3}
               />
               <Button className="w-full" onClick={fileReport}
-                      disabled={busy !== null || !text.trim() || !state?.inside}>
+                      disabled={busy !== null || !text.trim()}>
                 {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
                 Send report
               </Button>
+              {state && !state.inside && (
+                <p className="text-muted-foreground text-xs">
+                  You are outside the covered area, so this will be refused
+                  until you move inside it. Pressing send will say so.
+                </p>
+              )}
               {filed && (
                 <div className="space-y-1 rounded border p-2 text-xs">
                   <div className="font-medium">{String(filed.readHow ?? "")}</div>
@@ -490,6 +779,14 @@ export default function CitizenApp() {
               )}
             </CardContent>
           </Card>
+
+          {/* The resident account, on the resident's screen. Nothing here
+              requires an account, so this is for the person being handed a
+              tablet who wants the signed-in version with a report history. */}
+          <DemoCredentials
+            portal="citizen"
+            title="Demo resident sign-in (optional)"
+          />
 
           {state?.risk && (
             <Card>

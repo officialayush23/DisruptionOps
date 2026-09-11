@@ -10,6 +10,9 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  DEMO_ENABLED, DEMO_PASSWORD, LANDING, identitiesFor, portalOf,
+} from "@/auth/demoIdentities"
 
 /** Three ways in, because there are three kinds of person.
  *
@@ -26,56 +29,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
  *  ward officer and to a commissioner, and that difference is the product.
  */
 
-/** Seeded by migration `pune_demo_accounts`. Throwaway, and documented as such:
- *  these are deleted before anything resembling production. */
-const DEMO = [
-  {
-    email: "commissioner@pune.indradhanu.local",
-    label: "Commissioner", who: "Meera Deshpande",
-    can: "Authorises evacuations and NDRF requests. Can create logins.",
-    tone: "border-violet-500/40",
-  },
-  {
-    email: "officer@pune.indradhanu.local",
-    label: "Ward officer", who: "Rahul Kulkarni",
-    can: "The whole console. Approves what the gate holds back.",
-    tone: "border-sky-500/40",
-  },
-  {
-    email: "fire@pune.indradhanu.local",
-    label: "Field — Fire Brigade", who: "Sana Shaikh",
-    can: "Only Fire Brigade units and tasks.",
-    tone: "border-orange-500/40",
-  },
-  {
-    email: "pmc@pune.indradhanu.local",
-    label: "Field — PMC Drainage", who: "Vikram Jadhav",
-    can: "Only PMC Drainage units and tasks.",
-    tone: "border-teal-500/40",
-  },
-  {
-    email: "citizen@pune.indradhanu.local",
-    label: "Resident", who: "Anita Joshi",
-    can: "The public view, with a signed-in reporting history.",
-    tone: "border-slate-500/40",
-  },
-]
-
-const DEMO_PASSWORD = "Indradhanu#2026"
-
-const LANDING: Record<string, string> = {
-  commissioner: "/admin/console",
-  ward_officer: "/admin/console",
-  admin: "/admin/console",
-  field_operator: "/field",
-  citizen: "/citizen",
-}
 
 export default function Login() {
   const { signIn, signUp, configured, me } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string } | null)?.from
+  /** Which portal they were trying to reach. A person bounced here from
+   *  /admin/copilot wants the two accounts that can open it, not all five. */
+  const portal = portalOf(from)
+  const shown = identitiesFor(portal)
 
   const [mode, setMode] = useState<"in" | "up">("in")
   const [email, setEmail] = useState("")
@@ -128,6 +91,14 @@ export default function Login() {
    *  that exists only to be clicked through. */
   async function useIdentity(demoEmail: string) {
     setError(null); setNotice(null)
+    if (!DEMO_PASSWORD) {
+      setError(
+        "This build has demo identities switched on but no VITE_DEMO_PASSWORD " +
+        "set, so there is nothing to sign in with. Set it in .env.local, or " +
+        "set VITE_DEMO_LOGINS=false to hide these."
+      )
+      return
+    }
     setEmail(demoEmail); setPassword(DEMO_PASSWORD)
     setBusy(demoEmail)
     try {
@@ -139,11 +110,12 @@ export default function Login() {
         )
         return
       }
+      // The role comes from the identity we clicked, not from parsing its
+      // email. Two accounts share the field_operator role and neither address
+      // begins with it.
       const role =
-        demoEmail.startsWith("commissioner") ? "commissioner"
-        : demoEmail.startsWith("officer") ? "ward_officer"
-        : demoEmail.startsWith("citizen") ? "citizen"
-        : "field_operator"
+        identitiesFor(portal).find((d) => d.email === demoEmail)?.role ??
+        "citizen"
       setTimeout(() => navigate(landing(role), { replace: true }), 120)
     } finally { setBusy(null) }
   }
@@ -189,7 +161,7 @@ export default function Login() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={`grid gap-4 ${DEMO_ENABLED ? "lg:grid-cols-2" : ""}`}>
         <Card>
           <CardHeader className="pb-3">
             <div className="flex gap-1">
@@ -271,18 +243,25 @@ export default function Login() {
           </CardContent>
         </Card>
 
+        {DEMO_ENABLED && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">Try an identity</CardTitle>
+            <CardTitle className="text-base">
+              {portal === "field" ? "Crew identities"
+                : portal === "citizen" ? "Resident identity"
+                : "Try an identity"}
+            </CardTitle>
             <CardDescription className="text-xs">
-              One click signs you straight in. Worth trying more than one: the
-              same system looks different to each of them, and that difference —
-              what a ward officer may authorise and a crew may not — is the point
-              rather than a login demo.
+              {from
+                ? `These are the accounts that can open ${from}. One click signs you straight in.`
+                : "One click signs you straight in. Worth trying more than one: " +
+                  "the same system looks different to each of them, and that " +
+                  "difference — what a ward officer may authorise and a crew " +
+                  "may not — is the point rather than a login demo."}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-1.5">
-            {DEMO.map((d) => (
+            {shown.map((d) => (
               <button
                 key={d.email}
                 type="button"
@@ -305,11 +284,13 @@ export default function Login() {
               </button>
             ))}
             <p className="text-muted-foreground pt-1 text-[11px]">
-              Shared password <code>{DEMO_PASSWORD}</code>. These are throwaway
-              accounts for the demo and are deleted before any real deployment.
+              Or type them: the address above, with the password{" "}
+              <code className="text-foreground">{DEMO_PASSWORD}</code>. Seeded
+              demo accounts, compiled out of a production build.
             </p>
           </CardContent>
         </Card>
+        )}
       </div>
 
       <p className="text-muted-foreground text-center text-xs">

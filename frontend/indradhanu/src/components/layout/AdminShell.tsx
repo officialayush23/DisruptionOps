@@ -1,6 +1,7 @@
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
+  BrainCircuit,
   ClipboardCheck,
   Gauge,
   Handshake,
@@ -35,6 +36,7 @@ import { DemoProvider, useDemo } from "@/routes/demo/DemoProvider"
 
 const NAV = [
   { to: "/admin/console", label: "Command console", icon: Radar },
+  { to: "/admin/copilot", label: "Copilot", icon: BrainCircuit },
   { to: "/admin/intake", label: "Intake inbox", icon: Inbox },
   { to: "/admin/risk", label: "Risk board", icon: Gauge },
   { to: "/admin/forecast", label: "Forecast", icon: TrendingUp },

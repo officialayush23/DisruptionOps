@@ -17,7 +17,7 @@ export function RequireRole({
   children: ReactNode
   need: "staff" | "field" | "citizen" | "commissioner"
 }) {
-  const { me, loading } = useAuth()
+  const { me, loading, session, entitlementUnavailable } = useAuth()
   const loc = useLocation()
 
   if (loading) {
@@ -35,6 +35,29 @@ export function RequireRole({
     (need === "field" && (me.isStaff || me.role === "field_operator"))
 
   if (!ok) {
+    /* Signed in, and we cannot find out what that entitles them to.
+     *
+     *  This used to fall through to the redirect below, which sent somebody who
+     *  had just signed in successfully back to the login screen with no message
+     *  — indistinguishable from a rejected password, and the natural response is
+     *  to type it again, which also appears to fail. The cause is almost always
+     *  a stopped API, and saying so is the whole fix. */
+    if (session && entitlementUnavailable) {
+      return (
+        <div className="flex min-h-svh flex-col items-center justify-center gap-2 p-6 text-center">
+          <p className="font-medium">You are signed in, but this screen cannot open yet.</p>
+          <p className="text-muted-foreground max-w-md text-sm">
+            Your sign-in worked. What it entitles you to is decided by the API,
+            and the API is not answering, so this view cannot know whether to
+            show you anything. It will open as soon as the service is back —
+            nothing is wrong with your account.
+          </p>
+          <p className="text-muted-foreground max-w-md text-xs">
+            If this is your own machine: start the backend, then reload.
+          </p>
+        </div>
+      )
+    }
     if (!me.authenticated) {
       return <Navigate to="/login" state={{ from: loc.pathname }} replace />
     }

@@ -1,4 +1,5 @@
-import { useSystemStatus } from "@/hooks/useApi"
+import { useEffect, useState } from "react"
+import { request } from "@/api/httpClient"
 import { cn } from "@/lib/utils"
 import {
   Tooltip,
@@ -12,13 +13,37 @@ const STATE_COLOR: Record<string, string> = {
   down: "bg-sev-5",
 }
 
+/** One feed the backend polls, as `GET /api/v1/status` returns it. */
+type Feed = { id: string; label: string; state: string; detail: string }
+type SystemStatus = { feeds: Feed[] }
+
+/** `@/hooks/useApi` was removed in an earlier cleanup and this file kept
+ *  importing it, so nothing here has compiled since. The hook was three lines;
+ *  it lives here now rather than in a shared module with one caller. */
+function useSystemStatus() {
+  const [data, setData] = useState<SystemStatus | null>(null)
+  useEffect(() => {
+    let alive = true
+    const poll = () =>
+      request<SystemStatus>("/status")
+        .then((d) => { if (alive) setData(d) })
+        // A strip that cannot say what the feeds are doing shows nothing,
+        // rather than a row claiming everything is down.
+        .catch(() => { if (alive) setData(null) })
+    void poll()
+    const id = setInterval(poll, 30000)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+  return { data }
+}
+
 export function StatusStrip() {
   const { data } = useSystemStatus()
   if (!data) return null
 
   return (
     <div className="space-y-1 px-2 py-1">
-      {data.feeds.map((f) => (
+      {data.feeds.map((f: Feed) => (
         <Tooltip key={f.id}>
           <TooltipTrigger asChild>
             <div className="flex items-center gap-2 text-xs">

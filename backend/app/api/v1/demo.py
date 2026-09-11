@@ -19,6 +19,7 @@ from pydantic import Field
 from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
+from app.copilot import execute
 from app.demo import runner
 from app.agents import forecast as forecasting
 from app.incidents import duplicates
@@ -68,10 +69,11 @@ async def demo_reset(body: StartIn, _: StaffPrincipal) -> dict:
     """Stop the run and put the world back to its opening position.
 
     Destructive on purpose and only over the *live* run: archived simulation
-    runs are somebody's saved scenario and are left where they are. The caches
-    below hold rows that no longer exist a moment after this returns, so they
-    go with it — otherwise the console spends the next twelve seconds drawing a
-    forecast of incidents it has just deleted.
+    runs are somebody's saved scenario and are left where they are, and the
+    audit log is append-only and keeps everything — reset marks it rather than
+    empties it. The caches below hold rows that no longer exist a moment after
+    this returns, so they go with it; otherwise the console spends the next
+    twelve seconds drawing a forecast of incidents it has just deleted.
     """
     cleared = await runner.reset(city_id=body.city_id)
     invalidate_slow()
@@ -154,7 +156,25 @@ async def demo_decide(decision_id: str, action: str, principal: StaffPrincipal) 
     )
     runner.state.beat("decision", f"Officer {status} “{row['action']}”.")
     runner.state.dirty = True
-    return {"id": decision_id, "status": status}
+
+    # Approval used to be the end of it, which meant a decision saying "move
+    # Ambulance 4 to Kothrud" left the ambulance where it was. If the decision
+    # carries the parameters to carry it out, carrying it out is what approval
+    # now means. A failure here does not un-approve the decision: the officer
+    # decided, and the mechanics failing is a separate fact, reported as one.
+    carried: dict | None = None
+    if status == "approved":
+        try:
+            carried = await execute.apply_decision(
+                decision_id, actor=principal.full_name or "Officer"
+            )
+        except execute.NotExecutable as exc:
+            carried = {"note": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            carried = {"note": f"Approved, but could not be carried out: {exc}"}
+        invalidate_slow()
+
+    return {"id": decision_id, "status": status, "carriedOut": carried}
 
 
 #: Duplicate detection is two joins over assignments and a self-join over
@@ -402,12 +422,23 @@ select id::text, action, target, ward_id, rationale, confidence,
  limit 25
 """
 
+#: Everything since the world was last reset.
+#:
+#: `events` is append-only and the database refuses to delete from it, which is
+#: the right answer for an audit log and the wrong answer for a console that has
+#: just been reset. So reset appends a `world.reset` mark and this reads forward
+#: from the latest one: the log keeps every run, the console shows this one.
 _EVENTS_SQL = """
-select id, kind, actor, subject_type, subject_id, ward_id, payload,
-       occurred_at, causation_id
-  from events
- where sim_run_id is null and id > $1
- order by id desc limit 150
+with mark as (
+  select coalesce(max(id), 0) id
+    from events
+   where sim_run_id is null and kind = 'world.reset'
+)
+select e.id, e.kind, e.actor, e.subject_type, e.subject_id, e.ward_id, e.payload,
+       e.occurred_at, e.causation_id
+  from events e, mark
+ where e.sim_run_id is null and e.id > greatest($1, mark.id)
+ order by e.id desc limit 150
 """
 
 #: Every lifeline kind, not a hardcoded three. The kinds are rows in

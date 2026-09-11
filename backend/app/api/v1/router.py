@@ -8,6 +8,7 @@ from app.api.v1 import (
     auth,
     config,
     citizen,
+    copilot,
     demo,
     geography,
     operations,
@@ -35,3 +36,4 @@ api_router.include_router(risk.router)
 api_router.include_router(operations.router)
 api_router.include_router(citizen.router)
 api_router.include_router(config.router)
+api_router.include_router(copilot.router)

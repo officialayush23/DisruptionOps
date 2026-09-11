@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
+import { DemoCredentials } from "@/auth/DemoCredentials"
 
 /** The crew's interface.
  *
@@ -120,6 +121,11 @@ export default function FieldApp() {
         </div>
         <a href="/login" className="text-muted-foreground text-xs underline">Sign in</a>
       </div>
+
+      {/* The two crew accounts, on the crew screen. The point of the demo is
+          that Fire Brigade and PMC Drainage see different units, and switching
+          between them is how anyone sees that. */}
+      <DemoCredentials portal="field" title="Demo crew sign-ins" />
 
       {error && (
         <Alert variant="destructive">

@@ -40,6 +40,12 @@ type AuthState = {
   me: Me
   loading: boolean
   configured: boolean
+  /** Supabase says this person is signed in, but `/auth/me` could not be
+   *  reached, so we do not know what they may do. Distinct from being signed
+   *  out, and the guard must not treat the two the same: bouncing somebody
+   *  back to a login screen they just used correctly reads as "wrong
+   *  password", and they will type it again. */
+  entitlementUnavailable: boolean
   signIn: (email: string, password: string) => Promise<{ error: string | null }>
   signUp: (
     email: string,
@@ -56,11 +62,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [me, setMe] = useState<Me>(ANONYMOUS)
   const [loading, setLoading] = useState(true)
+  const [entitlementUnavailable, setEntitlementUnavailable] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
       setMe(await fetchMe())
+      setEntitlementUnavailable(false)
     } catch (err) {
+      setEntitlementUnavailable(true)
       // The backend being unreachable is not the same as being signed out. Stay
       // anonymous for rendering, but do not throw the user back to a login
       // screen for what is probably a stopped uvicorn.
@@ -131,6 +140,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (supabaseConfigured) await supabase.auth.signOut()
     setSession(null)
     setMe(ANONYMOUS)
+    setEntitlementUnavailable(false)
   }, [])
 
   const value = useMemo<AuthState>(
@@ -139,12 +149,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       me,
       loading,
       configured: supabaseConfigured,
+      entitlementUnavailable,
       signIn,
       signUp,
       signOut,
       refresh,
     }),
-    [session, me, loading, signIn, signUp, signOut, refresh]
+    [session, me, loading, entitlementUnavailable, signIn, signUp, signOut, refresh]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

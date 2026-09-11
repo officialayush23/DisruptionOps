@@ -49,9 +49,17 @@ async def propose(
     clock: clocks.Clock = clocks.WALL,
     actor: str = "agent:policy_retriever",
     caused_by: int | None = None,
+    params: dict | None = None,
     conn: Any | None = None,
 ) -> dict:
-    """Record a proposed action, gated. Returns the decision as the API shows it."""
+    """Record a proposed action, gated. Returns the decision as the API shows it.
+
+    `params` is what the action would need in order to be carried out — which
+    unit, which incident, which ward. It is stored with the decision rather than
+    re-derived at approval time, because a decision approved twenty minutes
+    later must move the unit it named, not whichever unit the world would
+    nominate now.
+    """
     authority = await policy.authority_for(action_key, severity)
     status = policy.gate(authority, confidence)
     reason = policy.gate_reason(authority, confidence)
@@ -62,15 +70,15 @@ async def propose(
             """
             insert into decisions
               (hazard, action_key, action, target, ward_id, rationale,
-               confidence, authority, status, sim_run_id, created_at)
-            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,$11)
+               confidence, authority, status, sim_run_id, created_at, params)
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid,$11,$12)
             returning id::text
             """,
             hazard, action_key, action, target, ward_id,
             f"{rationale} {reason}",
             round(float(confidence), 4),
             authority.model_dump(),
-            status.value, clock.sim_run_id, now,
+            status.value, clock.sim_run_id, now, params or {},
         )
         decision_id = row["id"]
 
@@ -103,6 +111,7 @@ async def propose(
 
         return {
             "id": decision_id,
+            "params": params or {},
             "action": action,
             "actionKey": action_key,
             "target": target,

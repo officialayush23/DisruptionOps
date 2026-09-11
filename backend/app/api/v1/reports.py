@@ -570,3 +570,117 @@ async def simulate_reports(
             for r in results
         ],
     }
+
+
+# ------------------------------------------------------- the feedback loop ---
+class VerdictIn(Camel):
+    """What actually turned out to be there."""
+
+    outcome: str = Field(pattern="^(confirmed|false)$")
+    note: str = ""
+    #: Apply the same verdict to every report that merged into this incident,
+    #: which is usually what an officer means when they close one.
+    whole_incident: bool = False
+
+
+@router.post("/reports/{report_id}/verdict")
+async def record_verdict(
+    report_id: str, body: VerdictIn, principal: StaffPrincipal
+) -> dict:
+    """Record that somebody found out whether a report was real.
+
+    This is the only ground truth this system will ever have, and until now it
+    was being thrown away. `reporter_reliability` fed the trust score, and the
+    only thing that had ever written to it was the trust score — a reporter was
+    trusted because the scorer had trusted them before. That is the model
+    agreeing with itself, and over a long run it hardens its first impression of
+    somebody into a fact.
+
+    A verdict here overrides the automatic status for that row, so the loop
+    starts correcting immediately rather than after the hundredth verdict.
+    Deliberately staff-only and deliberately attributed: "who said this was
+    false" is the first question anybody will ask of a reporter whose reports
+    stop being believed.
+    """
+    row = await db.fetchrow(
+        "select id::text, incident_id::text incident_id, reporter_id::text reporter_id "
+        "from citizen_reports where id = $1::uuid",
+        report_id,
+    )
+    if row is None:
+        raise NotFound("No such report.")
+
+    who = principal.full_name or str(principal.role)
+    if body.whole_incident and row["incident_id"]:
+        updated = await db.execute(
+            """
+            update citizen_reports
+               set outcome = $2, outcome_note = $3, outcome_by = $4, outcome_at = now()
+             where incident_id = $1::uuid
+            """,
+            row["incident_id"], body.outcome, body.note or None, who,
+        )
+    else:
+        updated = await db.execute(
+            """
+            update citizen_reports
+               set outcome = $2, outcome_note = $3, outcome_by = $4, outcome_at = now()
+             where id = $1::uuid
+            """,
+            report_id, body.outcome, body.note or None, who,
+        )
+
+    await ev.append(
+        clock=clocks.WALL,
+        kind=ev.Kind.REPORT_LINKED if body.outcome == "confirmed" else ev.Kind.REPORT_REJECTED,
+        actor=ev.officer(who),
+        subject_type="report", subject_id=report_id,
+        payload={"outcome": body.outcome, "note": body.note,
+                 "whole_incident": body.whole_incident,
+                 "incident_id": row["incident_id"]},
+    )
+
+    reliability = None
+    if row["reporter_id"]:
+        reliability = await db.fetchrow(
+            "select total, confirmed, rejected, human_verdicts, reliability "
+            "from reporter_reliability where reporter_id = $1::uuid",
+            row["reporter_id"],
+        )
+    return {
+        "reportId": report_id,
+        "outcome": body.outcome,
+        "applied": updated,
+        "reporter": dict(reliability) if reliability else None,
+        "note": (
+            "Recorded. This changes what future reports from the same person are "
+            "worth, and nothing about the incidents already open."
+        ),
+    }
+
+
+@router.get("/reporters/reliability")
+async def reporter_reliability(_: StaffPrincipal, limit: int = Query(default=25, le=200)) -> list[dict]:
+    """Who has been right, and how much of that is actual ground truth.
+
+    `humanVerdicts` is the honesty column: a reliability of 0.9 built entirely
+    out of the scorer's own opinion is a different number from one built out of
+    twenty officer verdicts, and the screen should not show them identically.
+    """
+    rows = await db.fetch(
+        """
+        select r.reporter_id::text reporter_id, r.total, r.confirmed, r.rejected,
+               r.human_verdicts, r.reliability, p.full_name
+          from reporter_reliability r
+          left join profiles p on p.id = r.reporter_id
+         order by r.total desc limit $1
+        """,
+        int(limit),
+    )
+    return [
+        {"reporterId": r["reporter_id"], "name": r["full_name"] or "—",
+         "total": r["total"], "confirmed": r["confirmed"], "rejected": r["rejected"],
+         "humanVerdicts": r["human_verdicts"],
+         "reliability": float(r["reliability"]) if r["reliability"] is not None else None}
+        for r in rows
+    ]

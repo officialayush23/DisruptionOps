@@ -4,6 +4,7 @@ import { RequireRole } from "@/auth/RequireRole"
 
 import Login from "@/routes/auth/Login"
 import DemoConsole from "@/routes/demo/DemoConsole"
+import Copilot from "@/routes/admin/Copilot"
 import CitizenApp from "@/routes/citizen/CitizenApp"
 import FieldApp from "@/routes/field/FieldApp"
 import IntakeInbox from "@/routes/admin/IntakeInbox"
@@ -53,6 +54,7 @@ export function App() {
             <AdminShell>
               <Routes>
                 <Route path="console" element={<DemoConsole />} />
+                <Route path="copilot" element={<Copilot />} />
                 <Route path="intake" element={<IntakeInbox />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="forecast" element={<Forecast />} />
