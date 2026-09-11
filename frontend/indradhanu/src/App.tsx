@@ -19,6 +19,7 @@ import AgentTrace from "@/routes/admin/AgentTrace"
 import ResourcesPage from "@/routes/admin/ResourcesPage"
 import AlertsPage from "@/routes/admin/AlertsPage"
 import AfterAction from "@/routes/admin/AfterAction"
+import Replay from "@/routes/admin/Replay"
 
 /** Three interfaces, three URLs.
  *
@@ -66,6 +67,7 @@ export function App() {
                 <Route path="resources" element={<ResourcesPage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
+                <Route path="replay" element={<Replay />} />
                 <Route path="configuration" element={<Configuration />} />
                 {/* `live` and `demo` were two names for overlapping things.
                     One console now; both old paths land on it. */}

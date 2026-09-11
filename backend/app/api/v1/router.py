@@ -13,6 +13,7 @@ from app.api.v1 import (
     geography,
     operations,
     personas,
+    replay,
     reports,
     risk,
     runs,
@@ -37,3 +38,4 @@ api_router.include_router(operations.router)
 api_router.include_router(citizen.router)
 api_router.include_router(config.router)
 api_router.include_router(copilot.router)
+api_router.include_router(replay.router)

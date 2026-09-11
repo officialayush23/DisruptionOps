@@ -10,6 +10,7 @@ import {
   Radar,
   Radio,
   Route,
+  Rewind,
   Settings2,
   Siren,
   TrendingUp,
@@ -47,6 +48,7 @@ const NAV = [
   { to: "/admin/agent", label: "Agent trace", icon: Activity },
   { to: "/admin/resources", label: "Resources", icon: Truck },
   { to: "/admin/alerts", label: "Issued alerts", icon: Radio },
+  { to: "/admin/replay", label: "Replay", icon: Rewind },
   { to: "/admin/after-action", label: "After-action", icon: History },
   { to: "/admin/configuration", label: "Configuration", icon: Settings2 },
 ]
