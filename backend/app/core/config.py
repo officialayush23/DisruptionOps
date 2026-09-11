@@ -65,6 +65,21 @@ class Settings(BaseSettings):
     open_meteo_flood_url: str = "https://flood-api.open-meteo.com/v1/flood"
     open_meteo_air_url: str = "https://air-quality-api.open-meteo.com/v1/air-quality"
     osrm_url: str = "https://router.project-osrm.org"
+    #: Mapbox is the preferred router: the public OSRM demo server is rate
+    #: limited and refuses the Matrix sizes this needs, and Mapbox returns turn
+    #: instructions with street names, which is the difference between "go 2.1 km
+    #: north" and "left onto Karve Road". Same token the map already uses.
+    mapbox_token: str = ""
+    mapbox_directions_url: str = "https://api.mapbox.com/directions/v5/mapbox"
+    mapbox_matrix_url: str = "https://api.mapbox.com/directions-matrix/v1/mapbox"
+    #: Hugging Face Inference API, for the multilingual zero-shot classifier that
+    #: backs the report parser when its keyword pass is not confident.
+    hf_api_token: str = ""
+    hf_zero_shot_model: str = "joeddav/xlm-roberta-large-xnli"
+    #: Google Flood Hub, if a key is present. Without one the flood forecast
+    #: comes from GloFAS through Open-Meteo, which needs no key.
+    google_flood_hub_key: str = ""
+    google_flood_hub_url: str = "https://floodforecasting.googleapis.com/v1"
     nasa_firms_key: str = ""
     data_gov_in_key: str = ""
     feed_timeout_seconds: float = 12.0

@@ -4,10 +4,12 @@ import {
   ClipboardCheck,
   Gauge,
   History,
+  Inbox,
   Radar,
   Radio,
   Route,
   Siren,
+  TrendingUp,
   Truck,
 } from "lucide-react"
 import {
@@ -31,7 +33,9 @@ import { DemoProvider, useDemo } from "@/routes/demo/DemoProvider"
 
 const NAV = [
   { to: "/admin/console", label: "Command console", icon: Radar },
+  { to: "/admin/intake", label: "Intake inbox", icon: Inbox },
   { to: "/admin/risk", label: "Risk board", icon: Gauge },
+  { to: "/admin/forecast", label: "Forecast", icon: TrendingUp },
   { to: "/admin/incidents", label: "Incident queue", icon: Siren },
   { to: "/admin/allocation", label: "Allocation planner", icon: Route },
   { to: "/admin/decisions", label: "Decision gate", icon: ClipboardCheck },
@@ -106,6 +110,8 @@ function LoadStrip() {
     ["Unmet needs", String(unmet), unmet > 0],
     ["Shelters and hospitals", String(state.facilities.length), false],
     ["Roads blocked", String(state.roadBlocks.length), state.roadBlocks.length > 0],
+    ["Reports in", String(state.reports.length), state.reports.length > 0],
+    ["Alerts out", String(state.alerts.length), state.alerts.length > 0],
   ]
   return (
     <div className="space-y-1 px-2 py-1">

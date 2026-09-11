@@ -29,7 +29,7 @@ from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.db.repositories import queries as q
 from app.guidance import router as guidance
-from app.incidents import intake, parse
+from app.incidents import intake, parse, vision
 from app.schemas.domain import Camel, CategoryId, LngLat
 from app.taxonomy import UnknownTaxonomyValue
 from app.taxonomy import cache as taxonomy
@@ -65,7 +65,7 @@ async def citizen_guide(body: GuideIn, _: CurrentPrincipal) -> dict:
         lng=body.lng, lat=body.lat, intent=body.intent,
         condition=body.condition, city_id=body.city_id,
     )
-    return {
+    payload = {
         "intent": g.intent,
         "headline": g.headline,
         "shouldMove": g.should_move,
@@ -77,8 +77,27 @@ async def citizen_guide(body: GuideIn, _: CurrentPrincipal) -> dict:
         "routeKm": g.route_km,
         "routeMinutes": g.route_minutes,
         "routeEngine": g.route_engine,
+        "routeSteps": g.route_steps,
         "hazardsConsidered": g.avoided_blocks,
+        "exposedPoints": g.exposed_points,
     }
+    # The control room sees what the public was told. An operator coordinating
+    # against advice they do not know was issued is the coordination failure
+    # this whole system exists to stop, and it would be an odd one to build in.
+    from app.demo import runner as demo_runner
+
+    if g.route:
+        demo_runner.state.citizen_route = {
+            "path": g.route,
+            "headline": g.headline,
+            "destination": g.destination.name if g.destination else None,
+            "km": g.route_km,
+            "minutes": g.route_minutes,
+            "engine": g.route_engine,
+            "steps": g.route_steps,
+            "from": [body.lng, body.lat],
+        }
+    return payload
 
 
 class CitizenReportIn(Camel):
@@ -149,6 +168,107 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         "trustReasons": result.trust.reasons,
         "linkScore": result.link_score,
         "summary": result.summary,
+    }
+
+
+class VisionIn(Camel):
+    """A photo analysis, from wherever the model ran.
+
+    `ranOn` is recorded rather than trusted. A result from the phone and a
+    result from our own endpoint are subject to exactly the same validation and
+    the same ceiling on what they may change, which is what makes running the
+    model on the device a deployment choice rather than a security one.
+    """
+
+    report_id: str | None = None
+    #: The model's raw JSON, exactly as it answered. Validated here.
+    analysis: dict
+    model: str = "unknown"
+    ran_on: Literal["device", "server", "hosted"] = "device"
+    #: What the reporter said it was, so the photo can be checked against it.
+    category: CategoryId = "flooded_road"
+
+
+@router.get("/citizen/vision-contract")
+async def vision_contract(_: CurrentPrincipal) -> dict:
+    """The prompt and the accepted shape, served to the client.
+
+    The app does not hardcode the prompt. Serving it means a change to what we
+    ask the model can ship without an app release, which matters when the app is
+    a 3 GB download somebody installed before a flood and will not update during
+    one.
+    """
+    return {
+        "prompt": vision.PROMPT,
+        "hazards": sorted(vision.HAZARDS),
+        "depthBands": list(vision.DEPTHS),
+        "imageQuality": list(vision.QUALITY),
+        "categoriesCovered": vision.known_categories(),
+        "maxImageEdge": 1024,
+        "notes": [
+            "A photo is corroboration, never the claim. It can raise or lower "
+            "trust in what the reporter typed; it cannot set the category or "
+            "the severity, and it cannot commit a unit.",
+            "Send the analysis, not the image, when the model ran on the "
+            "device. The photo stays on the phone unless the reporter chooses "
+            "to upload it.",
+        ],
+    }
+
+
+@router.post("/citizen/vision")
+async def citizen_vision(body: VisionIn, _: CurrentPrincipal) -> dict:
+    """Take a photo analysis and say what it changed.
+
+    Returns the assessment whether or not a report id was supplied, so the app
+    can show the person what the photo will contribute *before* they file, which
+    is the difference between a system that analyses you and one that shows its
+    working.
+    """
+    evidence = vision.parse_response(
+        body.analysis, model=body.model, ran_on=body.ran_on
+    )
+    if evidence is None:
+        raise BadRequest(
+            "That analysis could not be read. It is ignored rather than guessed "
+            "at, so the report stands exactly as it would have with no photo."
+        )
+    evidence = vision.assess(evidence, category=body.category)
+
+    if body.report_id:
+        await db.execute(
+            """
+            update citizen_reports
+               set trust_breakdown = coalesce(trust_breakdown, '{}'::jsonb)
+                                     || jsonb_build_object('photo_agreement', $2::numeric)
+             where id = $1::uuid
+            """,
+            body.report_id, evidence.agreement,
+        )
+        await ev.append(
+            clock=clocks.WALL, kind="report.photo_assessed",
+            actor=f"agent:vision:{evidence.ran_on}",
+            subject_type="report", subject_id=body.report_id,
+            payload={
+                "agreement": evidence.agreement,
+                "hazards": evidence.hazards,
+                "depth_band": evidence.depth_band,
+                "model": evidence.model,
+                "ran_on": evidence.ran_on,
+                "life_safety_signal": evidence.life_safety_signal,
+            },
+        )
+
+    return {
+        "accepted": True,
+        "evidence": vision.as_dict(evidence),
+        "effect": (
+            "Raises confidence in the report."
+            if evidence.agreement > 0.15
+            else "Contradicts the report, so it is held for a human."
+            if evidence.agreement < -0.15
+            else "Neither supports nor undermines the report."
+        ),
     }
 
 
@@ -491,7 +611,15 @@ async def field_state(
          "incidentId": r["incident_id"], "etaMinutes": r["eta_minutes"],
          "incidentLocation": (
              [float(r["ilng"]), float(r["ilat"])] if r["ilng"] is not None else None
-         )}
+         ),
+         # The crew gets the road, and the turns, not a bearing. A driver told
+         # to head 2.1 km north-east through a flooded city has been told
+         # nothing; "left onto Karve Road" is an instruction.
+         "route": r["path"] or [],
+         "routeEngine": r["route_engine"],
+         "steps": r["steps"] or [],
+         "distanceKm": float(r["distance_km"]) if r["distance_km"] is not None else None,
+         "progress": float(r["progress"] or 0)}
         for r in await db.fetch(
             f"""
             select r.id, r.kind, r.label, r.operator, r.status::text status,
@@ -499,6 +627,8 @@ async def field_state(
                    extensions.ST_X(r.location::extensions.geometry) lng,
                    extensions.ST_Y(r.location::extensions.geometry) lat,
                    a.incident_id::text incident_id, a.eta_minutes,
+                   a.route_engine, a.steps, a.distance_km, a.progress,
+                   extensions.ST_AsGeoJSON(a.route)::json -> 'coordinates' as path,
                    i.title incident_title,
                    extensions.ST_X(i.location::extensions.geometry) ilng,
                    extensions.ST_Y(i.location::extensions.geometry) ilat

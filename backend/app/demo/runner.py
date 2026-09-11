@@ -29,10 +29,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from app.agents import gate
 from app.agents import replan as replanner
 from app.core.logging import get_logger
 from app.db import session as db
 from app.incidents import intake
+from app.solver import routing
 from app.world import events as ev
 from app.world.clock import WALL
 
@@ -101,9 +103,16 @@ class DemoState:
         default_factory=lambda: {"lng": 73.8989, "lat": 18.6773, "wardId": None,
                                  "wardName": "", "inside": True}
     )
+    #: The last route the citizen agent gave somebody, so the control room can
+    #: see what the public was told to do. An operator who cannot see the
+    #: guidance is coordinating against advice they do not know was issued.
+    citizen_route: dict[str, Any] | None = None
     beats: list[Beat] = field(default_factory=list)
     #: resource_id -> ticks spent on scene
     working: dict[str, int] = field(default_factory=dict)
+    #: (action_key, ward_id) already put to the gate this run. One road-closure
+    #: decision per ward, not one per pothole.
+    gated: set[tuple[str, str]] = field(default_factory=set)
     dirty: bool = False
     last_replan_tick: int = -99
     last_plan: dict[str, Any] | None = None
@@ -142,9 +151,11 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     state.report_every_ticks = max(1, report_every_ticks)
     state.beats.clear()
     state.working.clear()
+    state.gated.clear()
     state.dirty = False
     state.last_replan_tick = -99
     state.last_plan = None
+    state.citizen_route = None
     state.script_index = 0
     state.error = None
     _rng = random.Random(state.seed)
@@ -208,6 +219,11 @@ async def _tick_locked() -> None:
         await _do_replan("new reports")
 
 
+#: Categories where the report is about a road, and so has to be on one.
+ON_ROAD = ("flooded_road", "fallen_tree", "power_line", "blocked_drain",
+           "structural_damage")
+
+
 async def _inject_report() -> None:
     """One report, through the same door a person's report uses."""
     ward = await _pick_ward()
@@ -222,6 +238,19 @@ async def _inject_report() -> None:
     lng = ward["lng"] + _rng.uniform(-spread, spread)
     lat = ward["lat"] + _rng.uniform(-spread, spread)
 
+    # A flooded road has to be on a road. Dropped at a random point inside a
+    # ward polygon it lands in the middle of a block, no route passes within
+    # the blockage radius of it, and the whole avoidance story is decoration:
+    # the map shows a hazard and every vehicle drives straight past it.
+    # Snapping first is what makes the routing have to answer for it.
+    street = ""
+    if category in ON_ROAD:
+        snapped = await routing.snap_to_road(lng, lat)
+        if snapped.on_road:
+            lng, lat, street = snapped.lng, snapped.lat, snapped.street
+            if street:
+                note = f"{note} ({street})"
+
     result = await intake.receive(
         ward_id=ward["id"], category=category, location=(lng, lat), note=note,
         source="app", reporter_name="Resident",
@@ -229,7 +258,17 @@ async def _inject_report() -> None:
         photo_url=None if _rng.random() < 0.6 else "demo://photo.jpg",
         city_id=state.city_id, clock=WALL,
     )
+    if result.incident_id and street:
+        await db.execute(
+            "update incidents set street = coalesce(street, $2) where id = $1::uuid",
+            result.incident_id, street,
+        )
+        await db.execute(
+            "update citizen_reports set street = $2 where id = $1::uuid",
+            result.report_id, street,
+        )
     if result.created_incident:
+        await _gate_for_incident(result.incident_id, ward, category, result.trust.score)
         state.beat(
             "incident",
             f"New incident in {ward['name']}: {note[:48]}",
@@ -252,6 +291,97 @@ async def _inject_report() -> None:
             "It moved nothing.",
             trust=result.trust.score,
         )
+
+
+#: What an incident of each category is grounds for proposing. The action key is
+#: what the policy corpus indexes on, so this table is the join between "what
+#: happened" and "who is allowed to respond to it".
+#:
+#: `requisition_ndrf` is in here deliberately. Its clause reserves it to the
+#: District Disaster Management Authority at every severity, so it will never
+#: auto-issue however sure the system is, and it is the clearest demonstration
+#: that the gate is load-bearing rather than a confidence threshold wearing a
+#: costume.
+ACTION_FOR: dict[str, list[tuple[str, str]]] = {
+    "flooded_road": [
+        ("close_road", "Close the road and divert traffic"),
+        ("issue_advisory", "Issue a local advisory"),
+    ],
+    "person_stranded": [
+        ("issue_warning", "Issue a flood warning"),
+        ("requisition_ndrf", "Request an NDRF team"),
+    ],
+    "structural_damage": [
+        ("close_road", "Close the road and divert traffic"),
+        ("issue_warning", "Issue a flood warning"),
+    ],
+    "power_line": [("close_road", "Close the road and divert traffic")],
+    "waterlogging": [("inspect_drainage", "Send a drainage inspection")],
+    "blocked_drain": [("inspect_drainage", "Send a drainage inspection")],
+    "fallen_tree": [("close_road", "Close the road and divert traffic")],
+    "heat_casualty": [("issue_advisory", "Issue a local advisory")],
+}
+
+
+async def _gate_for_incident(
+    incident_id: str | None, ward: dict, category: str, trust: float
+) -> None:
+    """Propose what this incident warrants, and let the delegation matrix answer.
+
+    Deliberately debounced per ward and action: a ward with four flooded roads
+    needs one road-closure decision on an officer's screen, not four. The gate
+    is a queue for a human, and a queue nobody can read is the same as no queue.
+    """
+    severity = await db.fetchval(
+        "select severity from incidents where id = $1::uuid", incident_id
+    ) if incident_id else None
+    severity = int(severity or 3)
+
+    for action_key, action in ACTION_FOR.get(category, []):
+        key = (action_key, ward["id"])
+        if key in state.gated:
+            continue
+        state.gated.add(key)
+        try:
+            decision = await gate.propose(
+                action_key=action_key,
+                action=action,
+                target=ward["name"],
+                ward_id=ward["id"],
+                rationale=(
+                    f"A {category.replace('_', ' ')} incident opened in "
+                    f"{ward['name']} at severity {severity}, corroborated to "
+                    f"{trust:.0%}."
+                ),
+                # The decision inherits the evidence's confidence. A report the
+                # trust model only half believes should not authorise a road
+                # closure on its own, and this is where that shows up.
+                confidence=round(min(0.97, 0.55 + 0.45 * trust), 4),
+                severity=severity,
+                city_id=state.city_id,
+                clock=WALL,
+            )
+        except Exception as exc:  # noqa: BLE001 - a gate failure must not stop the world
+            log.warning("gate_failed", action=action_key, error=str(exc))
+            continue
+
+        if decision["status"] == "auto_issued":
+            state.beat(
+                "decision",
+                f"{action} in {ward['name']} issued automatically under "
+                f"{decision['clause']}."
+                + (" Residents alerted." if decision["alertId"] else ""),
+                decisionId=decision["id"], wardId=ward["id"],
+                alertId=decision["alertId"],
+            )
+        else:
+            state.beat(
+                "held",
+                f"{action} in {ward['name']} is waiting for the "
+                f"{decision['delegatedTo']}. {decision['clause']} does not "
+                "delegate it.",
+                decisionId=decision["id"], wardId=ward["id"],
+            )
 
 
 async def _inject_adversarial_burst() -> None:
@@ -365,7 +495,42 @@ async def _move_units() -> None:
             resourceId=r["rid"],
         )
 
-    # 2. Everyone else moves a fraction of the way there.
+    # 2. Everyone else advances along the road they were given.
+    #
+    # `ST_LineInterpolatePoint` walks the stored route geometry, so a unit
+    # follows streets and turns corners instead of sliding diagonally across
+    # blocks. The straight-line lerp this replaced was the visible half of the
+    # routing bug: the router had never once been called successfully, so every
+    # vehicle moved as the crow flies and no amount of hazard avoidance in the
+    # solver could show up on the map.
+    await db.execute(
+        """
+        update assignments
+           set progress = least(1.0, progress + $1)
+         where status in ('proposed','approved','en_route')
+           and sim_run_id is null
+           and route is not null
+        """,
+        MOVE_FRACTION,
+    )
+    await db.execute(
+        """
+        update resources r
+           set location = extensions.ST_LineInterpolatePoint(
+                            a.route, least(1.0, a.progress)
+                          )::extensions.geography,
+               status = 'en_route',
+               updated_at = now()
+          from assignments a
+         where a.resource_id = r.id
+           and a.status in ('proposed','approved','en_route')
+           and a.sim_run_id is null
+           and a.route is not null
+        """
+    )
+    # Anything without stored geometry (the router was down when it was tasked)
+    # still has to move, so it falls back to the straight line rather than
+    # standing still and looking broken.
     await db.execute(
         """
         update resources r
@@ -385,6 +550,7 @@ async def _move_units() -> None:
          where a.resource_id = r.id
            and a.status in ('proposed','approved','en_route')
            and a.sim_run_id is null
+           and a.route is null
         """,
         MOVE_FRACTION,
     )
@@ -519,11 +685,34 @@ async def citizen_report(category: str, note: str) -> intake.IntakeResult:
     ward_id = c.get("wardId")
     if not ward_id:
         raise ValueError("You are outside the covered area, so there is no ward to report in.")
+
+    lng, lat, street = c["lng"], c["lat"], ""
+    if category in ON_ROAD:
+        snapped = await routing.snap_to_road(lng, lat)
+        if snapped.on_road:
+            lng, lat, street = snapped.lng, snapped.lat, snapped.street
+
     result = await intake.receive(
-        ward_id=ward_id, category=category, location=(c["lng"], c["lat"]), note=note,
+        ward_id=ward_id, category=category, location=(lng, lat), note=note,
         source="app", reporter_name="You", device_id="demo-you",
         city_id=state.city_id, clock=WALL,
     )
+    if result.incident_id and street:
+        await db.execute(
+            "update incidents set street = coalesce(street, $2) where id = $1::uuid",
+            result.incident_id, street,
+        )
+        await db.execute(
+            "update citizen_reports set street = $2 where id = $1::uuid",
+            result.report_id, street,
+        )
+    if result.created_incident:
+        ward = await db.fetchrow("select id, name from wards where id = $1", ward_id)
+        if ward:
+            await _gate_for_incident(
+                result.incident_id, {"id": ward["id"], "name": ward["name"]},
+                category, result.trust.score,
+            )
     state.beat(
         "you",
         (f"Your report opened a new incident." if result.created_incident

@@ -126,6 +126,12 @@ class Parsed:
                 + ", ".join(f"“{m}”" for m in self.matched[:3])
                 + "."
             )
+        if self.method == "classifier":
+            return (
+                f"Read as {label}. The keywords were not decisive, so a "
+                f"multilingual zero-shot classifier chose between the "
+                f"categories that exist."
+            )
         if self.method == "model":
             return f"Read as {label}. The wording was ambiguous, so a model classified it."
         return f"Could not tell what this is, so it was filed as {label} for a human to look at."
@@ -198,11 +204,54 @@ _SYSTEM = (
 )
 
 
+#: A zero-shot label below this is not better evidence than the keyword guess.
+ZERO_SHOT_FLOOR = 0.45
+
+
 async def parse_with_model(text: str, *, fallback: str = "flooded_road") -> Parsed:
-    """Keyword first; the model only for the genuinely ambiguous remainder."""
+    """Keyword first; a model only for the genuinely ambiguous remainder.
+
+    Three tiers, cheapest and most explainable first:
+
+      1. keywords, offline, microseconds, and right most of the time;
+      2. a **classifier** over the taxonomy's own categories, multilingual and
+         zero-shot, which cannot invent a category and has no instruction
+         channel to hijack;
+      3. a chat model, last, because it is the least checkable of the three.
+
+    Anything the tiers disagree about keeps the deterministic answer.
+    """
     guess = parse(text, fallback=fallback)
     if guess.confidence >= CONFIDENT or guess.method == "default" and not text.strip():
         return guess
+
+    from app.agents import ml
+
+    options = sorted(taxonomy.categories)
+    # The classifier is shown the human-readable names, not the snake_case ids:
+    # "person stranded" carries meaning to a model trained on natural language
+    # and "person_stranded" carries slightly less of it.
+    pretty = {
+        (taxonomy.categories[c].display_name or c.replace("_", " ")).lower(): c
+        for c in options
+    }
+    shot = await ml.classify(text, list(pretty))
+    if shot and shot.score >= ZERO_SHOT_FLOOR:
+        chosen = pretty.get(shot.label.lower())
+        if chosen:
+            return Parsed(
+                category=chosen,
+                confidence=round(min(0.9, shot.score), 3),
+                method="classifier",
+                urgency_boost=guess.urgency_boost,
+                matched=guess.matched,
+                alternatives=[
+                    (pretty[n.lower()], s)
+                    for n, s in shot.ranked[1:4]
+                    if n.lower() in pretty
+                ],
+                note=text,
+            )
 
     from app.agents import llm
 

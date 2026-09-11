@@ -27,6 +27,12 @@ type Unit = {
   location: [number, number]; capacity: number
   assignedTo: string | null; incidentId: string | null
   etaMinutes: number | null; incidentLocation: [number, number] | null
+  /** The road the crew is meant to drive, not a bearing to the incident. */
+  route?: number[][] | null
+  routeEngine?: string | null
+  steps?: { instruction: string; street: string; distanceM: number }[]
+  distanceKm?: number | null
+  progress?: number
 }
 type Facility = {
   id: string; name: string; kind: string; status: string
@@ -143,14 +149,63 @@ export default function FieldApp() {
                   location: u.incidentLocation as [number, number],
                 })) ?? []
             }
-            route={
-              unit?.incidentLocation
-                ? [unit.location, unit.incidentLocation]
-                : undefined
+            routes={
+              state?.units
+                .filter((u) => (u.route?.length ?? 0) > 1)
+                .map((u) => ({
+                  id: u.id, resourceId: u.id, resourceLabel: u.label,
+                  incidentTitle: u.assignedTo ?? "Task", status: u.status,
+                  etaMinutes: u.etaMinutes ?? null,
+                  distanceKm: u.distanceKm ?? null,
+                  engine: u.routeEngine, progress: u.progress,
+                  steps: u.steps, path: u.route as [number, number][],
+                })) ?? []
             }
+            route={
+              (unit?.route?.length ?? 0) > 1
+                ? (unit!.route as number[][])
+                : unit?.incidentLocation
+                  ? [unit.location, unit.incidentLocation]
+                  : undefined
+            }
+            routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
             center={unit?.location ?? [73.88, 18.58]}
             zoom={12}
           />
+
+          {unit && (unit.steps?.length ?? 0) > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">
+                  {unit.label} to {unit.assignedTo}
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
+                  {unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
+                  {typeof unit.progress === "number"
+                    ? ` · ${Math.round(unit.progress * 100)}% of the way`
+                    : ""}
+                  {unit.routeEngine && unit.routeEngine !== "straight-line-fallback"
+                    ? " · routed around every hazard the control room knows about"
+                    : " · straight-line estimate, the router was unreachable"}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ol className="space-y-1">
+                  {unit.steps!.slice(0, 10).map((st, i) => (
+                    <li key={i} className="flex gap-2 text-xs">
+                      <span className="text-muted-foreground w-14 shrink-0 tabular-nums">
+                        {st.distanceM >= 1000
+                          ? `${(st.distanceM / 1000).toFixed(1)} km`
+                          : `${st.distanceM} m`}
+                      </span>
+                      <span>{st.instruction}</span>
+                    </li>
+                  ))}
+                </ol>
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader className="pb-2">

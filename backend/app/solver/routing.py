@@ -1,20 +1,29 @@
-"""Travel times over the road graph.
+"""Travel over the road graph, and the roads themselves.
 
-OSRM gives real road distances; when it is unreachable we fall back to great
-circle distance at an urban effective speed. The fallback is always *slower*
-than reality would be, so a fallback plan never promises an ETA it cannot meet.
+Three jobs, in one place because they all need the same router:
 
-The important detail is `blocked`: road segments through a confirmed flooded
-incident are excluded, so the solver never routes a unit through water it
-cannot cross. That is the difference between a dispatch plan and a straight
-line on a map.
+  * **A matrix** of durations, for the allocator. Mapbox first, then OSRM, then
+    great-circle distance at an urban event speed. Every fallback is *slower*
+    than reality, so a degraded plan never promises an ETA it cannot meet.
+  * **A route**, as the geometry of actual streets plus the turn instructions
+    that name them. This is what a person can follow and what a unit drives
+    along; a straight line between two dots is neither.
+  * **Snapping a point to a road**, which is what makes a hazard a hazard. A
+    flooded road has to be *on* a road, or nothing routes around it and the
+    whole avoidance story is decoration.
+
+The blockage handling is the part worth arguing about. No public router knows
+which streets are under water tonight, so we cannot ask it to avoid them.
+What we can do is ask for alternatives and choose the one that passes nearest to
+none of the hazards people have reported, and when every alternative is exposed,
+return the least exposed one *with a count* rather than a false promise.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import dataclass, field
+from typing import Any, Sequence
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -29,6 +38,8 @@ EVENT_SPEED_KMH = 18.0
 BLOCKED_DETOUR_MINUTES = 11.0
 #: A route within this distance of a blockage is treated as affected.
 BLOCK_RADIUS_KM = 0.35
+#: Mapbox Matrix allows 25 coordinates per request on the standard profile.
+MATRIX_LIMIT = 25
 
 
 def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -37,6 +48,22 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     dlon, dlat = lon2 - lon1, lat2 - lat1
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+
+
+def _coords(pairs: Sequence[tuple[float, float]]) -> str:
+    return ";".join(f"{lng:.5f},{lat:.5f}" for lng, lat in pairs)
+
+
+def _data(result: Any) -> dict | None:
+    """Unwrap `get_json`, which returns a FeedResult and not the payload.
+
+    This was the bug behind "the navigation is a straight line": the route code
+    treated the wrapper as the JSON, `.get("routes")` raised, the except arm
+    caught it, and every route in the system quietly became the fallback. It had
+    never once called a router successfully.
+    """
+    payload = getattr(result, "data", result)
+    return payload if isinstance(payload, dict) else None
 
 
 @dataclass(slots=True)
@@ -96,6 +123,83 @@ def _fallback_matrix(
     return TravelMatrix(durations, distances, engine="haversine-fallback")
 
 
+def _apply_blocks(
+    durations: list[list[float]],
+    sources: Sequence[tuple[float, float]],
+    destinations: Sequence[tuple[float, float]],
+    blocked: Sequence[tuple[float, float]],
+) -> None:
+    for i, s in enumerate(sources):
+        for j, d in enumerate(destinations):
+            if _segment_is_blocked(s, d, blocked):
+                durations[i][j] += BLOCKED_DETOUR_MINUTES
+
+
+async def _mapbox_matrix(
+    sources: Sequence[tuple[float, float]],
+    destinations: Sequence[tuple[float, float]],
+) -> TravelMatrix | None:
+    if not settings.mapbox_token:
+        return None
+    if len(sources) + len(destinations) > MATRIX_LIMIT:
+        return None
+    n = len(sources)
+    payload = _data(
+        await get_json(
+            f"{settings.mapbox_matrix_url}/driving/"
+            f"{_coords(list(sources) + list(destinations))}",
+            {
+                "access_token": settings.mapbox_token,
+                "sources": ";".join(str(i) for i in range(n)),
+                "destinations": ";".join(str(n + j) for j in range(len(destinations))),
+                "annotations": "duration,distance",
+            },
+            cache_key=f"mbx:matrix:{hash(_coords(list(sources) + list(destinations)))}",
+        )
+    )
+    if not payload or payload.get("code") != "Ok":
+        return None
+    try:
+        durations = [[(d or 0.0) / 60.0 for d in row] for row in payload["durations"]]
+        distances = [
+            [round((d or 0.0) / 1000.0, 2) for d in row]
+            for row in payload.get("distances") or [[0.0] * len(destinations)] * n
+        ]
+    except (KeyError, TypeError):
+        return None
+    return TravelMatrix(durations, distances, engine="mapbox")
+
+
+async def _osrm_matrix(
+    sources: Sequence[tuple[float, float]],
+    destinations: Sequence[tuple[float, float]],
+) -> TravelMatrix | None:
+    coord_str = _coords(list(sources) + list(destinations))
+    n = len(sources)
+    payload = _data(
+        await get_json(
+            f"{settings.osrm_url}/table/v1/driving/{coord_str}",
+            {
+                "sources": ";".join(str(i) for i in range(n)),
+                "destinations": ";".join(str(n + j) for j in range(len(destinations))),
+                "annotations": "duration,distance",
+            },
+            cache_key=f"osrm:table:{hash(coord_str)}",
+        )
+    )
+    if not payload or payload.get("code") != "Ok":
+        return None
+    try:
+        durations = [[(d or 0.0) / 60.0 for d in row] for row in payload["durations"]]
+        distances = [
+            [round((d or 0.0) / 1000.0, 2) for d in row]
+            for row in payload.get("distances") or [[0.0] * len(destinations)] * n
+        ]
+    except (KeyError, TypeError):
+        return None
+    return TravelMatrix(durations, distances, engine="osrm")
+
+
 async def travel_matrix(
     sources: Sequence[tuple[float, float]],
     destinations: Sequence[tuple[float, float]],
@@ -104,46 +208,26 @@ async def travel_matrix(
     if not sources or not destinations:
         return TravelMatrix([], [], engine="empty")
 
-    coords = list(sources) + list(destinations)
-    coord_str = ";".join(f"{lng:.5f},{lat:.5f}" for lng, lat in coords)
-    n_src = len(sources)
-    n_dst = len(destinations)
-
-    result = await get_json(
-        f"{settings.osrm_url}/table/v1/driving/{coord_str}",
-        {
-            "sources": ";".join(str(i) for i in range(n_src)),
-            "destinations": ";".join(str(n_src + j) for j in range(n_dst)),
-            "annotations": "duration,distance",
-        },
-        cache_key=f"osrm:{hash(coord_str)}",
-    )
-
-    payload = result.data if isinstance(result.data, dict) else None
-    if not payload or payload.get("code") != "Ok":
+    matrix = await _mapbox_matrix(sources, destinations)
+    if matrix is None:
+        matrix = await _osrm_matrix(sources, destinations)
+    if matrix is None:
         return _fallback_matrix(sources, destinations, blocked)
 
-    try:
-        durations = [
-            [(d or 0.0) / 60.0 for d in row] for row in payload["durations"]
-        ]
-        distances = [
-            [round((d or 0.0) / 1000.0, 2) for d in row]
-            for row in payload.get("distances", [[0.0] * n_dst] * n_src)
-        ]
-    except (KeyError, TypeError):
-        return _fallback_matrix(sources, destinations, blocked)
-
-    # Apply blockage penalties on top of the real road durations.
-    for i, s in enumerate(sources):
-        for j, d in enumerate(destinations):
-            if _segment_is_blocked(s, d, blocked):
-                durations[i][j] += BLOCKED_DETOUR_MINUTES
-
-    return TravelMatrix(durations, distances, engine="osrm")
+    _apply_blocks(matrix.durations, sources, destinations, blocked)
+    return matrix
 
 
 # --------------------------------------------------------------- one route ---
+@dataclass(slots=True)
+class Step:
+    """One turn, with the street it happens on."""
+
+    instruction: str
+    street: str
+    distance_m: int
+
+
 @dataclass(slots=True)
 class RouteLine:
     """A path a person can actually follow, not a line between two dots."""
@@ -156,6 +240,55 @@ class RouteLine:
     #: a non-zero number is reported rather than hidden, because the honest
     #: answer during a flood is sometimes "this is the least bad way".
     passes_near_blocks: int = 0
+    #: Turn instructions naming real streets. Empty when the router was not
+    #: reachable and the geometry is the fallback line.
+    steps: list[Step] = field(default_factory=list)
+    #: How many alternatives were compared to pick this one.
+    considered: int = 1
+
+    @property
+    def is_real_road(self) -> bool:
+        return self.engine in ("mapbox", "osrm")
+
+
+def _exposure(coords: list[list[float]], blocked: Sequence[tuple[float, float]]) -> int:
+    if not blocked:
+        return 0
+    return sum(
+        1
+        for c in coords[::3]  # every third vertex is enough to judge a route
+        for b in blocked
+        if haversine_km((float(c[0]), float(c[1])), b) < BLOCK_RADIUS_KM
+    )
+
+
+def _mapbox_steps(route: dict) -> list[Step]:
+    out: list[Step] = []
+    for leg in route.get("legs") or []:
+        for s in leg.get("steps") or []:
+            man = s.get("maneuver") or {}
+            text = man.get("instruction") or ""
+            name = s.get("name") or ""
+            if not text:
+                continue
+            out.append(
+                Step(
+                    instruction=text,
+                    street=name,
+                    distance_m=int(round(float(s.get("distance") or 0.0))),
+                )
+            )
+    return out[:12]
+
+
+def _pick(routes: list[dict], blocked: Sequence[tuple[float, float]]) -> tuple[dict, int]:
+    """Least exposed first, then fastest. Exposure outranks speed on purpose."""
+    scored: list[tuple[int, float, int, dict]] = []
+    for n, r in enumerate(routes):
+        coords = (r.get("geometry") or {}).get("coordinates") or []
+        scored.append((_exposure(coords, blocked), float(r.get("duration") or 0.0), n, r))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]))
+    return scored[0][3], scored[0][0]
 
 
 async def route_line(
@@ -163,56 +296,143 @@ async def route_line(
     destination: tuple[float, float],
     blocked: Sequence[tuple[float, float]] = (),
 ) -> RouteLine:
-    """Ask OSRM for the road geometry, and check it against known hazards.
-
-    OSRM does not know which streets are under water, so we cannot simply ask it
-    to avoid them. What we can do is take the alternatives it offers and pick the
-    one that passes nearest to none of the hazards people have reported, which is
-    what `alternatives=true` is for. When every alternative is exposed, the least
-    exposed one is returned along with a count, rather than a false promise.
-
-    Falls back to a straight line at an urban event speed. The fallback is always
-    slower than reality, so it never promises an arrival it cannot meet.
-    """
+    """Street geometry from A to B, chosen against the hazards people reported."""
     o = f"{origin[0]:.5f},{origin[1]:.5f}"
     d = f"{destination[0]:.5f},{destination[1]:.5f}"
-    try:
-        data = await get_json(
+
+    if settings.mapbox_token:
+        payload = _data(
+            await get_json(
+                f"{settings.mapbox_directions_url}/driving/{o};{d}",
+                {
+                    "access_token": settings.mapbox_token,
+                    "geometries": "geojson",
+                    "overview": "full",
+                    "alternatives": "true",
+                    "steps": "true",
+                    "language": "en",
+                },
+                cache_key=f"mbx:route:{o}:{d}",
+            )
+        )
+        routes = (payload or {}).get("routes") or []
+        if routes:
+            best, exposure = _pick(routes, blocked)
+            coords = (best.get("geometry") or {}).get("coordinates") or []
+            return RouteLine(
+                coordinates=[[float(c[0]), float(c[1])] for c in coords],
+                km=round(float(best.get("distance") or 0.0) / 1000.0, 2),
+                minutes=max(1, round(float(best.get("duration") or 0.0) / 60.0))
+                + (BLOCKED_DETOUR_MINUTES if exposure else 0),
+                engine="mapbox",
+                passes_near_blocks=exposure,
+                steps=_mapbox_steps(best),
+                considered=len(routes),
+            )
+
+    payload = _data(
+        await get_json(
             f"{settings.osrm_url}/route/v1/driving/{o};{d}",
             {"overview": "full", "geometries": "geojson", "alternatives": "true"},
             cache_key=f"osrm:route:{o}:{d}",
         )
-        routes = (data or {}).get("routes") or []
-        if routes:
-            scored: list[tuple[int, float, dict]] = []
-            for r in routes:
-                coords = r.get("geometry", {}).get("coordinates", [])
-                exposure = sum(
-                    1
-                    for c in coords[::3]  # every third vertex is enough to judge
-                    for b in blocked
-                    if haversine_km((c[0], c[1]), b) < BLOCK_RADIUS_KM
-                )
-                scored.append((exposure, float(r.get("duration", 0.0)), r))
-            scored.sort(key=lambda t: (t[0], t[1]))
-            exposure, _dur, best = scored[0]
-            coords = best.get("geometry", {}).get("coordinates", [])
-            return RouteLine(
-                coordinates=[[float(c[0]), float(c[1])] for c in coords],
-                km=round(float(best.get("distance", 0.0)) / 1000.0, 2),
-                minutes=max(1, round(float(best.get("duration", 0.0)) / 60.0)),
-                engine="osrm",
-                passes_near_blocks=exposure,
-            )
-    except Exception as exc:  # noqa: BLE001 - a router outage is not a failure
-        log.warning("osrm_route_failed", error=str(exc))
+    )
+    routes = (payload or {}).get("routes") or []
+    if routes:
+        best, exposure = _pick(routes, blocked)
+        coords = (best.get("geometry") or {}).get("coordinates") or []
+        return RouteLine(
+            coordinates=[[float(c[0]), float(c[1])] for c in coords],
+            km=round(float(best.get("distance") or 0.0) / 1000.0, 2),
+            minutes=max(1, round(float(best.get("duration") or 0.0) / 60.0))
+            + (BLOCKED_DETOUR_MINUTES if exposure else 0),
+            engine="osrm",
+            passes_near_blocks=exposure,
+            considered=len(routes),
+        )
 
     km = haversine_km(origin, destination)
     detour = BLOCKED_DETOUR_MINUTES if _segment_is_blocked(origin, destination, blocked) else 0.0
+    log.warning("route_fallback", origin=o, destination=d)
     return RouteLine(
         coordinates=[[origin[0], origin[1]], [destination[0], destination[1]]],
-        km=round(km, 2),
-        minutes=max(1, round(km / EVENT_SPEED_KMH * 60 + detour)),
+        km=round(km * 1.35, 2),
+        minutes=max(1, round(km * 1.35 / EVENT_SPEED_KMH * 60 + detour)),
         engine="straight-line-fallback",
         passes_near_blocks=1 if detour else 0,
     )
+
+
+# ---------------------------------------------------------------- snapping ---
+@dataclass(slots=True)
+class Snapped:
+    lng: float
+    lat: float
+    street: str
+    #: How far the original point had to move to reach a road, in metres.
+    moved_m: int
+    engine: str
+
+    @property
+    def on_road(self) -> bool:
+        return self.engine != "none"
+
+
+#: Snapping is a network call and a flood report lands roughly where the last
+#: one did. Cached on a ~40 m grid, which is finer than the accuracy of a phone
+#: GPS in a built-up street.
+_snap_cache: dict[tuple[int, int], Snapped] = {}
+
+
+def _grid(lng: float, lat: float) -> tuple[int, int]:
+    return (round(lng * 2800), round(lat * 2800))
+
+
+async def snap_to_road(lng: float, lat: float) -> Snapped:
+    """Move a point onto the nearest routable road, and name that road.
+
+    A hazard that sits in the middle of a block is not on anybody's way
+    anywhere: no route passes near it, so no route is ever diverted by it, and
+    the avoidance logic has nothing to bite on. Snapping first is what makes
+    "flooded road" mean a road.
+
+    Mapbox returns the snapped coordinate and the street name as
+    `waypoints[0]`; a route is requested to a point a few hundred metres away
+    because the Directions API needs two coordinates to answer at all.
+    """
+    key = _grid(lng, lat)
+    hit = _snap_cache.get(key)
+    if hit is not None:
+        return hit
+
+    result = Snapped(lng=lng, lat=lat, street="", moved_m=0, engine="none")
+    if settings.mapbox_token:
+        near = (lng + 0.0030, lat + 0.0030)
+        payload = _data(
+            await get_json(
+                f"{settings.mapbox_directions_url}/driving/"
+                f"{lng:.5f},{lat:.5f};{near[0]:.5f},{near[1]:.5f}",
+                {
+                    "access_token": settings.mapbox_token,
+                    "geometries": "geojson",
+                    "overview": "simplified",
+                    "steps": "false",
+                },
+                cache_key=f"mbx:snap:{lng:.4f},{lat:.4f}",
+            )
+        )
+        points = (payload or {}).get("waypoints") or []
+        if points:
+            loc = points[0].get("location") or []
+            if len(loc) == 2:
+                snapped = (float(loc[0]), float(loc[1]))
+                result = Snapped(
+                    lng=snapped[0],
+                    lat=snapped[1],
+                    street=(points[0].get("name") or "").strip(),
+                    moved_m=int(round(haversine_km((lng, lat), snapped) * 1000)),
+                    engine="mapbox",
+                )
+
+    _snap_cache[key] = result
+    return result

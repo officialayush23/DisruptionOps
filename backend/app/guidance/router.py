@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from app.core.logging import get_logger
 from app.db import session as db
+from app.agents import forecast
 from app.solver import routing
 
 log = get_logger(__name__)
@@ -54,6 +55,11 @@ class Candidate:
     specialities: list[str]
     hazards_near: int
     ward_severity: int | None
+    #: Hours until this place is projected to be full at the current arrival
+    #: rate. None means it is not projected to fill.
+    hours_to_full: float | None = None
+    #: Minutes it would take to get there, once a route has been costed.
+    travel_minutes: int | None = None
     score: float = 0.0
     why: list[str] = field(default_factory=list)
 
@@ -75,7 +81,13 @@ class Guidance:
     route_km: float
     route_minutes: int
     route_engine: str
+    #: Turn instructions naming real streets. "Left onto Karve Road" is an
+    #: instruction somebody can follow in the rain; a bearing and a distance is
+    #: not, and a straight line on a map is neither.
+    route_steps: list[dict[str, Any]]
+    #: Hazards the route was checked against, and how many it still passes near.
     avoided_blocks: int
+    exposed_points: int
     warnings: list[str]
     #: When the honest answer is "do not move", this is False.
     should_move: bool
@@ -90,7 +102,8 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 async def _candidates(
-    lng: float, lat: float, intent: Intent, city_id: str
+    lng: float, lat: float, intent: Intent, city_id: str,
+    saturation: dict[str, float] | None = None,
 ) -> list[Candidate]:
     """Places that could actually take this person right now."""
     if intent == "hospital":
@@ -134,6 +147,7 @@ async def _candidates(
             capacity=r["capacity"], occupancy=r["occupancy"],
             status=r["status"], specialities=list(r["specialities"] or []),
             hazards_near=r["hazards_near"], ward_severity=r["ward_severity"],
+            hours_to_full=(saturation or {}).get(r["id"]),
         )
         for r in rows
     ]
@@ -178,6 +192,27 @@ def _score(c: Candidate, intent: Intent, condition: str | None) -> Candidate:
     if c.ward_severity and c.ward_severity >= 4:
         score *= 0.65
         why.append(f"its own ward is at severity {c.ward_severity}")
+
+    # Will it still be open when you get there?
+    #
+    # This is the one place a forecast legitimately changes an instruction.
+    # Sending somebody on a forty minute walk to a hospital projected to fill in
+    # twenty is worse than sending them further to one that will still take
+    # them, and "it had room when you asked" is no comfort on arrival. The
+    # travel estimate is deliberately pessimistic (walking pace during a flood)
+    # because being wrong in this direction costs a longer walk and being wrong
+    # in the other costs a turned-away casualty.
+    if c.hours_to_full is not None:
+        eta_hours = c.distance_km / 3.5
+        if c.hours_to_full <= eta_hours:
+            score *= 0.3
+            why.append(
+                f"projected full in about {c.hours_to_full:.1f} h, which is "
+                "before you would arrive"
+            )
+        elif c.hours_to_full <= eta_hours * 2:
+            score *= 0.7
+            why.append(f"filling fast, about {c.hours_to_full:.1f} h of room left")
 
     # Distance is a tiebreak, not the objective.
     score *= 1.0 / (1.0 + c.distance_km / 3.0)
@@ -279,11 +314,16 @@ async def guide(
                 "Avoid low-lying roads and underpasses, and keep your phone charged.",
             ],
             destination=None, alternatives=[], route=[], route_km=0.0,
-            route_minutes=0, route_engine="none", avoided_blocks=0,
+            route_minutes=0, route_engine="none", route_steps=[],
+            avoided_blocks=0, exposed_points=0,
             warnings=warnings, should_move=False,
         )
 
-    candidates = [_score(c, intent, condition) for c in await _candidates(lng, lat, intent, city_id)]
+    saturation = await forecast.saturation_risk(city_id)
+    candidates = [
+        _score(c, intent, condition)
+        for c in await _candidates(lng, lat, intent, city_id, saturation)
+    ]
     usable = sorted([c for c in candidates if c.score > 0], key=lambda c: c.score, reverse=True)
     rejected = [c for c in candidates if c.score == 0]
 
@@ -294,7 +334,8 @@ async def guide(
             reasoning=[c.why[0] for c in rejected[:3]] or
                       ["No facility of that kind is configured near you."],
             destination=None, alternatives=[], route=[], route_km=0.0,
-            route_minutes=0, route_engine="none", avoided_blocks=0,
+            route_minutes=0, route_engine="none", route_steps=[],
+            avoided_blocks=0, exposed_points=0,
             warnings=warnings + [
                 "Call the municipal helpline. This is a shortfall the control "
                 "room can see as well, and it is recorded as one."
@@ -339,7 +380,13 @@ async def guide(
         route_km=round(float(km), 2),
         route_minutes=int(minutes),
         route_engine=engine,
+        route_steps=[
+            {"instruction": s.instruction, "street": s.street,
+             "distanceM": s.distance_m}
+            for s in line.steps
+        ],
         avoided_blocks=len(blocks),
+        exposed_points=line.passes_near_blocks,
         warnings=warnings,
         should_move=True,
     )

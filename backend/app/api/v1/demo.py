@@ -20,6 +20,7 @@ from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.demo import runner
+from app.agents import forecast as forecasting
 from app.incidents import duplicates
 from app import taxonomy
 from app.schemas.domain import Camel, CategoryId
@@ -146,6 +147,24 @@ async def demo_decide(decision_id: str, action: str, principal: StaffPrincipal) 
 _DUP_TTL = 4.0
 _dup_cache: tuple[float, list] = (0.0, [])
 
+#: The forecast is a pass over the whole incident history plus a catchment
+#: calculation per facility. It moves on the scale of an arrival, not a frame.
+_FORECAST_TTL = 12.0
+_forecast_cache: tuple[float, dict] = (0.0, {})
+
+
+async def _forecast_cached(city_id: str) -> dict:
+    now = time.monotonic()
+    stamp, value = _forecast_cache
+    if now - stamp < _FORECAST_TTL and value:
+        return value
+    try:
+        built = forecasting.as_dict(await forecasting.build(city_id=city_id))
+    except Exception as exc:  # noqa: BLE001 - the console must not die on this
+        return {"error": str(exc)[:200], "recurrence": [], "facilities": [], "demand": []}
+    globals()["_forecast_cache"] = (now, built)
+    return built
+
 
 async def _duplicates_cached(city_id: str) -> list:
     now = time.monotonic()
@@ -172,11 +191,13 @@ async def demo_state(
     """Everything the console draws, in one round trip."""
     st = runner.state
 
-    snapshot, dupes = await asyncio.gather(
-        _snapshot(city_id, since_event, geometry), _duplicates_cached(city_id)
+    snapshot, dupes, forecast = await asyncio.gather(
+        _snapshot(city_id, since_event, geometry),
+        _duplicates_cached(city_id),
+        _forecast_cached(city_id),
     )
-    (wards, resources, incidents, needs, decisions,
-     events, facilities, blocks) = snapshot
+    (wards, resources, incidents, needs, decisions, events, facilities,
+     blocks, routes, alerts, reports) = snapshot
 
     return {
         "running": st.running,
@@ -192,6 +213,11 @@ async def demo_state(
         "events": events,
         "facilities": facilities,
         "roadBlocks": blocks,
+        "routes": routes,
+        "forecast": forecast,
+        "alerts": alerts,
+        "reports": reports,
+        "citizenRoute": st.citizen_route,
         "duplicates": [
             {
                 "kind": d.kind, "incidentIds": d.incident_ids, "wardId": d.ward_id,
@@ -249,8 +275,59 @@ select r.id, r.kind, r.label, r.operator, r.agency_id, r.capacity,
  order by r.kind, r.label
 """
 
+_ROUTES_SQL = """
+select a.id::text, a.resource_id, a.incident_id::text incident_id,
+       a.eta_minutes, a.distance_km, a.status::text status,
+       a.route_engine, a.progress, a.steps, r.label, r.kind, i.title,
+       extensions.ST_AsGeoJSON(a.route)::json -> 'coordinates' as path
+  from assignments a
+  join resources r on r.id = a.resource_id
+  join incidents i on i.id = a.incident_id
+ where a.sim_run_id is null
+   and a.status in ('proposed','approved','en_route','on_site')
+   and a.route is not null
+ order by a.created_at desc
+ limit 40
+"""
+
+_ALERTS_SQL = """
+select a.id::text, a.ward_id, a.hazard, a.severity, a.headline, a.action,
+       a.safe_location, a.channels, a.language, a.reach, a.issued_at,
+       a.decision_id::text decision_id, w.name ward_name
+  from alerts a
+  left join wards w on w.id = a.ward_id
+ where a.sim_run_id is null
+ order by a.issued_at desc
+ limit 30
+"""
+
+#: The inbox. Every raw report as it arrived, and what the system did with it.
+#: Without this there is no way to see what actually entered the system: the
+#: console shows incidents, and an incident is already four reports and a
+#: judgement about them.
+_REPORTS_SQL = """
+select r.id::text, r.note, r.category, r.classified_as,
+       r.classification_confidence, r.source, r.device_id, r.reporter_name,
+       r.trust_score, r.trust_breakdown, r.verification_status, r.street,
+       r.ward_id, r.created_at, r.mesh_hops, r.photo_path,
+       r.incident_id::text incident_id,
+       i.title incident_title, i.severity incident_severity,
+       i.report_count, i.created_at incident_created_at,
+       l.link_score, l.rationale link_reason, l.decided_by link_decided_by,
+       w.name ward_name,
+       extensions.ST_X(r.location::extensions.geometry) lng,
+       extensions.ST_Y(r.location::extensions.geometry) lat
+  from citizen_reports r
+  left join incidents i on i.id = r.incident_id
+  left join report_links l on l.report_id = r.id
+  left join wards w on w.id = r.ward_id
+ where r.city_id = $1 and r.sim_run_id is null
+ order by r.created_at desc
+ limit 80
+"""
+
 _INCIDENTS_SQL = """
-select i.id::text, i.title, i.category, i.ward_id, i.severity,
+select i.id::text, i.title, i.category, i.ward_id, i.severity, i.street,
        i.status::text status, i.report_count, i.confidence, i.created_at,
        extensions.ST_X(i.location::extensions.geometry) lng,
        extensions.ST_Y(i.location::extensions.geometry) lat,
@@ -424,6 +501,7 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
     (
         risk_rows, resource_rows, incident_rows, need_rows,
         decision_rows, event_rows, facility_rows, block_rows,
+        route_rows, alert_rows, report_rows,
     ) = await asyncio.gather(
         db.fetch(_WARD_RISK_SQL),
         db.fetch(_RESOURCES_SQL, city_id),
@@ -433,6 +511,9 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
         db.fetch(_EVENTS_SQL, since_event),
         _slow(f"fac:{city_id}", _FACILITIES_SQL, city_id),
         _slow(f"blk:{city_id}", _BLOCKS_SQL, city_id),
+        db.fetch(_ROUTES_SQL),
+        db.fetch(_ALERTS_SQL),
+        db.fetch(_REPORTS_SQL, city_id),
     )
 
     risk = {r["ward_id"]: r for r in risk_rows}
@@ -464,10 +545,62 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
     incidents = [
         {"id": r["id"], "title": r["title"], "category": r["category"],
          "wardId": r["ward_id"], "severity": r["severity"], "status": r["status"],
+         "street": r["street"],
          "reportCount": r["report_count"], "confidence": float(r["confidence"]),
          "location": [float(r["lng"]), float(r["lat"])],
          "createdAt": r["created_at"].isoformat(), "unitsEnRoute": r["units"]}
         for r in incident_rows
+    ]
+    routes = [
+        {"id": r["id"], "resourceId": r["resource_id"], "incidentId": r["incident_id"],
+         "resourceLabel": r["label"], "resourceKind": r["kind"],
+         "incidentTitle": r["title"], "status": r["status"],
+         "etaMinutes": r["eta_minutes"],
+         "distanceKm": float(r["distance_km"]) if r["distance_km"] is not None else None,
+         "engine": r["route_engine"], "progress": float(r["progress"] or 0),
+         "steps": r["steps"] or [],
+         "path": r["path"] or []}
+        for r in route_rows
+    ]
+    alerts = [
+        {"id": r["id"], "wardId": r["ward_id"], "wardName": r["ward_name"],
+         "hazard": r["hazard"], "severity": r["severity"],
+         "headline": r["headline"], "action": r["action"],
+         "safeLocation": r["safe_location"], "channels": list(r["channels"] or []),
+         "language": r["language"], "reach": r["reach"],
+         "decisionId": r["decision_id"],
+         "issuedAt": r["issued_at"].isoformat() if r["issued_at"] else None}
+        for r in alert_rows
+    ]
+    reports = [
+        {"id": r["id"], "text": r["note"] or "", "category": r["category"],
+         "classifiedAs": r["classified_as"],
+         "classificationConfidence": (
+             float(r["classification_confidence"])
+             if r["classification_confidence"] is not None else None
+         ),
+         "source": r["source"], "deviceId": r["device_id"],
+         "reporter": r["reporter_name"], "street": r["street"],
+         "meshHops": r["mesh_hops"], "hasPhoto": bool(r["photo_path"]),
+         "trust": float(r["trust_score"]) if r["trust_score"] is not None else None,
+         "trustBreakdown": r["trust_breakdown"] or {},
+         "status": r["verification_status"],
+         "wardId": r["ward_id"], "wardName": r["ward_name"],
+         "location": [float(r["lng"]), float(r["lat"])],
+         "createdAt": r["created_at"].isoformat(),
+         "incidentId": r["incident_id"], "incidentTitle": r["incident_title"],
+         "incidentSeverity": r["incident_severity"],
+         "incidentReportCount": r["report_count"],
+         # A report that opened its incident is the first one in; anything else
+         # with an incident was merged into one that already existed. That is
+         # the distinction the inbox exists to show.
+         "opened": bool(
+             r["incident_id"] and r["incident_created_at"]
+             and abs((r["created_at"] - r["incident_created_at"]).total_seconds()) < 2
+         ),
+         "linkScore": float(r["link_score"]) if r["link_score"] is not None else None,
+         "linkReason": r["link_reason"], "linkDecidedBy": r["link_decided_by"]}
+        for r in report_rows
     ]
     needs = [
         {"incidentId": r["incident_id"], "capability": r["capability_id"],
@@ -505,4 +638,5 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          "location": [float(r["lng"]), float(r["lat"])]}
         for r in block_rows
     ]
-    return wards, resources, incidents, needs, decisions, events, facilities, blocks
+    return (wards, resources, incidents, needs, decisions, events, facilities,
+            blocks, routes, alerts, reports)

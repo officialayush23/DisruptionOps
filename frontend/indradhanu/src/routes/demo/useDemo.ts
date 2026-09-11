@@ -17,8 +17,41 @@ export type Resource = {
 }
 export type Incident = {
   id: string; title: string; category: string; wardId: string; severity: number
-  status: string; reportCount: number; confidence: number
+  status: string; reportCount: number; confidence: number; street: string | null
   location: [number, number]; createdAt: string; unitsEnRoute: number
+}
+export type RouteStep = { instruction: string; street: string; distanceM: number }
+export type UnitRoute = {
+  id: string; resourceId: string; incidentId: string
+  resourceLabel: string; resourceKind: string; incidentTitle: string
+  status: string; etaMinutes: number | null; distanceKm: number | null
+  engine: string | null; progress: number
+  steps: RouteStep[]; path: [number, number][]
+}
+export type CitizenRoute = {
+  path: [number, number][]; headline: string; destination: string | null
+  km: number; minutes: number; engine: string; steps: RouteStep[]
+  from: [number, number]
+}
+export type Alert = {
+  id: string; wardId: string; wardName: string | null; hazard: string
+  severity: number; headline: string; action: string
+  safeLocation: { name: string; location: [number, number]; distance_km: number } | null
+  channels: string[]; language: string; reach: number
+  decisionId: string | null; issuedAt: string | null
+}
+export type RawReport = {
+  id: string; text: string; category: string
+  classifiedAs: string | null; classificationConfidence: number | null
+  source: string; deviceId: string | null; reporter: string | null
+  street: string | null; meshHops: number | null; hasPhoto: boolean
+  trust: number | null; trustBreakdown: Record<string, unknown>
+  status: string; wardId: string; wardName: string | null
+  location: [number, number]; createdAt: string
+  incidentId: string | null; incidentTitle: string | null
+  incidentSeverity: number | null; incidentReportCount: number | null
+  opened: boolean
+  linkScore: number | null; linkReason: string | null; linkDecidedBy: string | null
 }
 export type Need = {
   incidentId: string; capability: string; required: number; met: number
@@ -48,6 +81,29 @@ export type RoadBlock = {
   id: string; reason: string; reportedBy: string; radiusM: number
   location: [number, number]
 }
+export type ForecastState = {
+  horizonHours: number; generatedAt: string
+  incidentsSeen: number; historyHours: number; confidenceNote: string
+  error?: string
+  recurrence: {
+    wardId: string; wardName: string; category: string
+    ratePerHour: number; expected: number; pAtLeastOne: number
+    observed: number; observedHours: number; evidence: number
+    hazardMultiplier: number; explanation: string
+  }[]
+  facilities: {
+    id: string; name: string; kind: string
+    capacity: number | null; occupancy: number | null; status: string
+    spare: number | null; arrivalsPerHour: number; expectedArrivals: number
+    hoursToFull: number | null; pressure: string
+    fromWards: { ward: string; rate: number }[]
+    explanation: string
+  }[]
+  demand: {
+    capability: string; expectedUnits: number
+    availableNow: number; committedNow: number; shortfall: number
+  }[]
+}
 export type Duplicate = {
   kind: string; incidentIds: string[]; wardId: string | null
   agencies: string[]; detail: string; wastedUnits: number
@@ -73,6 +129,9 @@ export type DemoState = {
   wards: Ward[]; resources: Resource[]; incidents: Incident[]
   needs: Need[]; decisions: Decision[]; events: DemoEvent[]
   duplicates: Duplicate[]; facilities: Facility[]; roadBlocks: RoadBlock[]
+  routes: UnitRoute[]; alerts: Alert[]; reports: RawReport[]
+  citizenRoute: CitizenRoute | null
+  forecast: ForecastState | null
   plan: Plan | null
   beats: Beat[]
 }
@@ -81,7 +140,9 @@ export const EMPTY_DEMO: DemoState = {
   running: false, tick: 0, simNow: null, error: null,
   citizen: { lng: 73.8989, lat: 18.6773, wardId: null, wardName: "", inside: true },
   wards: [], resources: [], incidents: [], needs: [], decisions: [],
-  events: [], duplicates: [], facilities: [], roadBlocks: [], plan: null, beats: [],
+  events: [], duplicates: [], facilities: [], roadBlocks: [],
+  routes: [], alerts: [], reports: [], citizenRoute: null, forecast: null,
+  plan: null, beats: [],
 }
 
 /** Polls the one snapshot endpoint.

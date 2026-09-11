@@ -105,12 +105,21 @@ export default function DemoConsole() {
             blocks={state.roadBlocks}
             needs={state.needs}
             activity={activity}
+            routes={state.routes}
+            route={state.citizenRoute?.path}
+            routeLabel={
+              state.citizenRoute
+                ? `Given to a resident: ${state.citizenRoute.headline}`
+                : undefined
+            }
             onPickIncident={setSelected}
           />
           <p className="text-muted-foreground text-xs">
-            Dashed amber lines are units en route to what they were tasked with.
-            A number inside an incident is how many reports collapsed into it.
-            Hover anything for what happened, its current state and what the
+            Coloured lines are the streets each committed unit is driving, from
+            the router, not a bearing. Green is the route the citizen agent last
+            gave a resident, so the control room can see the advice that went
+            out. A number inside an incident is how many reports collapsed into
+            it. Hover anything for what happened, its current state and what the
             agents did about it.
           </p>
 

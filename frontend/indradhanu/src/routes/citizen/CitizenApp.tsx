@@ -44,7 +44,8 @@ type Guidance = {
   destination: { name: string; kind: string; why: string[]; distance_km: number } | null
   alternatives: { name: string; why: string[] }[]
   route: number[][]; routeKm: number; routeMinutes: number
-  routeEngine: string; hazardsConsidered: number
+  routeEngine: string; hazardsConsidered: number; exposedPoints: number
+  routeSteps: { instruction: string; street: string; distanceM: number }[]
 }
 
 const STEP = 0.0035
@@ -181,14 +182,18 @@ export default function CitizenApp() {
             resources={state?.unitsNearby?.map((u) => ({ ...u, capabilities: [] })) ?? []}
             facilities={state?.facilities ?? []}
             route={guide?.route}
+            routeLabel={guide?.headline}
+            blocks={state?.roadBlocks ?? []}
             me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
             center={[pos.lng, pos.lat]}
             zoom={13.5}
             followMe
           />
           <p className="text-muted-foreground text-xs">
-            Arrow keys or WASD move you. Green line is the route the agent
-            recommends. Red dots are open incidents.
+            Arrow keys or WASD move you. The green line is the route the agent
+            recommends, on real streets, chosen against every hazard that has
+            been reported rather than for being shortest. Red dots are open
+            incidents.
           </p>
         </div>
 
@@ -226,9 +231,38 @@ export default function CitizenApp() {
                   {guide.shouldMove && guide.destination && (
                     <div className="text-muted-foreground text-xs">
                       {guide.routeKm} km · about {guide.routeMinutes} min ·{" "}
-                      {guide.routeEngine === "osrm" ? "road route" : "straight-line estimate"}
+                      {guide.routeEngine === "mapbox" || guide.routeEngine === "osrm"
+                        ? "road route"
+                        : "straight-line estimate, the router was unreachable"}
                       {guide.hazardsConsidered > 0 &&
                         ` · ${guide.hazardsConsidered} hazard(s) taken into account`}
+                    </div>
+                  )}
+
+                  {guide.shouldMove && guide.routeSteps?.length > 0 && (
+                    <div className="rounded border p-2">
+                      <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
+                        The way there
+                      </div>
+                      <ol className="space-y-1">
+                        {guide.routeSteps.slice(0, 8).map((st, i) => (
+                          <li key={i} className="flex gap-2 text-xs">
+                            <span className="text-muted-foreground w-12 shrink-0 tabular-nums">
+                              {st.distanceM >= 1000
+                                ? `${(st.distanceM / 1000).toFixed(1)} km`
+                                : `${st.distanceM} m`}
+                            </span>
+                            <span>{st.instruction}</span>
+                          </li>
+                        ))}
+                      </ol>
+                      {guide.exposedPoints > 0 && (
+                        <p className="text-destructive mt-2 text-xs">
+                          This is the least exposed way we could find, but it still
+                          passes close to {guide.exposedPoints} reported hazard(s).
+                          Turn back if the water is moving.
+                        </p>
+                      )}
                     </div>
                   )}
                   <ul className="space-y-1">

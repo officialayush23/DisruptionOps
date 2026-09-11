@@ -45,6 +45,15 @@ export type FacilityFeature = {
 export type BlockFeature = {
   id: string; reason: string; location: [number, number]; reportedBy?: string
 }
+/** A unit's road geometry to what it was tasked with. */
+export type RouteFeature = {
+  id: string; resourceId: string; resourceLabel: string
+  incidentTitle: string; status: string
+  etaMinutes: number | null; distanceKm: number | null
+  engine?: string | null; progress?: number
+  steps?: { instruction: string; street: string; distanceM: number }[]
+  path: [number, number][]
+}
 export type NeedFeature = {
   incidentId: string; capability: string; required: number; met: number
 }
@@ -58,8 +67,14 @@ type Props = {
   needs?: NeedFeature[]
   /** id -> what has happened to it, newest first. Drives the hover card. */
   activity?: ActivityIndex
-  /** A route to draw, as [lng,lat] pairs. */
+  /** Every committed unit's road geometry, drawn as amber lines it can be
+   *  hovered for the turn list. Replaces the dashed straight "link" lines. */
+  routes?: RouteFeature[]
+  /** A single highlighted route: the citizen's own, or the one an operator is
+   *  inspecting. Drawn in green, over everything else. */
   route?: number[][]
+  /** Label for that highlighted route, shown on hover. */
+  routeLabel?: string
   /** The viewer's own position, if this interface has one. */
   me?: { lng: number; lat: number; label?: string } | null
   center?: [number, number]
@@ -222,8 +237,8 @@ const propsOf = (f: unknown): Record<string, unknown> =>
 
 export function LiveMap({
   wards = [], incidents = [], resources = [], facilities = [], blocks = [],
-  needs = [], activity,
-  route, me, center = [73.88, 18.58], zoom = 10.2, className,
+  needs = [], activity, routes = [],
+  route, routeLabel, me, center = [73.88, 18.58], zoom = 10.2, className,
   onPickIncident, followMe = false,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
@@ -286,12 +301,28 @@ export function LiveMap({
           paint: { "line-color": "#22c55e", "line-width": 4 },
         })
 
+        // Unit routes: the streets each committed vehicle is actually driving.
+        // This was a dashed straight line from the dot to the incident, which
+        // was honest about nothing: the unit was not taking that path and the
+        // path did not exist.
         m.addSource("links", { type: "geojson", data: fc([]) })
         m.addLayer({
+          id: "link-casing", type: "line", source: "links",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": "#0b1220", "line-width": 6, "line-opacity": 0.5 },
+        })
+        m.addLayer({
           id: "link-line", type: "line", source: "links",
+          layout: { "line-cap": "round", "line-join": "round" },
           paint: {
-            "line-color": "#f59e0b", "line-width": 1.6,
-            "line-dasharray": [2, 2], "line-opacity": 0.8,
+            "line-color": [
+              "match", ["get", "status"],
+              "on_site", "#10b981",
+              "en_route", "#f59e0b",
+              "#0ea5e9",
+            ] as unknown as mapboxgl.Expression,
+            "line-width": 3,
+            "line-opacity": 0.9,
           },
         })
 
@@ -381,7 +412,7 @@ export function LiveMap({
         // hoverable.
         const hoverable = [
           "incident-dot", "resource-dot", "facility-dot", "block-dot",
-          "me-dot", "ward-fill",
+          "me-dot", "link-line", "route-line", "ward-fill",
         ]
         for (const layer of hoverable) {
           m.on("mousemove", layer, (e) => {
@@ -530,21 +561,38 @@ export function LiveMap({
         id: r.id, status: r.status, glyph: glyphFor(r.kind), tip,
       })
     })))
-    // Lines from each committed unit to what it was sent to.
-    const byId = new Map(incidents.map((i) => [i.id, i]))
+  }, [ready, resources, activity])
+
+  useEffect(() => {
+    if (!ready) return
     set("links", fc(
-      resources
-        .filter((r) => r.incidentId && byId.has(r.incidentId))
-        .map((r) => ({
-          type: "Feature",
-          geometry: {
-            type: "LineString",
-            coordinates: [r.location, byId.get(r.incidentId!)!.location],
-          },
-          properties: {},
-        }))
+      routes
+        .filter((r) => r.path.length > 1)
+        .map((r) => {
+          const turns = (r.steps ?? []).filter((s) => s.street)
+          const tip =
+            `<div class="ip-title">${esc(r.resourceLabel)} &rarr; ${esc(r.incidentTitle)}</div>` +
+            `<div class="ip-sub">${esc((r.engine ?? "route").replace(/-/g, " "))}` +
+            ` · ${Math.round((r.progress ?? 0) * 100)}% of the way</div>` +
+            chip(r.status.replace(/_/g, " "),
+                 r.status === "on_site" ? "#10b981"
+                 : r.status === "en_route" ? "#f59e0b" : "#0ea5e9") +
+            row("Distance", r.distanceKm ? `${r.distanceKm.toFixed(1)} km` : null) +
+            row("ETA", r.etaMinutes ? `${r.etaMinutes} min` : null) +
+            (turns.length
+              ? `<div class="ip-hr"></div><div class="ip-head">Streets</div>` +
+                turns.slice(0, 5).map((s) =>
+                  `<div class="ip-act"><i>${Math.round(s.distanceM)}m</i>` +
+                  `<span>${esc(s.instruction)}</span></div>`).join("")
+              : "")
+          return {
+            type: "Feature" as const,
+            geometry: { type: "LineString" as const, coordinates: r.path as number[][] },
+            properties: { id: r.id, status: r.status, tip },
+          }
+        })
     ))
-  }, [ready, resources, incidents, activity])
+  }, [ready, routes])
 
   useEffect(() => {
     if (!ready) return
@@ -591,9 +639,17 @@ export function LiveMap({
   useEffect(() => {
     if (!ready) return
     set("route", route && route.length > 1
-      ? fc([{ type: "Feature", geometry: { type: "LineString", coordinates: route }, properties: {} }])
+      ? fc([{
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: route },
+          properties: {
+            tip:
+              `<div class="ip-title">${esc(routeLabel ?? "Recommended route")}</div>` +
+              `<div class="ip-sub">Scored on hazard exposure first, distance second.</div>`,
+          },
+        }])
       : fc([]))
-  }, [ready, route])
+  }, [ready, route, routeLabel])
 
   useEffect(() => {
     if (!ready) return

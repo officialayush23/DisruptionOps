@@ -6,7 +6,9 @@ import Login from "@/routes/auth/Login"
 import DemoConsole from "@/routes/demo/DemoConsole"
 import CitizenApp from "@/routes/citizen/CitizenApp"
 import FieldApp from "@/routes/field/FieldApp"
+import IntakeInbox from "@/routes/admin/IntakeInbox"
 import RiskBoard from "@/routes/admin/RiskBoard"
+import Forecast from "@/routes/admin/Forecast"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
 import DecisionGate from "@/routes/admin/DecisionGate"
@@ -49,7 +51,9 @@ export function App() {
             <AdminShell>
               <Routes>
                 <Route path="console" element={<DemoConsole />} />
+                <Route path="intake" element={<IntakeInbox />} />
                 <Route path="risk" element={<RiskBoard />} />
+                <Route path="forecast" element={<Forecast />} />
                 <Route path="incidents" element={<IncidentQueue />} />
                 <Route path="allocation" element={<AllocationPlanner />} />
                 <Route path="decisions" element={<DecisionGate />} />

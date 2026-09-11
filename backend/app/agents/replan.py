@@ -29,7 +29,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Sequence
 
 from app.core.logging import get_logger
 from app.db import session as db
@@ -198,6 +198,35 @@ async def _fleet(
     return units, current, progress, context
 
 
+async def _blocked_points(
+    conn: Any, city_id: str, sim_run_id: str | None
+) -> list[tuple[float, float]]:
+    """Places a vehicle should not be routed through.
+
+    Two sources, both real: roads a crew has declared impassable, and open
+    incidents whose category means the road itself is the problem. A waterlogged
+    basement does not block a street; a collapsed wall across one does, and the
+    taxonomy already knows the difference.
+    """
+    rows = await conn.fetch(
+        """
+        select extensions.ST_X(location::extensions.geometry) lng,
+               extensions.ST_Y(location::extensions.geometry) lat
+          from road_blocks where city_id = $1 and active
+        union all
+        select extensions.ST_X(i.location::extensions.geometry),
+               extensions.ST_Y(i.location::extensions.geometry)
+          from incidents i
+         where i.city_id = $1
+           and i.sim_run_id is not distinct from $2::uuid
+           and i.status <> 'resolved'
+           and i.category in ('flooded_road','structural_damage','power_line','fallen_tree')
+        """,
+        city_id, sim_run_id,
+    )
+    return [(float(r["lng"]), float(r["lat"])) for r in rows]
+
+
 # ------------------------------------------------------------------ replan ---
 async def replan(
     *,
@@ -231,9 +260,15 @@ async def replan(
             if ids:
                 current[unit_id] = ids[0]
 
+        # Every hazard the city currently believes in, as a point a route should
+        # not pass through. Fed to both the matrix (so a blocked pairing costs
+        # more and the solver prefers a unit that can actually get there) and to
+        # each route (so the geometry itself goes round).
+        blocked = await _blocked_points(conn, city_id, sim_run_id)
+
         started = time.perf_counter()
         matrix = await routing.travel_matrix(
-            [u.location for u in units], [d.location for d in demands]
+            [u.location for u in units], [d.location for d in demands], blocked
         )
         result = allocate(demands, units, matrix, current=current, progress=progress)
         runtime = int((time.perf_counter() - started) * 1000)
@@ -315,7 +350,7 @@ async def replan(
                     "update assignments set status = 'complete' where id = $1::uuid",
                     ctx["assignment_id"],
                 )
-                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now)
+                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked)
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CHANGED, actor=actor,
                     subject_type="resource", subject_id=unit_id, city_id=city_id,
@@ -338,7 +373,7 @@ async def replan(
                     "update resources set status = 'assigned', updated_at = $2 where id = $1",
                     unit_id, now,
                 )
-                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now)
+                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked)
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CREATED, actor=actor,
                     subject_type="assignment", subject_id=to, city_id=city_id,
@@ -420,18 +455,46 @@ async def replan(
 
 
 async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str | None,
-                            now: datetime) -> str:
+                            now: datetime, blocked: Sequence[tuple[float, float]] = ()) -> str:
+    # The road, not the line. A crew given a straight bearing to a flooded
+    # junction is being given nothing, and a unit that moves across blocks on
+    # the console looks like a simulation rather than a dispatch. The geometry
+    # is stored so the unit drives it, the field app can show it, and the
+    # console can draw what every committed unit is actually doing.
+    line = await routing.route_line(alloc.unit.location, alloc.demand.location, blocked)
+    geometry = (
+        {"type": "LineString", "coordinates": line.coordinates}
+        if len(line.coordinates) > 1
+        else None
+    )
+    steps = [
+        {"instruction": s.instruction, "street": s.street, "distanceM": s.distance_m}
+        for s in line.steps
+    ]
+
     row = await conn.fetchrow(
         """
         insert into assignments
           (plan_id, resource_id, incident_id, ward_id, purpose, eta_minutes,
-           distance_km, status, sim_run_id, created_at)
-        values ($1::uuid,$2,$3::uuid,$4,$5,$6,$7,'proposed',$8::uuid,$9)
+           distance_km, status, sim_run_id, created_at,
+           route, route_engine, progress, steps)
+        values ($1::uuid,$2,$3::uuid,$4,$5,$6,$7,'proposed',$8::uuid,$9,
+                case when $10::text is null then null
+                     else extensions.ST_SetSRID(
+                            extensions.ST_GeomFromGeoJSON($10::text), 4326) end,
+                $11, 0, $12)
         returning id::text
         """,
         plan_id, alloc.unit.id, alloc.demand.incident_id, alloc.demand.ward_id,
-        alloc.demand.purpose, alloc.eta_minutes, round(alloc.distance_km, 2),
+        alloc.demand.purpose,
+        # The router's own number when it answered, the solver's estimate when
+        # it did not. Never the optimistic one.
+        line.minutes if line.is_real_road else alloc.eta_minutes,
+        round(line.km if line.is_real_road else alloc.distance_km, 2),
         sim_run_id, now,
+        json.dumps(geometry) if geometry else None,
+        line.engine,
+        steps,
     )
     await conn.execute(
         """
