@@ -5,18 +5,28 @@ the allocation solver and the agent orchestrator live here.
 
 ## Setup
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
+**Python 3.11 or newer is required.** `datetime.UTC` and `enum.StrEnum` are
+3.11 additions and are used throughout. `app/__init__.py` refuses to import on
+anything older, with a message explaining what to do.
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1     # Windows PowerShell
 pip install -r requirements-dev.txt
 copy .env.example .env          # then fill it in
 ```
 
+See `PHASE0.md` for the full Windows walkthrough, including how to get a staff
+identity before any Supabase user exists.
+
 ## Run
 
-```bash
+```powershell
 uvicorn app.main:app --reload --port 8000
 ```
+
+Note `app.main:app`. `app` is the FastAPI instance; `app.main:main` does not
+exist.
 
 - `http://localhost:8000/docs` — OpenAPI (disabled in production)
 - `http://localhost:8000/health` — readiness, including the database
@@ -41,12 +51,28 @@ Idempotent. Touches reference geography only; never operational records.
 | `app/solver/` | CP-SAT allocation and travel-time routing |
 | `app/agents/` | LLM provider and the policy gate |
 | `app/api/v1/` | HTTP surface |
+| `app/world/` | the clock every timestamp comes from, and the append-only event log |
+| `app/taxonomy.py` | hazards, categories, resource kinds and capabilities, read from reference tables |
+| `migrations/` | schema migrations, in order |
 
 ## Adding a hazard
 
-One file in `app/hazards/`, one line in `registry.load_adapters()`. Implement
-`fetch_signal`, `score` and `action_policy`; `impact` has a sensible default.
-Nothing else in the codebase changes — that is the whole point of the contract.
+One row in `hazard_types`, one file in `app/hazards/`, one line in
+`registry.load_adapters()`. Implement `fetch_signal`, `score` and
+`action_policy`; `impact` has a sensible default. Nothing else in the codebase
+changes, which is the whole point of the contract.
+
+`action_policy` expresses what an action needs as capabilities, never as vehicle
+names: `resource_need={"dewatering": 1, "water_rescue": 1}`. Which kind of unit
+answers a capability is per-city fleet data in `resource_kind_capabilities`, and
+the solver resolves it. That is what lets the same adapter run in a city with
+entirely different equipment.
+
+## Adding a city
+
+Rows in `cities`, then its own wards, lifelines, resources, agencies and policy
+clauses carrying that `city_id`. No code changes. `GET /api/v1/taxonomy?cityId=`
+is what the frontend reads so it does not hard-code any of it.
 
 ## Where the LLM is, and is not
 

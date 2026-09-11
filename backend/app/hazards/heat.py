@@ -176,7 +176,7 @@ class HeatwaveAdapter(HazardAdapter):
                     rationale="Shelter activation is delegated once an advisory is in force.",
                     confidence=round(scored.confidence * 0.93, 2),
                     severity=sev,
-                    resource_need={"bus": 1},
+                    resource_need={"mass_transport": 1},
                 )
             )
             actions.append(
@@ -188,7 +188,7 @@ class HeatwaveAdapter(HazardAdapter):
                     rationale="Heat casualty presentations rise sharply above severity 4.",
                     confidence=round(scored.confidence * 0.88, 2),
                     severity=sev,
-                    resource_need={"ambulance": 1},
+                    resource_need={"medical_transport": 1},
                 )
             )
         return actions

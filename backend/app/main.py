@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
+from app import taxonomy
 from app.db import session as db
 
 configure_logging(settings.log_level, json_logs=settings.is_production)
@@ -27,10 +28,16 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await db.connect()
+    # Which hazards, categories, resource kinds and capabilities exist is data.
+    # Read it once here so nothing downstream has to ask the database what a
+    # boat can do in the middle of a dispatch decision.
+    await taxonomy.load()
     log.info(
         "startup",
         env=settings.indradhanu_env,
         llm_provider=settings.llm_provider,
+        hazards=len(taxonomy.cache.hazards),
+        resource_kinds=len(taxonomy.cache.resource_kinds),
     )
     try:
         yield

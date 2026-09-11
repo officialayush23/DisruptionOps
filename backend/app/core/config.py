@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     db_pool_min: int = 2
     db_pool_max: int = 10
 
+    # ---- development convenience ----
+    # When set AND the environment is development, an unauthenticated request is
+    # treated as this role instead of as an anonymous citizen. It exists so the
+    # API can be exercised before any Supabase user has been created, which is
+    # otherwise a chicken-and-egg problem: POST /runs needs a staff token, and
+    # the only way to get one is to have already set up a staff profile.
+    #
+    # The validator below refuses to start if this is set outside development.
+    # A convenience that can be left switched on by accident in production is
+    # not a convenience, it is an unauthenticated admin endpoint.
+    dev_auth_role: str = ""
+
     # ---- llm ----
     llm_provider: LLMProvider = "gemini"
     gemini_api_key: str = ""
@@ -57,6 +69,26 @@ class Settings(BaseSettings):
     data_gov_in_key: str = ""
     feed_timeout_seconds: float = 12.0
     feed_cache_ttl_seconds: int = 900
+
+    @field_validator("dev_auth_role")
+    @classmethod
+    def _dev_role_is_development_only(cls, v: str, info) -> str:
+        v = (v or "").strip()
+        if not v:
+            return ""
+        env = (info.data or {}).get("indradhanu_env", "development")
+        if env != "development":
+            raise ValueError(
+                "DEV_AUTH_ROLE is set but INDRADHANU_ENV is "
+                f"{env!r}. This bypasses authentication entirely and is refused "
+                "outside development. Unset it."
+            )
+        allowed = {"citizen", "field_operator", "ward_officer", "commissioner", "admin"}
+        if v not in allowed:
+            raise ValueError(
+                f"DEV_AUTH_ROLE must be one of {sorted(allowed)}; got {v!r}."
+            )
+        return v
 
     @field_validator("cors_origins")
     @classmethod

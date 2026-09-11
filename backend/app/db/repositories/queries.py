@@ -26,6 +26,7 @@ from app.schemas.domain import (
     SolverStats,
     UncoveredDemand,
     Ward,
+    WardLocation,
     WardRisk,
 )
 
@@ -53,19 +54,21 @@ def _ring(value: Any) -> list[list[float]]:
 
 # ----------------------------------------------------------------- wards ---
 _WARD_SQL = f"""
-select id, number, name, population, elderly_share, elevation_m, area_sq_km,
+select id, city_id, number, name, population, elderly_share, elevation_m, area_sq_km,
        {_POINT.format(col='centroid')} as centroid,
        extensions.ST_AsGeoJSON(boundary)::json -> 'coordinates' as boundary
 from wards
+where city_id = $1
 order by number::int
 """
 
 
-async def list_wards() -> list[Ward]:
-    rows = await db.fetch(_WARD_SQL)
+async def list_wards(city_id: str = "pune") -> list[Ward]:
+    rows = await db.fetch(_WARD_SQL, city_id)
     return [
         Ward(
             id=r["id"],
+            city_id=r["city_id"],
             number=r["number"],
             name=r["name"],
             centroid=_pt(r["centroid"]),
@@ -79,7 +82,7 @@ async def list_wards() -> list[Ward]:
     ]
 
 
-async def ward_contexts(hazard: HazardType) -> list[WardContext]:
+async def ward_contexts(hazard: str, city_id: str = "pune") -> list[WardContext]:
     """Everything an adapter is allowed to see, in one round trip."""
     rows = await db.fetch(
         f"""
@@ -97,14 +100,16 @@ async def ward_contexts(hazard: HazardType) -> list[WardContext]:
                coalesce(jsonb_object_agg(lf.kind, lf.n)
                         filter (where lf.kind is not null), '{{}}'::jsonb) as lifelines,
                coalesce(max(hist.n), 0) as past_events,
-               (select min(elevation_m) from wards) as city_min_elevation
+               (select min(elevation_m) from wards where city_id = $2) as city_min_elevation
         from wards w
         left join lf on lf.ward_id = w.id
         left join hist on hist.ward_id = w.id
+        where w.city_id = $2
         group by w.id
         order by w.number::int
         """,
-        hazard.value,
+        str(hazard),
+        city_id,
     )
     return [
         WardContext(
@@ -198,14 +203,14 @@ async def nearest_shelter(lng: float, lat: float) -> tuple[Shelter, float] | Non
 
 
 # ------------------------------------------------------------------ risk ---
-async def latest_run(hazard: HazardType) -> dict | None:
+async def latest_run(hazard: str) -> dict | None:
     row = await db.fetchrow(
         """
         select id, hazard, started_at, sources, mode, replay_of
         from hazard_runs where hazard = $1
         order by started_at desc limit 1
         """,
-        hazard.value,
+        str(hazard),
     )
     return dict(row) if row else None
 
@@ -439,3 +444,76 @@ async def list_field_tasks(operator: str | None = None) -> list[FieldTask]:
         )
         for r in rows
     ]
+
+
+async def locate_ward(lng: float, lat: float, city_id: str = "pune") -> WardLocation:
+    """The ward containing this point, or the nearest one if it is outside.
+
+    One query, two answers. `ST_Covers` against the boundary is the containment
+    test; ordering by distance to the boundary gives the nearest ward for free
+    when nothing contains the point. Both use the GiST indexes added with the
+    Alandi extension, so this stays cheap enough to call on every page load.
+
+    Distance is computed on the geography type, so it is metres over the
+    ellipsoid rather than a degrees approximation that would be wrong by a
+    different amount at every latitude.
+    """
+    row = await db.fetchrow(
+        f"""
+        with me as (
+          select extensions.ST_SetSRID(
+                   extensions.ST_MakePoint($1, $2), 4326
+                 )::extensions.geography as g
+        )
+        select w.id, w.city_id, w.number, w.name, w.population, w.elderly_share,
+               w.elevation_m, w.area_sq_km,
+               {_POINT.format(col='w.centroid')} as centroid,
+               extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' as boundary,
+               extensions.ST_Covers(
+                 w.boundary::extensions.geometry, me.g::extensions.geometry
+               ) as inside,
+               extensions.ST_Distance(w.boundary, me.g) / 1000.0 as km
+          from wards w, me
+         where w.city_id = $3
+         order by inside desc, km asc
+         limit 1
+        """,
+        lng,
+        lat,
+        city_id,
+    )
+    if row is None:
+        return WardLocation(
+            inside=False,
+            ward=None,
+            city_id=city_id,
+            note="No wards are configured for this deployment yet.",
+        )
+
+    ward = Ward(
+        id=row["id"],
+        city_id=row["city_id"],
+        number=row["number"],
+        name=row["name"],
+        centroid=_pt(row["centroid"]),
+        boundary=_ring(row["boundary"]),
+        population=row["population"],
+        elderly_share=float(row["elderly_share"]),
+        elevation_m=float(row["elevation_m"]),
+        area_sq_km=float(row["area_sq_km"]),
+    )
+    inside = bool(row["inside"])
+    km = round(float(row["km"]), 2)
+    note = (
+        f"You are in {ward.name}."
+        if inside
+        else (
+            f"You are about {km:g} km outside the area this deployment covers. "
+            f"The nearest covered ward is {ward.name}, and what you see below is "
+            "its risk, not yours."
+        )
+    )
+    return WardLocation(
+        inside=inside, ward=ward, distance_km=0.0 if inside else km,
+        city_id=city_id, note=note,
+    )

@@ -1,7 +1,9 @@
 import { Navigate, Route, Routes } from "react-router-dom"
 import { AdminShell } from "@/components/layout/AdminShell"
 import { useScenarioNavigation } from "@/scenario/useScenarioNavigation"
+import { RequireRole } from "@/auth/RequireRole"
 
+import Login from "@/routes/auth/Login"
 import RiskBoard from "@/routes/admin/RiskBoard"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
@@ -18,28 +20,45 @@ export function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/admin/risk" replace />} />
+      <Route path="/login" element={<Login />} />
+
+      {/* A resident is the default landing, because the largest audience for
+          this system has no account and should not meet a login wall to find
+          out whether their street is about to flood. */}
+      <Route path="/" element={<Navigate to="/citizen" replace />} />
+      <Route path="/citizen/*" element={<CitizenPortal />} />
+
+      <Route
+        path="/field/*"
+        element={
+          <RequireRole need="field">
+            <FieldPortal />
+          </RequireRole>
+        }
+      />
+
       <Route
         path="/admin/*"
         element={
-          <AdminShell>
-            <Routes>
-              <Route path="risk" element={<RiskBoard />} />
-              <Route path="incidents" element={<IncidentQueue />} />
-              <Route path="allocation" element={<AllocationPlanner />} />
-              <Route path="decisions" element={<DecisionGate />} />
-              <Route path="agent" element={<AgentTrace />} />
-              <Route path="resources" element={<ResourcesPage />} />
-              <Route path="alerts" element={<AlertsPage />} />
-              <Route path="after-action" element={<AfterAction />} />
-              <Route path="*" element={<Navigate to="/admin/risk" replace />} />
-            </Routes>
-          </AdminShell>
+          <RequireRole need="staff">
+            <AdminShell>
+              <Routes>
+                <Route path="risk" element={<RiskBoard />} />
+                <Route path="incidents" element={<IncidentQueue />} />
+                <Route path="allocation" element={<AllocationPlanner />} />
+                <Route path="decisions" element={<DecisionGate />} />
+                <Route path="agent" element={<AgentTrace />} />
+                <Route path="resources" element={<ResourcesPage />} />
+                <Route path="alerts" element={<AlertsPage />} />
+                <Route path="after-action" element={<AfterAction />} />
+                <Route path="*" element={<Navigate to="/admin/risk" replace />} />
+              </Routes>
+            </AdminShell>
+          </RequireRole>
         }
       />
-      <Route path="/citizen/*" element={<CitizenPortal />} />
-      <Route path="/field/*" element={<FieldPortal />} />
-      <Route path="*" element={<Navigate to="/admin/risk" replace />} />
+
+      <Route path="*" element={<Navigate to="/citizen" replace />} />
     </Routes>
   )
 }

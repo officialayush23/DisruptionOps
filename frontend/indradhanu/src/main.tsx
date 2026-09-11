@@ -8,6 +8,7 @@ import App from "./App.tsx"
 import { ThemeProvider } from "@/components/theme-provider.tsx"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { AuthProvider } from "@/auth/AuthProvider"
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 0 } },
@@ -19,8 +20,10 @@ createRoot(document.getElementById("root")!).render(
       <QueryClientProvider client={queryClient}>
         <TooltipProvider delayDuration={200}>
           <BrowserRouter>
-            <App />
-            <Toaster position="top-right" richColors closeButton />
+            <AuthProvider>
+              <App />
+              <Toaster position="top-right" richColors closeButton />
+            </AuthProvider>
           </BrowserRouter>
         </TooltipProvider>
       </QueryClientProvider>

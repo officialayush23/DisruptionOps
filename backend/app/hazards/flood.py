@@ -185,7 +185,7 @@ class FloodAdapter(HazardAdapter):
                     ),
                     confidence=round(scored.confidence * 0.95, 2),
                     severity=sev,
-                    resource_need={"pump": 1, "boat": 1},
+                    resource_need={"dewatering": 1, "water_rescue": 1},
                 )
             )
 
@@ -199,7 +199,7 @@ class FloodAdapter(HazardAdapter):
                     rationale="A red advisory is in force, which is the condition the clause requires.",
                     confidence=round(scored.confidence * 0.92, 2),
                     severity=sev,
-                    resource_need={"bus": 1},
+                    resource_need={"mass_transport": 1},
                 )
             )
             if impact.lifelines_at_risk.get("school"):
@@ -218,7 +218,7 @@ class FloodAdapter(HazardAdapter):
                         ),
                         confidence=round(scored.confidence * 0.9, 2),
                         severity=sev,
-                        resource_need={"bus": 1},
+                        resource_need={"mass_transport": 1},
                     )
                 )
 

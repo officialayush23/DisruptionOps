@@ -108,7 +108,11 @@ class ProposedAction:
     rationale: str
     confidence: float
     severity: int
-    #: Units the solver should try to allocate, as {resource_kind: count}.
+    #: What the action needs DONE, as {capability_id: count}, e.g.
+    #: {"dewatering": 2, "water_rescue": 1}. Adapters never name a vehicle:
+    #: which kind of unit answers a capability is city-specific fleet data, and
+    #: the solver resolves it. This is what lets one adapter work in a city with
+    #: an entirely different set of equipment.
     resource_need: Mapping[str, int] = field(default_factory=dict)
 
 

@@ -1,9 +1,17 @@
 """Authentication.
 
 Supabase issues the JWT; this service verifies it and resolves the caller's
-role from `profiles`. The role is what the API authorises against, and it is
-the same role the database policies check — so a bug in the API layer cannot
-grant access the database would refuse.
+role from `profiles`. The role is what the API authorises against, and it is the
+same role the database policies check, so a bug in the API layer cannot grant
+access the database would refuse.
+
+Verification handles both shapes Supabase issues. A token signed with an
+asymmetric key (ES256/RS256, the current default) is verified against the
+project's published JWKS; a legacy HS256 token is verified against the shared
+JWT secret. Which path is taken is decided per token from its header, and the
+algorithm is always chosen from our own allow-list rather than from the token,
+because trusting the token's `alg` field is how algorithm-confusion forgeries
+work. See `app/core/jwks.py`.
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ from typing import Annotated
 import jwt
 from fastapi import Depends, Header
 
+from app.core import jwks
 from app.core.config import settings
 from app.core.errors import Forbidden, Unauthorised
 from app.core.logging import get_logger
@@ -55,23 +64,75 @@ class Principal:
 ANONYMOUS = Principal(user_id=None, role=Role.CITIZEN)
 
 
-def _decode(token: str) -> dict:
+def _development_principal() -> Principal | None:
+    """The unauthenticated caller, when DEV_AUTH_ROLE is set in development.
+
+    Gated twice: the setting must be non-empty, and the environment must be
+    development. `Settings` refuses to load at all if the second is false, so by
+    the time this runs the check here is belt and braces rather than the only
+    thing standing between an open API and the internet.
+    """
+    role = settings.dev_auth_role
+    if not role or settings.indradhanu_env != "development":
+        return None
+    return Principal(
+        user_id=None,
+        role=Role(role),
+        ward_id=None,
+        operator=None,
+        full_name=f"Development {role.replace('_', ' ')}",
+    )
+
+
+async def _decode(token: str) -> dict:
+    """Verify and decode, by whichever method this token was signed with."""
+    header = jwks.unverified_header(token)
+    alg = header.get("alg")
+
+    common = {
+        "audience": "authenticated",
+        "options": {"verify_exp": True, "require": ["exp", "sub"]},
+    }
+
     try:
-        return jwt.decode(
-            token,
-            settings.supabase_jwt_key,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"verify_exp": True},
-        )
+        if alg in jwks.ASYMMETRIC_ALGORITHMS:
+            key = await jwks.signing_key_for(token)
+            return jwt.decode(
+                token, key.key, algorithms=list(jwks.ASYMMETRIC_ALGORITHMS), **common
+            )
+
+        if alg in jwks.SYMMETRIC_ALGORITHMS:
+            if not settings.supabase_jwt_key:
+                raise Unauthorised(
+                    "This token is signed with the legacy shared secret, but "
+                    "SUPABASE_JWT_KEY is not configured."
+                )
+            return jwt.decode(
+                token,
+                settings.supabase_jwt_key,
+                algorithms=list(jwks.SYMMETRIC_ALGORITHMS),
+                **common,
+            )
+
+        raise Unauthorised(f"Unsupported token algorithm {alg!r}.")
+
     except jwt.ExpiredSignatureError as exc:
         raise Unauthorised("Your session has expired. Sign in again.") from exc
+    except jwt.InvalidAudienceError as exc:
+        raise Unauthorised("That token was not issued for this application.") from exc
     except jwt.InvalidTokenError as exc:
         raise Unauthorised("That token could not be verified.") from exc
+    except jwks.KeyUnavailable as exc:
+        # Not the caller's fault, and not a reason to let them in either.
+        log.error("jwks_unavailable", error=str(exc))
+        raise Unauthorised(
+            "The signing keys for this project could not be reached, so the "
+            "token cannot be verified right now."
+        ) from exc
 
 
 async def _principal_from_token(token: str) -> Principal:
-    claims = _decode(token)
+    claims = await _decode(token)
     user_id = claims.get("sub")
     if not user_id:
         raise Unauthorised("Token carries no subject.")
@@ -98,6 +159,14 @@ async def current_principal(
     """Resolves the caller. Anonymous is a valid outcome: a resident can read
     the risk map and file a report without an account."""
     if not authorization:
+        dev = _development_principal()
+        if dev is not None:
+            log.warning(
+                "dev_auth_principal_used",
+                role=str(dev.role),
+                note="unauthenticated request granted a role by DEV_AUTH_ROLE",
+            )
+            return dev
         return ANONYMOUS
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:

@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from app.core.logging import get_logger
 from app.hazards.base import HazardAdapter, Maturity
-from app.schemas.domain import HazardType
-
 log = get_logger(__name__)
 
-_registry: dict[HazardType, HazardAdapter] = {}
+# Keyed by plain hazard id, so an adapter for a hazard that is not in the
+# HazardType constants (a new city's cyclone, say) registers exactly the same.
+_registry: dict[str, HazardAdapter] = {}
 
 
 def register(adapter: HazardAdapter) -> HazardAdapter:
@@ -22,14 +22,14 @@ def register(adapter: HazardAdapter) -> HazardAdapter:
     _registry[adapter.hazard] = adapter
     log.info(
         "hazard_adapter_registered",
-        hazard=adapter.hazard,
+        hazard=str(adapter.hazard),
         maturity=adapter.maturity,
         sources=len(adapter.sources),
     )
     return adapter
 
 
-def get(hazard: HazardType) -> HazardAdapter:
+def get(hazard: str) -> HazardAdapter:
     try:
         return _registry[hazard]
     except KeyError as exc:
@@ -45,7 +45,8 @@ def live_adapters() -> list[HazardAdapter]:
 
 
 def load_adapters() -> None:
-    """Called once at startup. Adding a hazard is a line here plus one file."""
+    """Called once at startup. Adding a hazard is a line here plus one file,
+    and a row in `hazard_types` so the rest of the platform knows it exists."""
     if _registry:
         return
     from app.hazards.air import AirQualityAdapter
