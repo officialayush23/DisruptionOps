@@ -46,7 +46,19 @@ type AuthState = {
    *  back to a login screen they just used correctly reads as "wrong
    *  password", and they will type it again. */
   entitlementUnavailable: boolean
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>
+  /** Resolves once the entitlement is known, and hands it back.
+   *
+   *  Returning `me` is the point. A caller that signs in and then reads `me`
+   *  off the context is reading the binding from the render it was defined in,
+   *  which is still the anonymous one — a new entitlement means a *new* `me`
+   *  in a *later* render, and the closure that called `signIn` never sees it.
+   *  That sent every signed-in commissioner to the citizen portal, because
+   *  anonymous is a citizen. No delay fixes it; the value has to come back out
+   *  of the call. */
+  signIn: (
+    email: string,
+    password: string
+  ) => Promise<{ error: string | null; me: Me | null }>
   signUp: (
     email: string,
     password: string,
@@ -109,10 +121,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(async (email: string, password: string) => {
     if (!supabaseConfigured) {
-      return { error: "Supabase is not configured in this build." }
+      return { error: "Supabase is not configured in this build.", me: null }
     }
     const { error } = await supabase.auth.signInWithPassword({ email, password })
-    return { error: error?.message ?? null }
+    if (error) return { error: error.message, me: null }
+
+    // Ask who this is before returning. `accessToken()` reads the session live
+    // from the Supabase client, which already holds the new one by the time the
+    // call above resolves, so this carries the right bearer. `onAuthStateChange`
+    // will also fire and refresh; doing it here too is one extra request and
+    // the difference between the caller knowing the role and guessing it.
+    try {
+      const fresh = await fetchMe()
+      setMe(fresh)
+      setEntitlementUnavailable(false)
+      return { error: null, me: fresh }
+    } catch (err) {
+      // Signed in, entitlement unknown. Not an error to show as a failed
+      // password — the guard has its own screen for exactly this.
+      console.warn("[indradhanu] signed in but /auth/me unavailable", err)
+      setEntitlementUnavailable(true)
+      return { error: null, me: null }
+    }
   }, [])
 
   const signUp = useCallback(

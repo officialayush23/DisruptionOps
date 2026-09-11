@@ -31,7 +31,9 @@ import {
 
 
 export default function Login() {
-  const { signIn, signUp, configured, me } = useAuth()
+  // No `me` here on purpose. Where to send somebody after signing in comes from
+  // what `signIn` returns, not from the context copy this render closed over.
+  const { signIn, signUp, configured } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string } | null)?.from
@@ -54,7 +56,12 @@ export default function Login() {
    *  to the console they cannot see, because that is where they clicked, is a
    *  worse welcome than sending them to their own screen.
    */
-  function landing(role: string) {
+  function landing(role: string, entitlementUnknown = false) {
+    // Signed in, but `/auth/me` did not answer, so the role is not known. Going
+    // to `from` lets RequireRole show its "signed in, API is down" screen, which
+    // is the true story. Falling back to /citizen here would instead say, quite
+    // wrongly, that this is all they are entitled to.
+    if (entitlementUnknown) return from ?? "/citizen"
     if (from && (role === "ward_officer" || role === "commissioner" || role === "admin")) {
       return from
     }
@@ -81,9 +88,14 @@ export default function Login() {
       }
       const r = await signIn(email.trim(), password)
       if (r.error) { setError(r.error); return }
-      // The provider reads the profile on the auth event; give it the tick it
-      // needs before deciding where this person belongs.
-      setTimeout(() => navigate(landing(me.role), { replace: true }), 120)
+      // `r.me`, never the `me` from context. This read the context copy behind a
+      // 120ms setTimeout, which looks like it waits for the profile and does
+      // not: the delay postpones the navigation but the closure still holds the
+      // anonymous `me` captured when this function was created, and anonymous
+      // has role "citizen". A commissioner signed in correctly and was sent to
+      // the resident view. `null` means the API did not answer — send them to
+      // where they were going and let the guard explain.
+      navigate(landing(r.me?.role ?? "citizen", !r.me), { replace: true })
     } finally { setBusy(null) }
   }
 
@@ -110,13 +122,15 @@ export default function Login() {
         )
         return
       }
-      // The role comes from the identity we clicked, not from parsing its
-      // email. Two accounts share the field_operator role and neither address
-      // begins with it.
+      // The server's answer first; the clicked card only as a fallback. The
+      // card is a label in this bundle, while `r.me` is what `profiles` and the
+      // API actually say this account is — and if the two ever disagree, the
+      // card is the one that is wrong.
       const role =
+        r.me?.role ??
         identitiesFor(portal).find((d) => d.email === demoEmail)?.role ??
         "citizen"
-      setTimeout(() => navigate(landing(role), { replace: true }), 120)
+      navigate(landing(role, !r.me), { replace: true })
     } finally { setBusy(null) }
   }
 
