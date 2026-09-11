@@ -39,7 +39,18 @@ services:
       # the API answers normally and the browser discards the response, so it
       # presents as "the deployed frontend shows no data" rather than as an
       # error in these logs.
+      # The value is compared to the browser's Origin header, which is scheme +
+      # host + port and nothing else. A trailing slash or a pair of quotes makes
+      # it never match. The API normalises both away now, and logs the origins
+      # it resolved under `event=cors` at startup: read that line before
+      # believing this variable is set correctly.
       - key: CORS_ORIGINS
+        sync: false
+      # Vercel gives every preview deploy its own hostname, so they cannot be
+      # enumerated above. This regex is matched against the whole Origin header.
+      # Anchor it: an unanchored pattern matches a substring, and
+      # `distro-ruddy.vercel.app.attacker.com` is a substring match.
+      - key: CORS_ORIGIN_REGEX
         sync: false
 
       # DEV_AUTH_ROLE is deliberately absent. It treats unauthenticated

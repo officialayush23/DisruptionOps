@@ -67,9 +67,20 @@ app = FastAPI(
 
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+# A CORS misconfiguration is the one failure this service cannot see: the API
+# answers 200, the browser discards the response, and the logs show a healthy
+# deployment while the frontend shows nothing. Say out loud, once, which origins
+# this process will actually accept, so the answer is in the startup log rather
+# than in a dashboard someone has to remember to open.
+log.info(
+    "cors",
+    origins=settings.cors_origin_list,
+    origin_regex=settings.cors_origin_regex or None,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],

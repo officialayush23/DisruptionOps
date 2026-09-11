@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     indradhanu_env: Environment = "development"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:5173"
+    # A regex matched against the whole Origin header, for origins that cannot
+    # be enumerated. Every Vercel preview deploy gets its own hostname, so the
+    # alternative is editing an environment variable on every push.
+    cors_origin_regex: str = ""
 
     # ---- database ----
     supabase_url: str = ""
@@ -123,14 +127,30 @@ class Settings(BaseSettings):
             )
         return v
 
-    @field_validator("cors_origins")
+    @field_validator("cors_origins", "cors_origin_regex")
     @classmethod
     def _strip(cls, v: str) -> str:
-        return v.strip()
+        return v.strip().strip("\"'")
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        """The allowed origins, normalised.
+
+        An origin is a scheme, a host and an optional port -- nothing else. A
+        browser sends exactly that in the `Origin` header, and CORSMiddleware
+        compares it by string equality, so `https://app.vercel.app/` with its
+        trailing slash never matches and `"https://app.vercel.app"` carrying the
+        quotes a dashboard let someone paste never matches either. Both are
+        invisible server-side: the API answers 200 and the browser throws the
+        response away. Normalise here rather than asking every deployment to get
+        the punctuation right.
+        """
+        out: list[str] = []
+        for raw in self.cors_origins.split(","):
+            o = raw.strip().strip("\"'").rstrip("/")
+            if o:
+                out.append(o)
+        return out
 
     @property
     def is_production(self) -> bool:
