@@ -18,7 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from app.agents import orchestrator
-from app.core.errors import NotFound
+from app.core.errors import BadRequest, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.hazards import registry
 from app.schemas.domain import Event, RunRequest, RunResult, Taxonomy
@@ -28,6 +28,19 @@ from app.world import clock as clocks
 from app.world import events as ev
 
 router = APIRouter(tags=["runs"])
+
+
+def _clock_for(sim_run_id: str | None):
+    """Resolve a simulation scope, turning a bad one into a 400 rather than a 500.
+
+    The docs page sends the literal string "string" for an unset optional field,
+    which is how this first showed up as an internal error on an endpoint that
+    was otherwise fine.
+    """
+    try:
+        return clocks.get(sim_run_id)
+    except clocks.UnknownScope as exc:
+        raise BadRequest(str(exc)) from exc
 
 
 @router.get("/taxonomy", response_model=Taxonomy)
@@ -71,7 +84,7 @@ async def start_run(body: RunRequest, principal: StaffPrincipal) -> RunResult:
             f"{body.hazard!r} is a known hazard but has no adapter in this build."
         ) from exc
 
-    clock = clocks.get(body.sim_run_id)
+    clock = _clock_for(body.sim_run_id)
     return await orchestrator.run_hazard(
         body.hazard,
         city_id=body.city_id,

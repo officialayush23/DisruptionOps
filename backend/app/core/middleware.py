@@ -1,4 +1,17 @@
-"""Request middleware: correlation id, access log, timing."""
+"""Request middleware: correlation id, access log, timing, and the last-resort
+error boundary.
+
+The error boundary is here rather than only as an `@app.exception_handler`
+because of where Starlette puts things. An app-level `Exception` handler runs in
+`ServerErrorMiddleware`, which sits OUTSIDE the user middleware stack, so its
+500 response never passes back through `CORSMiddleware` and carries no
+`Access-Control-Allow-Origin` header. The browser then reports a CORS failure
+and hides the actual error, which sends you looking at your CORS configuration
+for a bug that is in a query.
+
+Catching it here, in the innermost middleware, means the response still travels
+out through CORS and the frontend sees the real status and message.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +34,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         started = time.perf_counter()
         try:
             response = await call_next(request)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - deliberate boundary
             elapsed = (time.perf_counter() - started) * 1000
             log.exception(
                 "request_failed",
@@ -29,7 +42,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 path=request.url.path,
                 duration_ms=round(elapsed, 1),
             )
-            raise
+            from app.core.errors import problem_response
+
+            response = problem_response(exc)
+            response.headers["X-Request-ID"] = rid
+            request_id_ctx.reset(token)
+            return response
         finally:
             request_id_ctx.reset(token)
 

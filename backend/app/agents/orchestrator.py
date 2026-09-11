@@ -155,11 +155,11 @@ async def run_hazard(
         run_row = await conn.fetchrow(
             """
             insert into hazard_runs (hazard, sources, mode, sim_run_id, started_at)
-            values ($1, $2::jsonb, $3, $4::uuid, $5)
+            values ($1, $2, $3, $4::uuid, $5)
             returning id::text
             """,
             hazard_id,
-            json.dumps(list(adapter.sources)),
+            list(adapter.sources),
             mode,
             clock.sim_run_id,
             clock.now(),
@@ -235,7 +235,7 @@ async def run_hazard(
             insert into ward_risks
               (run_id, ward_id, hazard, score, severity, lead_time_hours,
                confidence, population_at_risk, drivers, projection)
-            values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)
+            values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             """,
             [
                 (
@@ -247,8 +247,8 @@ async def run_hazard(
                     s.lead_time_hours,
                     round(s.confidence, 4),
                     impact.population_at_risk,
-                    json.dumps([d.model_dump() for d in s.drivers]),
-                    json.dumps(s.projection),
+                    [d.model_dump() for d in s.drivers],
+                    s.projection,
                 )
                 for s, impact, _ward in scored
             ],
@@ -308,14 +308,14 @@ async def run_hazard(
                 insert into decisions
                   (agent_run_id, hazard, action_key, action, target, ward_id,
                    rationale, confidence, authority, status, sim_run_id, created_at)
-                values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::uuid,$12)
+                values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid,$12)
                 returning id::text
                 """,
                 agent_run_id, hazard_id, action.action_key, action.action,
                 action.target, action.ward_id,
                 f"{action.rationale} {reason}",
                 round(action.confidence, 4),
-                json.dumps(authority.model_dump()),
+                authority.model_dump(),
                 status.value, clock.sim_run_id, clock.now(),
             )
             decisions.append(
@@ -379,18 +379,18 @@ async def run_hazard(
                 """
                 insert into allocation_plans
                   (run_id, hazard, objective, solver, uncovered, sim_run_id, generated_at)
-                values ($1::uuid,$2,$3,$4::jsonb,$5::jsonb,$6::uuid,$7)
+                values ($1::uuid,$2,$3,$4,$5,$6::uuid,$7)
                 returning id::text
                 """,
                 run_id, hazard_id, alloc.objective_text,
-                json.dumps({
+                {
                     "engine": alloc.engine,
                     "runtime_ms": alloc.runtime_ms,
                     "variables": alloc.variables,
                     "constraints": alloc.constraints,
                     "coverage": round(alloc.coverage, 4),
-                }),
-                json.dumps([
+                },
+                [
                     {
                         "ward_id": u.demand.ward_id,
                         "incident_id": u.demand.incident_id,
@@ -399,7 +399,7 @@ async def run_hazard(
                         "shortfall": u.shortfall,
                     }
                     for u in alloc.unmet
-                ]),
+                ],
                 clock.sim_run_id, clock.now(),
             )
             plan_id = plan_row["id"]
@@ -677,14 +677,14 @@ async def _issue_alerts(
             insert into alerts
               (decision_id, ward_id, hazard, severity, headline, action, by_time,
                safe_location, channels, language, reach, issued_at)
-            values ($1::uuid,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12)
+            values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             returning id::text
             """,
             d["id"], ward.ward_id, hazard_id, action.severity,
             f"{action.action} for {ward.name}",
             _citizen_action(action, safe),
             clock.now(),
-            json.dumps(safe) if safe else None,
+            safe,
             ["push", "sms"],
             "English",
             impact.population_at_risk,

@@ -2,23 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Annotated
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
 from app.agents import llm
 from app.core.errors import NotFound
-from app.core.security import CurrentPrincipal
-from app.db import session as db
 from app.db.repositories import queries as q
 from app.schemas.domain import (
     AskRequest,
     AskResponse,
-    CitizenReport,
     CitizenSituation,
     HazardType,
-    ReportCreate,
 )
 
 router = APIRouter(tags=["citizen"])
@@ -127,47 +120,15 @@ async def situation(ward_id: str) -> CitizenSituation:
     )
 
 
-@router.post("/reports", response_model=CitizenReport, status_code=201)
-async def submit_report(
-    body: ReportCreate, principal: CurrentPrincipal
-) -> CitizenReport:
-    """Anyone may file a report, signed in or not.
-
-    Classification confidence is recorded as unset here; the vision model fills
-    it in asynchronously. We do not fabricate a score at insert time.
-    """
-    row = await db.fetchrow(
-        """
-        insert into citizen_reports
-          (ward_id, category, location, note, photo_path, classified_as,
-           reporter_id, reporter_name)
-        values ($1, $2,
-                extensions.ST_SetSRID(extensions.ST_MakePoint($3, $4), 4326)::extensions.geography,
-                $5, $6, $2, $7, $8)
-        returning id::text, created_at
-        """,
-        body.ward_id,
-        body.category.value,
-        body.location[0],
-        body.location[1],
-        body.note,
-        body.photo_url,
-        principal.user_id,
-        principal.full_name or "Anonymous",
-    )
-    return CitizenReport(
-        id=row["id"],
-        incident_id=None,
-        ward_id=body.ward_id,
-        category=body.category,
-        location=body.location,
-        note=body.note,
-        photo_url=body.photo_url,
-        created_at=row["created_at"],
-        classified_as=body.category,
-        classification_confidence=0.0,
-        reporter_name=principal.full_name or "Anonymous",
-    )
+# ---------------------------------------------------------------- reports ---
+# `POST /reports` used to live here. It inserted a row and stopped: no trust
+# score, no clustering, `incident_id` left null forever. It now lives in
+# `app/api/v1/reports.py` and goes through `app/incidents/intake.py`, which
+# scores the report, decides whether it describes something already open, and
+# opens or joins an incident.
+#
+# The handler is not merely moved, it is deleted, because two handlers for one
+# path is how somebody later fixes the one that is never reached.
 
 
 @router.post("/ask", response_model=AskResponse)

@@ -23,7 +23,18 @@ _pool: asyncpg.Pool | None = None
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
-    """Decode json/jsonb straight into Python objects."""
+    """Encode and decode json/jsonb straight from Python objects.
+
+    IMPORTANT, and the source of a real bug: this codec handles BOTH
+    directions. Pass a dict or a list to a jsonb parameter and it is serialised
+    for you. Passing `json.dumps(x)` serialises it twice, and Postgres stores a
+    jsonb *string* containing JSON rather than a jsonb object. It reads back as
+    `str`, every model that expects a dict fails validation, and the column
+    quietly looks fine in psql.
+
+    So: jsonb parameters take Python objects. Only genuine `text` columns, such
+    as `agent_steps.tool_input`, take `json.dumps`.
+    """
     await conn.set_type_codec(
         "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
     )

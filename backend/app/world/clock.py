@@ -22,6 +22,7 @@ it happened, not when it landed.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -118,15 +119,43 @@ def register_sim_clock(clock: SimClock) -> SimClock:
     return clock
 
 
+class UnknownScope(ValueError):
+    """The caller named a simulation scope that is not open.
+
+    Deliberately not a silent fallback to the wall clock. Writing a simulated
+    report into live operations because a scope id was wrong is the one mistake
+    this whole design exists to prevent, so an unusable scope is refused rather
+    than quietly reinterpreted.
+    """
+
+
 def get(sim_run_id: str | None) -> Clock:
-    """Resolve the clock for a scope. `None` means live."""
+    """Resolve the clock for a scope. `None`, or blank, means live.
+
+    Blank counts as live because the API docs page sends the literal string
+    "string" for an unset optional field, and an empty form input sends "". A
+    500 from a placeholder is a bad first impression of an endpoint that is
+    working fine.
+    """
     if sim_run_id is None:
         return WALL
-    clock = _sim_clocks.get(sim_run_id)
+    scope = sim_run_id.strip()
+    if not scope or scope.lower() in ("string", "null", "none"):
+        return WALL
+
+    try:
+        uuid.UUID(scope)
+    except ValueError:
+        raise UnknownScope(
+            f"{sim_run_id!r} is not a simulation run id. Leave it empty for "
+            "live operations, or pass the UUID of an open run."
+        ) from None
+
+    clock = _sim_clocks.get(scope)
     if clock is None:
-        raise LookupError(
-            f"No clock open for simulation {sim_run_id}. "
-            "Load the run before using its scope."
+        raise UnknownScope(
+            f"Simulation {scope} is not open in this process. Start or resume "
+            "the run before writing into its scope."
         )
     return clock
 

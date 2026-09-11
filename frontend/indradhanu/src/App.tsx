@@ -4,6 +4,8 @@ import { useScenarioNavigation } from "@/scenario/useScenarioNavigation"
 import { RequireRole } from "@/auth/RequireRole"
 
 import Login from "@/routes/auth/Login"
+import DemoConsole from "@/routes/demo/DemoConsole"
+import LiveOps from "@/routes/admin/LiveOps"
 import RiskBoard from "@/routes/admin/RiskBoard"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
@@ -43,6 +45,10 @@ export function App() {
           <RequireRole need="staff">
             <AdminShell>
               <Routes>
+                {/* The only screen wired to the real API. Everything else
+                    still reads src/api/mock until it is migrated. */}
+                <Route path="demo" element={<DemoConsole />} />
+                <Route path="live" element={<LiveOps />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="incidents" element={<IncidentQueue />} />
                 <Route path="allocation" element={<AllocationPlanner />} />
@@ -51,7 +57,7 @@ export function App() {
                 <Route path="resources" element={<ResourcesPage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
-                <Route path="*" element={<Navigate to="/admin/risk" replace />} />
+                <Route path="*" element={<Navigate to="/admin/demo" replace />} />
               </Routes>
             </AdminShell>
           </RequireRole>

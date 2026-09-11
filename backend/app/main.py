@@ -20,6 +20,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
 from app import taxonomy
 from app.db import session as db
+from app.demo import runner as demo_runner
 
 configure_logging(settings.log_level, json_logs=settings.is_production)
 log = get_logger(__name__)
@@ -42,6 +43,10 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        # Stop the demo loop before the pool closes. Otherwise a reload leaves a
+        # task writing into a disconnected pool and the log fills with noise
+        # that looks like a real failure.
+        await demo_runner.stop()
         await db.disconnect()
         log.info("shutdown")
 

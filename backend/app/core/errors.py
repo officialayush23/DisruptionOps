@@ -39,6 +39,12 @@ class NotFound(AppError):
     title = "Resource not found"
 
 
+class BadRequest(AppError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    problem = "bad-request"
+    title = "That request cannot be processed as sent"
+
+
 class Conflict(AppError):
     status_code = status.HTTP_409_CONFLICT
     problem = "conflict"
@@ -86,6 +92,24 @@ def _problem(
     body.update(extra)
     return ORJSONResponse(
         status_code=status_code, content=body, media_type="application/problem+json"
+    )
+
+
+def problem_response(exc: Exception) -> ORJSONResponse:
+    """Turn any exception into a problem document.
+
+    Used by the middleware error boundary. Deliberate application errors keep
+    their own status and message; anything else becomes a 500 that says the
+    failure was logged against this request id, rather than leaking an internal
+    message to the browser.
+    """
+    if isinstance(exc, AppError):
+        return _problem(exc.status_code, exc.problem, exc.title, exc.detail, **exc.extra)
+    return _problem(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "internal-error",
+        "Something went wrong",
+        "The failure has been logged against this request id.",
     )
 
 

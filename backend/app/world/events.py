@@ -103,7 +103,7 @@ _INSERT = """
 insert into events
   (city_id, sim_run_id, occurred_at, kind, actor, subject_type, subject_id,
    ward_id, payload, causation_id)
-values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10)
 returning id, kind, occurred_at
 """
 
@@ -127,8 +127,6 @@ async def append(
     events in the same transaction as the state change they describe. An event
     that survives a rolled-back write would be a lie.
     """
-    import json
-
     args = (
         city_id,
         clock.sim_run_id,
@@ -138,7 +136,9 @@ async def append(
         subject_type,
         str(subject_id),
         ward_id,
-        json.dumps(payload or {}),
+        # A dict, not json.dumps(dict): the pool's codec serialises jsonb
+        # parameters itself. See app/db/session.py.
+        payload or {},
         caused_by,
     )
     row = await (conn.fetchrow(_INSERT, *args) if conn else db.fetchrow(_INSERT, *args))
@@ -168,7 +168,7 @@ async def append_many(
             r["subject_type"],
             str(r["subject_id"]),
             r.get("ward_id"),
-            json.dumps(r.get("payload") or {}),
+            json.dumps(r.get("payload") or {}),  # text[] then ::jsonb in SQL
             r.get("caused_by"),
         )
         for r in rows
