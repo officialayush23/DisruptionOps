@@ -1,0 +1,43 @@
+# --- web ---
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.6
+orjson>=3.10
+python-multipart>=0.0.12
+
+# --- database ---
+asyncpg>=0.30
+supabase>=2.9            # storage + auth admin only; queries go through asyncpg
+
+# --- http / resilience ---
+httpx>=0.27
+tenacity>=9.0
+
+# --- auth ---
+pyjwt[crypto]>=2.9
+cryptography>=43.0
+
+# --- observability ---
+structlog>=24.4
+prometheus-fastapi-instrumentator>=7.0
+
+# --- rate limiting ---
+slowapi>=0.1.9
+
+# --- optimisation & geometry ---
+ortools>=9.11
+shapely>=2.0
+pyproj>=3.7
+
+# --- agents / llm ---
+langchain>=0.3
+langchain-core>=0.3
+langgraph>=0.2
+langchain-google-genai>=2.0
+google-genai>=0.3
+langchain-aws>=0.2
+boto3>=1.35
+
+# --- config ---
+python-dotenv>=1.0

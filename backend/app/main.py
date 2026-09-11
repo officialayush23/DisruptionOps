@@ -1,0 +1,86 @@
+"""Indradhanu API.
+
+Application wiring only: configuration, lifespan, middleware, routers. Every
+piece of behaviour lives in its own module so this file stays readable.
+"""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import ORJSONResponse
+
+from app.api.v1.router import api_router
+from app.core.config import settings
+from app.core.errors import register_error_handlers
+from app.core.logging import configure_logging, get_logger
+from app.core.middleware import RequestContextMiddleware
+from app.db import session as db
+
+configure_logging(settings.log_level, json_logs=settings.is_production)
+log = get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await db.connect()
+    log.info(
+        "startup",
+        env=settings.indradhanu_env,
+        llm_provider=settings.llm_provider,
+    )
+    try:
+        yield
+    finally:
+        await db.disconnect()
+        log.info("shutdown")
+
+
+app = FastAPI(
+    title="Indradhanu API",
+    description=(
+        "Hazard-agnostic climate disaster early warning and response. "
+        "Forecast to ward-level decision to household instruction."
+    ),
+    version="0.1.0",
+    default_response_class=ORJSONResponse,
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None,
+    openapi_url=None if settings.is_production else "/openapi.json",
+    lifespan=lifespan,
+)
+
+app.add_middleware(RequestContextMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
+)
+
+register_error_handlers(app)
+app.include_router(api_router, prefix="/api/v1")
+
+
+@app.get("/health/live", tags=["health"], include_in_schema=False)
+async def live() -> dict[str, str]:
+    """Liveness: the process is up. Deliberately does not touch the database."""
+    return {"status": "ok"}
+
+
+@app.get("/health", tags=["health"])
+async def health() -> dict[str, object]:
+    """Readiness: the process is up *and* its dependencies answer."""
+    database = await db.healthcheck()
+    return {
+        "status": "ok" if database else "degraded",
+        "env": settings.indradhanu_env,
+        "database": database,
+        "llm_provider": settings.llm_provider,
+    }

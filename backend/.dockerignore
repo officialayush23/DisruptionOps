@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+tests/
+.git/
+.gitignore
+README.md
+requirements-dev.txt
