@@ -8,6 +8,8 @@ broken system even when every number in it is correct.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime
 from typing import Any
 
@@ -136,6 +138,24 @@ async def demo_decide(decision_id: str, action: str, principal: StaffPrincipal) 
     return {"id": decision_id, "status": status}
 
 
+#: Duplicate detection is two joins over assignments and a self-join over
+#: incidents. At a 120 ms round trip, running it on every one-second poll was a
+#: meaningful share of why this endpoint took five seconds. It changes on the
+#: scale of a re-plan, not a frame, so it is cached.
+_DUP_TTL = 4.0
+_dup_cache: tuple[float, list] = (0.0, [])
+
+
+async def _duplicates_cached(city_id: str) -> list:
+    now = time.monotonic()
+    stamp, value = _dup_cache
+    if now - stamp < _DUP_TTL:
+        return value
+    found = await duplicates.detect(city_id=city_id, sim_run_id=None)
+    globals()["_dup_cache"] = (now, found)
+    return found
+
+
 @router.get("/demo/state")
 async def demo_state(
     _: CurrentPrincipal,
@@ -145,8 +165,11 @@ async def demo_state(
     """Everything the console draws, in one round trip."""
     st = runner.state
 
-    wards, resources, incidents, decisions, events, needs = await _snapshot(city_id, since_event)
-    dupes = await duplicates.detect(city_id=city_id, sim_run_id=None)
+    snapshot, dupes = await asyncio.gather(
+        _snapshot(city_id, since_event), _duplicates_cached(city_id)
+    )
+    (wards, resources, incidents, needs, decisions,
+     events, facilities, blocks) = snapshot
 
     return {
         "running": st.running,
@@ -160,6 +183,8 @@ async def demo_state(
         "needs": needs,
         "decisions": decisions,
         "events": events,
+        "facilities": facilities,
+        "roadBlocks": blocks,
         "duplicates": [
             {
                 "kind": d.kind, "incidentIds": d.incident_ids, "wardId": d.ward_id,
@@ -176,149 +201,180 @@ async def demo_state(
     }
 
 
+_WARDS_SQL = """
+select w.id, w.name, w.number, w.population,
+       extensions.ST_X(w.centroid::extensions.geometry) lng,
+       extensions.ST_Y(w.centroid::extensions.geometry) lat,
+       extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' -> 0 as boundary,
+       r.score, r.severity, r.population_at_risk par
+  from wards w
+  left join lateral (
+    select score, severity, population_at_risk from ward_risks
+     where ward_id = w.id order by created_at desc limit 1
+  ) r on true
+ where w.city_id = $1
+ order by w.number::int
+"""
+
+_RESOURCES_SQL = """
+select r.id, r.kind, r.label, r.operator, r.agency_id, r.capacity,
+       r.status::text status, r.status_note, r.unavailable_reason,
+       extensions.ST_X(r.location::extensions.geometry) lng,
+       extensions.ST_Y(r.location::extensions.geometry) lat,
+       (select array_agg(capability_id) from resource_kind_capabilities
+         where kind_id = r.kind) caps,
+       a.incident_id::text incident_id, a.eta_minutes, i.title incident_title
+  from resources r
+  left join lateral (
+    select * from assignments x
+     where x.resource_id = r.id
+       and x.status in ('proposed','approved','en_route','on_site')
+       and x.sim_run_id is null
+     order by x.created_at desc limit 1
+  ) a on true
+  left join incidents i on i.id = a.incident_id
+ where r.city_id = $1
+ order by r.kind, r.label
+"""
+
+_INCIDENTS_SQL = """
+select i.id::text, i.title, i.category, i.ward_id, i.severity,
+       i.status::text status, i.report_count, i.confidence, i.created_at,
+       extensions.ST_X(i.location::extensions.geometry) lng,
+       extensions.ST_Y(i.location::extensions.geometry) lat,
+       (select count(*) from assignments a
+         where a.incident_id = i.id
+           and a.status in ('proposed','approved','en_route','on_site'))::int units
+  from incidents i
+ where i.city_id = $1 and i.status <> 'resolved'
+ order by i.severity desc, i.created_at desc
+ limit 60
+"""
+
+_NEEDS_SQL = """
+select n.incident_id::text incident_id, n.capability_id, n.required, n.met
+  from incident_needs n
+  join incidents i on i.id = n.incident_id
+ where i.status <> 'resolved'
+"""
+
+_DECISIONS_SQL = """
+select id::text, action, target, ward_id, rationale, confidence,
+       status::text status, authority, created_at
+  from decisions
+ where sim_run_id is null
+ order by (status = 'awaiting_approval') desc, created_at desc
+ limit 25
+"""
+
+_EVENTS_SQL = """
+select id, kind, actor, subject_type, subject_id, ward_id, payload,
+       occurred_at, causation_id
+  from events
+ where sim_run_id is null and id > $1
+ order by id desc limit 40
+"""
+
+_FACILITIES_SQL = """
+select id, name, kind, status, capacity, occupancy, accepts_casualties,
+       extensions.ST_X(location::extensions.geometry) lng,
+       extensions.ST_Y(location::extensions.geometry) lat
+  from lifelines
+ where city_id = $1 and kind in ('hospital','shelter','pump_station')
+ order by kind, name
+"""
+
+_BLOCKS_SQL = """
+select id::text, reason, reported_by, radius_m,
+       extensions.ST_X(location::extensions.geometry) lng,
+       extensions.ST_Y(location::extensions.geometry) lat
+  from road_blocks where city_id = $1 and active
+"""
+
+
 async def _snapshot(city_id: str, since_event: int) -> tuple[Any, ...]:
+    """Eight independent reads, issued together.
+
+    They were sequential, which on a link to a database in another region meant
+    a round trip each, on a poll that runs every second. The demo loop was
+    competing with it for the same ten connections, ordinary requests started
+    queueing behind the two of them, and the browser reported those timeouts as
+    CORS failures. Concurrency is the whole fix.
+    """
+    (
+        ward_rows, resource_rows, incident_rows, need_rows,
+        decision_rows, event_rows, facility_rows, block_rows,
+    ) = await asyncio.gather(
+        db.fetch(_WARDS_SQL, city_id),
+        db.fetch(_RESOURCES_SQL, city_id),
+        db.fetch(_INCIDENTS_SQL, city_id),
+        db.fetch(_NEEDS_SQL),
+        db.fetch(_DECISIONS_SQL),
+        db.fetch(_EVENTS_SQL, since_event),
+        db.fetch(_FACILITIES_SQL, city_id),
+        db.fetch(_BLOCKS_SQL, city_id),
+    )
+
     wards = [
-        {
-            "id": r["id"], "name": r["name"], "number": r["number"],
-            "centroid": [float(r["lng"]), float(r["lat"])],
-            "boundary": r["boundary"],
-            "population": r["population"],
-            "score": float(r["score"]) if r["score"] is not None else None,
-            "severity": r["severity"],
-            "populationAtRisk": r["par"],
-        }
-        for r in await db.fetch(
-            """
-            select w.id, w.name, w.number, w.population,
-                   extensions.ST_X(w.centroid::extensions.geometry) lng,
-                   extensions.ST_Y(w.centroid::extensions.geometry) lat,
-                   extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' -> 0 as boundary,
-                   r.score, r.severity, r.population_at_risk par
-              from wards w
-              left join lateral (
-                select score, severity, population_at_risk from ward_risks
-                 where ward_id = w.id order by created_at desc limit 1
-              ) r on true
-             where w.city_id = $1
-             order by w.number::int
-            """,
-            city_id,
-        )
+        {"id": r["id"], "name": r["name"], "number": r["number"],
+         "centroid": [float(r["lng"]), float(r["lat"])],
+         "boundary": r["boundary"], "population": r["population"],
+         "score": float(r["score"]) if r["score"] is not None else None,
+         "severity": r["severity"], "populationAtRisk": r["par"]}
+        for r in ward_rows
     ]
-
     resources = [
-        {
-            "id": r["id"], "kind": r["kind"], "label": r["label"],
-            "operator": r["operator"], "agencyId": r["agency_id"],
-            "capacity": r["capacity"], "status": r["status"],
-            "location": [float(r["lng"]), float(r["lat"])],
-            "capabilities": r["caps"] or [],
-            "assignedTo": r["incident_title"],
-            "incidentId": r["incident_id"],
-            "etaMinutes": r["eta_minutes"],
-        }
-        for r in await db.fetch(
-            """
-            select r.id, r.kind, r.label, r.operator, r.agency_id, r.capacity,
-                   r.status::text status,
-                   extensions.ST_X(r.location::extensions.geometry) lng,
-                   extensions.ST_Y(r.location::extensions.geometry) lat,
-                   (select array_agg(capability_id) from resource_kind_capabilities
-                     where kind_id = r.kind) caps,
-                   a.incident_id::text incident_id, a.eta_minutes, i.title incident_title
-              from resources r
-              left join lateral (
-                select * from assignments x
-                 where x.resource_id = r.id
-                   and x.status in ('proposed','approved','en_route','on_site')
-                   and x.sim_run_id is null
-                 order by x.created_at desc limit 1
-              ) a on true
-              left join incidents i on i.id = a.incident_id
-             where r.city_id = $1
-             order by r.kind, r.label
-            """,
-            city_id,
-        )
+        {"id": r["id"], "kind": r["kind"], "label": r["label"],
+         "operator": r["operator"], "agencyId": r["agency_id"],
+         "capacity": r["capacity"], "status": r["status"],
+         "statusNote": r["status_note"], "unavailableReason": r["unavailable_reason"],
+         "location": [float(r["lng"]), float(r["lat"])],
+         "capabilities": list(r["caps"] or []),
+         "assignedTo": r["incident_title"], "incidentId": r["incident_id"],
+         "etaMinutes": r["eta_minutes"]}
+        for r in resource_rows
     ]
-
     incidents = [
-        {
-            "id": r["id"], "title": r["title"], "category": r["category"],
-            "wardId": r["ward_id"], "severity": r["severity"], "status": r["status"],
-            "reportCount": r["report_count"], "confidence": float(r["confidence"]),
-            "location": [float(r["lng"]), float(r["lat"])],
-            "createdAt": r["created_at"].isoformat(),
-            "unitsEnRoute": r["units"],
-        }
-        for r in await db.fetch(
-            """
-            select i.id::text, i.title, i.category, i.ward_id, i.severity,
-                   i.status::text status, i.report_count, i.confidence, i.created_at,
-                   extensions.ST_X(i.location::extensions.geometry) lng,
-                   extensions.ST_Y(i.location::extensions.geometry) lat,
-                   (select count(*) from assignments a
-                     where a.incident_id = i.id
-                       and a.status in ('proposed','approved','en_route','on_site'))::int units
-              from incidents i
-             where i.city_id = $1 and i.status <> 'resolved'
-             order by i.severity desc, i.created_at desc
-             limit 60
-            """,
-            city_id,
-        )
+        {"id": r["id"], "title": r["title"], "category": r["category"],
+         "wardId": r["ward_id"], "severity": r["severity"], "status": r["status"],
+         "reportCount": r["report_count"], "confidence": float(r["confidence"]),
+         "location": [float(r["lng"]), float(r["lat"])],
+         "createdAt": r["created_at"].isoformat(), "unitsEnRoute": r["units"]}
+        for r in incident_rows
     ]
-
     needs = [
         {"incidentId": r["incident_id"], "capability": r["capability_id"],
          "required": r["required"], "met": r["met"]}
-        for r in await db.fetch(
-            """
-            select n.incident_id::text incident_id, n.capability_id, n.required, n.met
-              from incident_needs n
-              join incidents i on i.id = n.incident_id
-             where i.status <> 'resolved'
-            """
-        )
+        for r in need_rows
     ]
-
     decisions = [
-        {
-            "id": r["id"], "action": r["action"], "target": r["target"],
-            "wardId": r["ward_id"], "rationale": r["rationale"],
-            "confidence": float(r["confidence"]), "status": r["status"],
-            "clause": (r["authority"] or {}).get("clause"),
-            "delegatedTo": (r["authority"] or {}).get("delegated_to"),
-            "withinDelegation": (r["authority"] or {}).get("within_delegation"),
-            "createdAt": r["created_at"].isoformat(),
-        }
-        for r in await db.fetch(
-            """
-            select id::text, action, target, ward_id, rationale, confidence,
-                   status::text status, authority, created_at
-              from decisions
-             where sim_run_id is null
-             order by (status = 'awaiting_approval') desc, created_at desc
-             limit 25
-            """
-        )
+        {"id": r["id"], "action": r["action"], "target": r["target"],
+         "wardId": r["ward_id"], "rationale": r["rationale"],
+         "confidence": float(r["confidence"]), "status": r["status"],
+         "clause": (r["authority"] or {}).get("clause"),
+         "delegatedTo": (r["authority"] or {}).get("delegated_to"),
+         "withinDelegation": (r["authority"] or {}).get("within_delegation"),
+         "createdAt": r["created_at"].isoformat()}
+        for r in decision_rows
     ]
-
     events = [
         {"id": r["id"], "kind": r["kind"], "actor": r["actor"],
          "subjectType": r["subject_type"], "subjectId": r["subject_id"],
          "wardId": r["ward_id"], "payload": r["payload"],
          "occurredAt": r["occurred_at"].isoformat(), "causationId": r["causation_id"]}
-        for r in await db.fetch(
-            """
-            select id, kind, actor, subject_type, subject_id, ward_id, payload,
-                   occurred_at, causation_id
-              from events
-             where sim_run_id is null and id > $1
-             order by id desc limit 40
-            """,
-            since_event,
-        )
+        for r in event_rows
     ]
-
-    return wards, resources, incidents, decisions, events, needs
+    facilities = [
+        {"id": r["id"], "name": r["name"], "kind": r["kind"], "status": r["status"],
+         "capacity": r["capacity"], "occupancy": r["occupancy"],
+         "acceptsCasualties": r["accepts_casualties"],
+         "location": [float(r["lng"]), float(r["lat"])]}
+        for r in facility_rows
+    ]
+    blocks = [
+        {"id": r["id"], "reason": r["reason"], "reportedBy": r["reported_by"],
+         "radiusM": r["radius_m"],
+         "location": [float(r["lng"]), float(r["lat"])]}
+        for r in block_rows
+    ]
+    return wards, resources, incidents, needs, decisions, events, facilities, blocks

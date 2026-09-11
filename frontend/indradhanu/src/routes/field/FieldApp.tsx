@@ -1,0 +1,277 @@
+import { useCallback, useEffect, useState } from "react"
+import { AlertTriangle, CheckCircle2, Loader2, Radio, Truck } from "lucide-react"
+import { request } from "@/api/httpClient"
+import { LiveMap } from "@/components/map/LiveMap"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Input } from "@/components/ui/input"
+
+/** The crew's interface.
+ *
+ *  Its own URL, scoped to one agency. A driver does not need the city's fleet,
+ *  and the row level security policy on `field_tasks` refuses it independently
+ *  of anything this page does.
+ *
+ *  The point of this screen is the status buttons. A puncture reported here
+ *  takes the vehicle out of the fleet and releases its task back into unmet
+ *  need; a hospital declaring itself full stops being somewhere the citizen
+ *  agent will send anyone. Each one changes the next plan, which is the
+ *  difference between a status board and a system.
+ */
+
+type Unit = {
+  id: string; kind: string; label: string; operator: string; status: string
+  statusNote: string | null; unavailableReason: string | null
+  location: [number, number]; capacity: number
+  assignedTo: string | null; incidentId: string | null
+  etaMinutes: number | null; incidentLocation: [number, number] | null
+}
+type Facility = {
+  id: string; name: string; kind: string; status: string
+  capacity: number | null; occupancy: number | null; location: [number, number]
+}
+type StatusKind = {
+  id: string; label: string; makesOffline: boolean
+  severity: string; appliesTo: string
+}
+type FieldState = {
+  operator: string | null
+  units: Unit[]
+  tasks: { id: string; title: string; instruction: string; status: string
+           priority: number; wardId: string }[]
+  facilities: Facility[]
+  recent: { subjectId: string; statusKind: string; note: string
+            reportedBy: string; at: string }[]
+}
+
+const TONE: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
+  info: "secondary", warn: "default", blocking: "destructive",
+}
+
+export default function FieldApp() {
+  const [state, setState] = useState<FieldState | null>(null)
+  const [kinds, setKinds] = useState<StatusKind[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [note, setNote] = useState("")
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [effects, setEffects] = useState<string[]>([])
+
+  const load = useCallback(async () => {
+    try {
+      const [s, k] = await Promise.all([
+        request<FieldState>("/field/state"),
+        request<StatusKind[]>("/field/status-kinds"),
+      ])
+      setState(s); setKinds(k); setError(null)
+      if (!selected && s.units.length) setSelected(s.units[0].id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [selected])
+
+  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const id = setInterval(() => void load(), 3000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const unit = state?.units.find((u) => u.id === selected) ?? null
+
+  async function declare(subjectType: "resource" | "lifeline", subjectId: string, kind: string) {
+    setBusy(kind)
+    try {
+      const r = await request<{ effects: string[]; label: string }>("/field/status", {
+        method: "POST",
+        body: {
+          subjectType, subjectId, statusKind: kind, note,
+          lng: unit?.location?.[0], lat: unit?.location?.[1],
+        },
+      })
+      setEffects(r.effects ?? [])
+      setNote("")
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally { setBusy(null) }
+  }
+
+  const resourceKinds = kinds.filter((k) => k.appliesTo === "resource")
+  const lifelineKinds = kinds.filter((k) => k.appliesTo === "lifeline")
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="text-lg font-semibold">Field</h1>
+          <p className="text-muted-foreground text-xs">
+            {state?.operator ?? "All agencies"} · {state?.units.length ?? 0} unit(s)
+          </p>
+        </div>
+        <a href="/login" className="text-muted-foreground text-xs underline">Sign in</a>
+      </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertTriangle className="size-4" />
+          <AlertDescription className="text-xs">{error}</AlertDescription>
+        </Alert>
+      )}
+      {effects.length > 0 && (
+        <Alert>
+          <CheckCircle2 className="size-4" />
+          <AlertDescription className="text-xs">
+            {effects.map((e, i) => <div key={i}>{e}</div>)}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+        <div className="space-y-3">
+          <LiveMap
+            className="h-[420px] w-full rounded-lg border"
+            resources={state?.units.map((u) => ({ ...u, capabilities: [] })) ?? []}
+            facilities={state?.facilities ?? []}
+            incidents={
+              state?.units
+                .filter((u) => u.incidentLocation)
+                .map((u) => ({
+                  id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
+                  category: "", severity: 4, reportCount: 1,
+                  location: u.incidentLocation as [number, number],
+                })) ?? []
+            }
+            route={
+              unit?.incidentLocation
+                ? [unit.location, unit.incidentLocation]
+                : undefined
+            }
+            center={unit?.location ?? [73.88, 18.58]}
+            zoom={12}
+          />
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">My units</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {state?.units.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => setSelected(u.id)}
+                  className={`hover:bg-accent flex w-full items-center gap-2 rounded border p-2 text-left text-xs ${
+                    selected === u.id ? "border-primary" : ""
+                  }`}
+                >
+                  <Truck className="size-3.5 shrink-0" />
+                  <span className="font-medium">{u.label}</span>
+                  <Badge variant={u.status === "offline" ? "destructive" : "outline"}>
+                    {u.status.replace(/_/g, " ")}
+                  </Badge>
+                  {u.assignedTo && (
+                    <span className="text-muted-foreground truncate">→ {u.assignedTo}</span>
+                  )}
+                  {u.etaMinutes ? (
+                    <span className="text-muted-foreground ml-auto">{u.etaMinutes} min</span>
+                  ) : null}
+                </button>
+              ))}
+              {state?.units.length === 0 && (
+                <p className="text-muted-foreground text-xs">
+                  No units for this operator. Sign in as a field operator, or pass
+                  <code className="mx-1">?operator=</code>.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="space-y-3">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Radio className="size-4" /> Report status
+              </CardTitle>
+              <CardDescription className="text-xs">
+                {unit ? `${unit.label} — ${unit.status.replace(/_/g, " ")}` : "Pick a unit"}
+                {unit?.unavailableReason && ` (${unit.unavailableReason})`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Input value={note} onChange={(e) => setNote(e.target.value)}
+                     placeholder="Anything to add" className="text-sm" />
+              <div className="flex flex-wrap gap-1.5">
+                {resourceKinds.map((k) => (
+                  <Button
+                    key={k.id} size="sm" variant={k.makesOffline ? "destructive" : "outline"}
+                    className="h-7 text-xs"
+                    disabled={!unit || busy !== null}
+                    onClick={() => unit && declare("resource", unit.id, k.id)}
+                  >
+                    {busy === k.id ? <Loader2 className="size-3 animate-spin" /> : null}
+                    {k.label}
+                  </Button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Facilities</CardTitle>
+              <CardDescription className="text-xs">
+                Declaring one full stops the citizen agent sending anyone there.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {state?.facilities.slice(0, 6).map((f) => (
+                <div key={f.id} className="rounded border p-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{f.name}</span>
+                    <Badge variant={f.status === "full" ? "destructive" : "outline"}>
+                      {f.status}
+                    </Badge>
+                    {f.capacity ? (
+                      <span className="text-muted-foreground ml-auto">
+                        {Math.max(0, f.capacity - (f.occupancy ?? 0))}/{f.capacity} free
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {lifelineKinds.map((k) => (
+                      <Button key={k.id} size="sm" variant={TONE[k.severity] ?? "outline"}
+                              className="h-6 px-2 text-[11px]" disabled={busy !== null}
+                              onClick={() => declare("lifeline", f.id, k.id)}>
+                        {k.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Recently reported</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {state?.recent.slice(0, 10).map((r, i) => (
+                <div key={i} className="text-muted-foreground text-xs">
+                  <span className="font-medium">{r.subjectId}</span> ·{" "}
+                  {r.statusKind.replace(/_/g, " ")}
+                  {r.note && ` — ${r.note}`}
+                </div>
+              ))}
+              {state?.recent.length === 0 && (
+                <p className="text-muted-foreground text-xs">Nothing reported yet.</p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}

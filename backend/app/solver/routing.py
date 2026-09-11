@@ -141,3 +141,78 @@ async def travel_matrix(
                 durations[i][j] += BLOCKED_DETOUR_MINUTES
 
     return TravelMatrix(durations, distances, engine="osrm")
+
+
+# --------------------------------------------------------------- one route ---
+@dataclass(slots=True)
+class RouteLine:
+    """A path a person can actually follow, not a line between two dots."""
+
+    coordinates: list[list[float]]
+    km: float
+    minutes: int
+    engine: str
+    #: Blocked points the returned path still passes close to. Zero is the goal;
+    #: a non-zero number is reported rather than hidden, because the honest
+    #: answer during a flood is sometimes "this is the least bad way".
+    passes_near_blocks: int = 0
+
+
+async def route_line(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    blocked: Sequence[tuple[float, float]] = (),
+) -> RouteLine:
+    """Ask OSRM for the road geometry, and check it against known hazards.
+
+    OSRM does not know which streets are under water, so we cannot simply ask it
+    to avoid them. What we can do is take the alternatives it offers and pick the
+    one that passes nearest to none of the hazards people have reported, which is
+    what `alternatives=true` is for. When every alternative is exposed, the least
+    exposed one is returned along with a count, rather than a false promise.
+
+    Falls back to a straight line at an urban event speed. The fallback is always
+    slower than reality, so it never promises an arrival it cannot meet.
+    """
+    o = f"{origin[0]:.5f},{origin[1]:.5f}"
+    d = f"{destination[0]:.5f},{destination[1]:.5f}"
+    try:
+        data = await get_json(
+            f"{settings.osrm_url}/route/v1/driving/{o};{d}",
+            {"overview": "full", "geometries": "geojson", "alternatives": "true"},
+            cache_key=f"osrm:route:{o}:{d}",
+        )
+        routes = (data or {}).get("routes") or []
+        if routes:
+            scored: list[tuple[int, float, dict]] = []
+            for r in routes:
+                coords = r.get("geometry", {}).get("coordinates", [])
+                exposure = sum(
+                    1
+                    for c in coords[::3]  # every third vertex is enough to judge
+                    for b in blocked
+                    if haversine_km((c[0], c[1]), b) < BLOCK_RADIUS_KM
+                )
+                scored.append((exposure, float(r.get("duration", 0.0)), r))
+            scored.sort(key=lambda t: (t[0], t[1]))
+            exposure, _dur, best = scored[0]
+            coords = best.get("geometry", {}).get("coordinates", [])
+            return RouteLine(
+                coordinates=[[float(c[0]), float(c[1])] for c in coords],
+                km=round(float(best.get("distance", 0.0)) / 1000.0, 2),
+                minutes=max(1, round(float(best.get("duration", 0.0)) / 60.0)),
+                engine="osrm",
+                passes_near_blocks=exposure,
+            )
+    except Exception as exc:  # noqa: BLE001 - a router outage is not a failure
+        log.warning("osrm_route_failed", error=str(exc))
+
+    km = haversine_km(origin, destination)
+    detour = BLOCKED_DETOUR_MINUTES if _segment_is_blocked(origin, destination, blocked) else 0.0
+    return RouteLine(
+        coordinates=[[origin[0], origin[1]], [destination[0], destination[1]]],
+        km=round(km, 2),
+        minutes=max(1, round(km / EVENT_SPEED_KMH * 60 + detour)),
+        engine="straight-line-fallback",
+        passes_near_blocks=1 if detour else 0,
+    )

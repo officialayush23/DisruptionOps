@@ -5,7 +5,8 @@ import { RequireRole } from "@/auth/RequireRole"
 
 import Login from "@/routes/auth/Login"
 import DemoConsole from "@/routes/demo/DemoConsole"
-import LiveOps from "@/routes/admin/LiveOps"
+import CitizenApp from "@/routes/citizen/CitizenApp"
+import FieldApp from "@/routes/field/FieldApp"
 import RiskBoard from "@/routes/admin/RiskBoard"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
@@ -14,9 +15,14 @@ import AgentTrace from "@/routes/admin/AgentTrace"
 import ResourcesPage from "@/routes/admin/ResourcesPage"
 import AlertsPage from "@/routes/admin/AlertsPage"
 import AfterAction from "@/routes/admin/AfterAction"
-import CitizenPortal from "@/routes/citizen/CitizenPortal"
-import FieldPortal from "@/routes/field/FieldPortal"
 
+/** Three interfaces, three URLs.
+ *
+ *  They are separate routes rather than tabs because they are separate jobs. A
+ *  resident opens /citizen on a phone with no account; a crew opens /field
+ *  scoped to their agency; an officer opens /admin. Putting a walkable marker
+ *  on the operations console was simply the wrong screen for it.
+ */
 export function App() {
   useScenarioNavigation()
 
@@ -24,17 +30,17 @@ export function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
 
-      {/* A resident is the default landing, because the largest audience for
-          this system has no account and should not meet a login wall to find
-          out whether their street is about to flood. */}
+      {/* The public face. No account required: the largest audience for this
+          has none, and should not meet a login wall to find out whether their
+          street is about to flood. */}
       <Route path="/" element={<Navigate to="/citizen" replace />} />
-      <Route path="/citizen/*" element={<CitizenPortal />} />
+      <Route path="/citizen/*" element={<CitizenApp />} />
 
       <Route
         path="/field/*"
         element={
           <RequireRole need="field">
-            <FieldPortal />
+            <FieldApp />
           </RequireRole>
         }
       />
@@ -45,10 +51,7 @@ export function App() {
           <RequireRole need="staff">
             <AdminShell>
               <Routes>
-                {/* The only screen wired to the real API. Everything else
-                    still reads src/api/mock until it is migrated. */}
-                <Route path="demo" element={<DemoConsole />} />
-                <Route path="live" element={<LiveOps />} />
+                <Route path="console" element={<DemoConsole />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="incidents" element={<IncidentQueue />} />
                 <Route path="allocation" element={<AllocationPlanner />} />
@@ -57,7 +60,11 @@ export function App() {
                 <Route path="resources" element={<ResourcesPage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
-                <Route path="*" element={<Navigate to="/admin/demo" replace />} />
+                {/* `live` and `demo` were two names for overlapping things.
+                    One console now; both old paths land on it. */}
+                <Route path="live" element={<Navigate to="/admin/console" replace />} />
+                <Route path="demo" element={<Navigate to="/admin/console" replace />} />
+                <Route path="*" element={<Navigate to="/admin/console" replace />} />
               </Routes>
             </AdminShell>
           </RequireRole>

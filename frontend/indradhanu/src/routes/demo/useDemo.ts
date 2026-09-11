@@ -35,6 +35,8 @@ export type DemoState = {
   decisions: Decision[]
   events: { id: number; kind: string; actor: string; wardId: string | null; payload: Record<string, unknown>; occurredAt: string }[]
   duplicates: { kind: string; incidentIds: string[]; wardId: string | null; agencies: string[]; detail: string; wastedUnits: number }[]
+  facilities: { id: string; name: string; kind: string; status: string; capacity: number | null; occupancy: number | null; acceptsCasualties: boolean; location: [number, number] }[]
+  roadBlocks: { id: string; reason: string; reportedBy: string; radiusM: number; location: [number, number] }[]
   plan: null | {
     headline: string; engine: string; coverage: number
     assigned: RawChange[]; reassigned: RawChange[]; released: RawChange[]; kept: RawChange[]
@@ -53,7 +55,7 @@ const EMPTY: DemoState = {
   running: false, tick: 0, simNow: null, error: null,
   citizen: { lng: 73.8989, lat: 18.6773, wardId: null, wardName: "", inside: true },
   wards: [], resources: [], incidents: [], needs: [], decisions: [],
-  events: [], duplicates: [], plan: null, beats: [],
+  events: [], duplicates: [], facilities: [], roadBlocks: [], plan: null, beats: [],
 }
 
 /** Polls the one snapshot endpoint.

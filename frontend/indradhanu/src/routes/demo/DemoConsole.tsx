@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  AlertTriangle, Copy, Gavel, Loader2, MapPin, Play, Send, Square, Zap,
+  AlertTriangle, Copy, Gavel, Loader2, Play, Square, Zap,
 } from "lucide-react"
 import { useDemo } from "./useDemo"
-import { MapCanvas } from "./MapCanvas"
+import { LiveMap } from "@/components/map/LiveMap"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Input } from "@/components/ui/input"
-import { Separator } from "@/components/ui/separator"
 
 /** The live console.
  *
@@ -18,7 +16,6 @@ import { Separator } from "@/components/ui/separator"
  *  between polls. Nothing is scripted in the browser.
  */
 
-const STEP = 0.0035 // roughly 350 m per keypress
 
 const BEAT_STYLE: Record<string, string> = {
   incident: "text-orange-600 dark:text-orange-400",
@@ -38,10 +35,7 @@ const BEAT_STYLE: Record<string, string> = {
 export default function DemoConsole() {
   const { state, error, refresh, act } = useDemo(1000)
   const [busy, setBusy] = useState<string | null>(null)
-  const [note, setNote] = useState("")
-  const [category, setCategory] = useState("flooded_road")
   const [selected, setSelected] = useState<string | null>(null)
-  const [lastCitizen, setLastCitizen] = useState<string | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
 
   const run = useCallback(
@@ -55,28 +49,6 @@ export default function DemoConsole() {
     },
     [act]
   )
-
-  // Arrow keys move the marker. Held keys repeat, so walking is continuous.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === "INPUT" || tag === "TEXTAREA") return
-      const d: Record<string, [number, number]> = {
-        ArrowUp: [0, STEP], ArrowDown: [0, -STEP],
-        ArrowLeft: [-STEP, 0], ArrowRight: [STEP, 0],
-        w: [0, STEP], s: [0, -STEP], a: [-STEP, 0], d: [STEP, 0],
-      }
-      const delta = d[e.key]
-      if (!delta) return
-      e.preventDefault()
-      void act("/demo/citizen/move", {
-        lng: state.citizen.lng + delta[0],
-        lat: state.citizen.lat + delta[1],
-      })
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [act, state.citizen.lng, state.citizen.lat])
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: 0, behavior: "smooth" })
@@ -92,19 +64,6 @@ export default function DemoConsole() {
 
   const committed = state.resources.filter((r) => r.status !== "available").length
   const merged = state.incidents.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
-
-  async function fileReport() {
-    setBusy("report")
-    try {
-      const r = (await act("/demo/citizen/report", { category, note })) as { summary?: string }
-      setLastCitizen(r?.summary ?? "Filed.")
-      setNote("")
-    } catch {
-      /* surfaced by the hook */
-    } finally {
-      setBusy(null)
-    }
-  }
 
   return (
     <div className="space-y-3 p-4">
@@ -145,50 +104,22 @@ export default function DemoConsole() {
         </Alert>
       )}
 
-      <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
+      <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
-          <MapCanvas state={state} onPickIncident={setSelected} selectedIncident={selected} />
-
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <MapPin className="size-4" /> You are in {state.citizen.wardName || "no covered ward"}
-              </CardTitle>
-              <CardDescription>
-                Arrow keys or WASD move you. A report from here goes through the same
-                intake as every generated one, and can change the next allocation.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {!state.citizen.inside && state.citizen.note && (
-                <Alert><AlertDescription className="text-xs">{state.citizen.note}</AlertDescription></Alert>
-              )}
-              <div className="flex flex-wrap gap-2">
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  className="bg-background h-9 rounded-md border px-2 text-sm"
-                >
-                  {["flooded_road", "waterlogging", "person_stranded", "fallen_tree",
-                    "blocked_drain", "power_line", "structural_damage"].map((c) => (
-                    <option key={c} value={c}>{c.replace(/_/g, " ")}</option>
-                  ))}
-                </select>
-                <Input
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="What can you see?"
-                  className="max-w-xs flex-1"
-                  onKeyDown={(e) => { if (e.key === "Enter") void fileReport() }}
-                />
-                <Button onClick={fileReport} disabled={busy !== null || !state.citizen.wardId}>
-                  {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-                  Report
-                </Button>
-              </div>
-              {lastCitizen && <p className="text-muted-foreground text-xs">{lastCitizen}</p>}
-            </CardContent>
-          </Card>
+          <LiveMap
+            className="h-[520px] w-full rounded-lg border"
+            wards={state.wards}
+            incidents={state.incidents}
+            resources={state.resources}
+            facilities={state.facilities ?? []}
+            blocks={state.roadBlocks ?? []}
+            onPickIncident={setSelected}
+          />
+          <p className="text-muted-foreground text-xs">
+            Dashed amber lines are units en route to what they were tasked with.
+            A number inside an incident is how many reports collapsed into it.
+            Hover anything for detail.
+          </p>
 
           {selectedIncident && (
             <Card>

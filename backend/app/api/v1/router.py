@@ -10,6 +10,7 @@ from app.api.v1 import (
     demo,
     geography,
     operations,
+    personas,
     reports,
     risk,
     runs,
@@ -27,6 +28,7 @@ api_router.include_router(auth.router)
 api_router.include_router(runs.router)
 api_router.include_router(reports.router)
 api_router.include_router(demo.router)
+api_router.include_router(personas.router)
 api_router.include_router(geography.router)
 api_router.include_router(risk.router)
 api_router.include_router(operations.router)

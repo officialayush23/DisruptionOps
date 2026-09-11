@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import asdict
 import random
 import time
 from dataclasses import dataclass, field
@@ -272,14 +273,17 @@ async def _do_replan(trigger: str) -> None:
     diff = await replanner.replan(
         city_id=state.city_id, clock=WALL, trigger=trigger, actor=ev.agent("allocation_planner")
     )
+    # `Change` is a slots dataclass, so it has no __dict__ at all. asdict() is
+    # the supported way to read one, and it was an AttributeError every time a
+    # re-plan produced a change, which is to say every interesting tick.
     state.last_plan = {
         "headline": diff.headline,
         "engine": diff.engine,
         "coverage": diff.coverage,
-        "assigned": [c.__dict__ for c in diff.assigned],
-        "reassigned": [c.__dict__ for c in diff.reassigned],
-        "released": [c.__dict__ for c in diff.released],
-        "kept": [c.__dict__ for c in diff.kept],
+        "assigned": [asdict(c) for c in diff.assigned],
+        "reassigned": [asdict(c) for c in diff.reassigned],
+        "released": [asdict(c) for c in diff.released],
+        "kept": [asdict(c) for c in diff.kept],
         "uncovered": diff.uncovered,
     }
     if diff.changed:
@@ -300,56 +304,75 @@ async def _do_replan(trigger: str) -> None:
 async def _move_units() -> None:
     """Advance every committed unit toward what it was sent to.
 
+    Three statements for the whole fleet, not three per unit. The first version
+    did a select and then an update per unit, which at a 120 ms round trip to
+    the database region meant a tick could take longer than a tick, the loop
+    fell behind, and the connection pool filled with the demo's own traffic
+    until ordinary requests started timing out. That is what was showing up in
+    the browser as a CORS error.
+
     Motion is what makes a reassignment legible. A row that changes value is a
     fact; a vehicle that turns around is an argument.
     """
-    rows = await db.fetch(
+    # 1. Anyone close enough is on scene.
+    arrived = await db.fetch(
         """
-        select r.id,
-               extensions.ST_X(r.location::extensions.geometry) rlng,
-               extensions.ST_Y(r.location::extensions.geometry) rlat,
-               extensions.ST_X(i.location::extensions.geometry) ilng,
-               extensions.ST_Y(i.location::extensions.geometry) ilat,
-               extensions.ST_Distance(r.location, i.location) metres,
-               a.id::text assignment_id, a.status
+        with near as (
+          select a.id aid, r.id rid
+            from assignments a
+            join resources r on r.id = a.resource_id
+            join incidents i on i.id = a.incident_id
+           where a.status in ('proposed','approved','en_route')
+             and a.sim_run_id is null
+             and extensions.ST_Distance(r.location, i.location) <= $1
+        ),
+        upd_a as (
+          update assignments set status = 'on_site'
+           where id in (select aid from near) returning resource_id
+        )
+        update resources set status = 'on_site', updated_at = now()
+         where id in (select rid from near)
+        returning id
+        """,
+        ARRIVAL_METRES,
+    )
+    for r in arrived:
+        state.working.setdefault(r["id"], 0)
+        state.beat("arrive", f"{r['id']} is on scene.")
+
+    # 2. Everyone else moves a fraction of the way there.
+    await db.execute(
+        """
+        update resources r
+           set location = extensions.ST_SetSRID(
+                 extensions.ST_MakePoint(
+                   extensions.ST_X(r.location::extensions.geometry)
+                     + (extensions.ST_X(i.location::extensions.geometry)
+                        - extensions.ST_X(r.location::extensions.geometry)) * $1,
+                   extensions.ST_Y(r.location::extensions.geometry)
+                     + (extensions.ST_Y(i.location::extensions.geometry)
+                        - extensions.ST_Y(r.location::extensions.geometry)) * $1
+                 ), 4326)::extensions.geography,
+               status = 'en_route',
+               updated_at = now()
           from assignments a
-          join resources r on r.id = a.resource_id
           join incidents i on i.id = a.incident_id
-         where a.status in ('proposed','approved','en_route')
+         where a.resource_id = r.id
+           and a.status in ('proposed','approved','en_route')
            and a.sim_run_id is null
+        """,
+        MOVE_FRACTION,
+    )
+
+    # 3. Anything now moving is en route.
+    await db.execute(
+        """
+        update assignments set status = 'en_route'
+         where status in ('proposed','approved')
+           and sim_run_id is null
+           and resource_id in (select id from resources where status = 'en_route')
         """
     )
-    for r in rows:
-        if float(r["metres"]) <= ARRIVAL_METRES:
-            await db.execute(
-                "update assignments set status = 'on_site' where id = $1::uuid",
-                r["assignment_id"],
-            )
-            await db.execute(
-                "update resources set status = 'on_site', updated_at = now() where id = $1",
-                r["id"],
-            )
-            state.working.setdefault(r["id"], 0)
-            state.beat("arrive", f"{r['id']} is on scene.")
-            continue
-
-        nlng = float(r["rlng"]) + (float(r["ilng"]) - float(r["rlng"])) * MOVE_FRACTION
-        nlat = float(r["rlat"]) + (float(r["ilat"]) - float(r["rlat"])) * MOVE_FRACTION
-        await db.execute(
-            """
-            update resources
-               set location = extensions.ST_SetSRID(
-                     extensions.ST_MakePoint($2,$3),4326)::extensions.geography,
-                   status = 'en_route', updated_at = now()
-             where id = $1
-            """,
-            r["id"], nlng, nlat,
-        )
-        if r["status"] != "en_route":
-            await db.execute(
-                "update assignments set status = 'en_route' where id = $1::uuid",
-                r["assignment_id"],
-            )
 
 
 async def _work_and_resolve() -> None:
@@ -359,46 +382,58 @@ async def _work_and_resolve() -> None:
     and duplicate detection got noisier the longer a run went on. Closing the
     loop here fixes that as well as making the demo cyclical.
     """
+    done: list[str] = []
     for resource_id in list(state.working):
         state.working[resource_id] += 1
-        if state.working[resource_id] < WORK_TICKS:
-            continue
-        del state.working[resource_id]
+        if state.working[resource_id] >= WORK_TICKS:
+            del state.working[resource_id]
+            done.append(resource_id)
+    if not done:
+        return
 
-        row = await db.fetchrow(
-            """
-            select a.id::text aid, a.incident_id::text iid, i.title
-              from assignments a join incidents i on i.id = a.incident_id
-             where a.resource_id = $1 and a.status = 'on_site'
-             order by a.created_at desc limit 1
-            """,
-            resource_id,
+    rows = await db.fetch(
+        """
+        with finished as (
+          select distinct on (a.resource_id)
+                 a.id aid, a.resource_id rid, a.incident_id iid, i.title
+            from assignments a
+            join incidents i on i.id = a.incident_id
+           where a.resource_id = any($1) and a.status = 'on_site'
+           order by a.resource_id, a.created_at desc
+        ),
+        close_a as (
+          update assignments set status = 'complete'
+           where id in (select aid from finished) returning incident_id
+        ),
+        free_r as (
+          update resources set status = 'available', updated_at = now()
+           where id in (select rid from finished) returning id
+        ),
+        resolve_i as (
+          update incidents set status = 'resolved', updated_at = now()
+           where id in (select iid from finished)
+             and not exists (
+               select 1 from assignments a2
+                where a2.incident_id = incidents.id
+                  and a2.status in ('proposed','approved','en_route','on_site')
+                  and a2.id not in (select aid from finished)
+             )
+          returning id::text
         )
-        if row is None:
-            continue
-
-        await db.execute("update assignments set status = 'complete' where id = $1::uuid", row["aid"])
-        await db.execute(
-            "update resources set status = 'available', updated_at = now() where id = $1",
-            resource_id,
-        )
-        still_open = await db.fetchval(
-            "select count(*) from assignments where incident_id = $1::uuid "
-            "and status in ('proposed','approved','en_route','on_site')",
-            row["iid"],
-        )
-        if not still_open:
-            await db.execute(
-                "update incidents set status = 'resolved', updated_at = now() "
-                "where id = $1::uuid",
-                row["iid"],
-            )
+        select f.rid, f.iid::text iid, f.title,
+               (f.iid::text in (select id from resolve_i)) as resolved
+          from finished f
+        """,
+        done,
+    )
+    for r in rows:
+        if r["resolved"]:
             await ev.append(
                 clock=WALL, kind=ev.Kind.INCIDENT_RESOLVED, actor=ev.agent("field"),
-                subject_type="incident", subject_id=row["iid"], city_id=state.city_id,
-                payload={"resource_id": resource_id},
+                subject_type="incident", subject_id=r["iid"], city_id=state.city_id,
+                payload={"resource_id": r["rid"]},
             )
-            state.beat("resolved", f"{row['title']} resolved. {resource_id} is free again.")
+            state.beat("resolved", f"{r['title']} resolved. {r['rid']} is free again.")
             state.dirty = True
 
 

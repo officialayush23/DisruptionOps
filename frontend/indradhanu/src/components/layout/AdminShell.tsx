@@ -9,7 +9,6 @@ import {
   Route,
   Siren,
   Truck,
-  Zap,
 } from "lucide-react"
 import {
   Sidebar,
@@ -38,8 +37,7 @@ import { useTour } from "@/components/tour/tourStore"
 
 const NAV = [
   // Live is first because it is the only screen reading the real API.
-  { to: "/admin/demo", label: "Live demo", icon: Radar },
-  { to: "/admin/live", label: "Live operations", icon: Zap },
+  { to: "/admin/console", label: "Command console", icon: Radar },
   { to: "/admin/risk", label: "Risk board", icon: Gauge },
   { to: "/admin/incidents", label: "Incident queue", icon: Siren },
   { to: "/admin/allocation", label: "Allocation planner", icon: Route },
