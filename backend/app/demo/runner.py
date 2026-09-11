@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import asdict
+import json
 import random
 import time
 from dataclasses import dataclass, field
@@ -921,7 +922,13 @@ _RESET_ORDER = (
     "citizen_reports",
     "incidents",
     "road_blocks",
-    "events",
+    # `events` is deliberately absent. It is the audit log, and the database
+    # enforces that with an `events_no_delete` trigger that raises on DELETE.
+    # Listing it here meant reset opened a transaction, deleted fifteen tables,
+    # hit the trigger, and rolled all of it back — so the endpoint answered 500
+    # and, worse, reset nothing at all while appearing to have tried. What takes
+    # its place is the `world.reset` mark appended below: the log keeps every
+    # run, and the console reads forward from the mark.
     "reporter_reliability",
 )
 
@@ -978,6 +985,24 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
                  where city_id = $1
                 """,
                 city_id,
+            )
+
+            # The mark that makes the reset visible. Every live view reads
+            # forward from the newest `world.reset`, so without this row the
+            # console would keep showing the run that was just thrown away —
+            # the deletes would have worked and the screen would deny it.
+            # Inside the transaction on purpose: a reset that clears the tables
+            # and fails to mark itself is worse than one that does neither.
+            await conn.execute(
+                """
+                insert into events
+                       (city_id, sim_run_id, occurred_at, kind, actor,
+                        subject_type, subject_id, payload)
+                values ($1, null, now(), 'world.reset', 'system',
+                        'city', $1, $2::jsonb)
+                """,
+                city_id,
+                json.dumps({"cleared": cleared}),
             )
 
     # The in-process state has to go back too, or the next run carries the last

@@ -162,7 +162,15 @@ const esc = (v: unknown) =>
  */
 const BASEMAP = {
   light: "mapbox://styles/mapbox/streets-v12",
-  dark: "mapbox://styles/mapbox/navigation-night-v1",
+  // Both themes, on purpose. `navigation-night-v1` was the obvious dark
+  // counterpart and it composites `mapbox.mapbox-incidents-v1`, a traffic feed
+  // this account is not entitled to: every pan produced a row of 404s in the
+  // console for tiles that would never arrive. The navigation styles exist to
+  // carry live traffic, and we do not have traffic — we have our own incidents,
+  // drawn as our own layers on top. `streets-v12` is the same colourful base
+  // without the feed we cannot fetch, and its dark rendering is legible enough
+  // that a broken console is the worse trade.
+  dark: "mapbox://styles/mapbox/streets-v12",
 } as const
 
 /** The lowest label layer in the basemap.

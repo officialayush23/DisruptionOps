@@ -181,6 +181,19 @@ export default function CitizenApp() {
   const [newAlert, setNewAlert] = useState<string | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
+  /** What the live route was solved for: where they stood, what hazards were
+   *  known, and when. A route is an answer to a question asked at a moment; to
+   *  know whether it is still the answer you have to remember the moment. */
+  const routeSolvedAt = useRef<
+    { lng: number; lat: number; hazards: string; at: number } | null
+  >(null)
+  /** The intent behind the live route, so a re-solve asks the same question. Re-
+   *  routing somebody who asked for a hospital to the nearest shelter would be a
+   *  different answer wearing the same clothes. */
+  const lastIntent = useRef<string>("shelter")
+  /** Shown briefly when the route re-solves on its own, because a path that
+   *  silently redraws itself is indistinguishable from a glitch. */
+  const [rerouted, setRerouted] = useState<string | null>(null)
   /** Bumped by the recentre button. It used to clone `pos` into a new object to
    *  force the map to ease back — which also refetched the whole city state,
    *  because the poll was keyed on that object's identity. Recentring the view
@@ -420,8 +433,9 @@ export default function CitizenApp() {
     recorder.current = null
   }
 
-  async function ask(intent: string, condition?: string) {
-    setBusy(intent)
+  async function ask(intent: string, condition?: string, silent = false) {
+    lastIntent.current = intent
+    if (!silent) setBusy(intent)
     try {
       const g = await request<Guidance>("/citizen/guide", {
         method: "POST",
@@ -429,9 +443,13 @@ export default function CitizenApp() {
       })
       setGuide(g)
       setNavOn(Boolean(g.shouldMove && g.route?.length))
+      routeSolvedAt.current = { lng: pos.lng, lat: pos.lat, hazards: hazardSig, at: Date.now() }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally { setBusy(null) }
+      // A silent re-solve that fails leaves the previous route on screen, which
+      // is still the best advice anyone has. Saying "route failed" over working
+      // directions would be worse than saying nothing.
+      if (!silent) setError(e instanceof Error ? e.message : String(e))
+    } finally { if (!silent) setBusy(null) }
   }
 
   async function fileReport() {
@@ -497,6 +515,26 @@ export default function CitizenApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.alerts?.[0]?.id, state?.inside])
 
+  /** The hazard picture the route was solved against, as a comparable string.
+   *
+   *  A route is only as current as the obstacles it avoided. If a crew closes a
+   *  street after somebody set off along it, the line on their screen is now
+   *  advice to walk into the thing it was drawn to avoid — and nothing about
+   *  their own movement would reveal that. Road blocks are what the router
+   *  actually routes around; incident severity is included because a category
+   *  worsening is what turns a passable street into a closed one.
+   */
+  const hazardSig = useMemo(
+    () =>
+      [
+        ...(state?.roadBlocks ?? []).map((b) => `b${b.id}`),
+        ...(state?.incidents ?? []).map((i) => `i${i.id}:${i.severity}`),
+      ]
+        .sort()
+        .join("|"),
+    [state?.roadBlocks, state?.incidents]
+  )
+
   const sev = state?.risk?.severity ?? 0
 
   /** Recomputed on every position change, which is what makes it navigation
@@ -514,6 +552,58 @@ export default function CitizenApp() {
       strayed: offBy > 120,
     }
   })()
+
+  /** Keep the route true while the world and the person both move.
+   *
+   *  Until now the route was solved once when the advisory arrived and then
+   *  never again: `progressAlong` re-projected the person onto a fixed line, so
+   *  the instructions stayed live while the *path* went stale. Two things make
+   *  it stale, and only one of them is the person moving.
+   *
+   *    * They have left the line. Walking round a flooded corner is not being
+   *      lost, so this waits for a real departure rather than GPS wobble.
+   *    * The hazards changed. A street closed behind them, or an incident got
+   *      worse. Nothing they do reveals this and it is the more dangerous of
+   *      the two, so it re-solves sooner rather than waiting for drift.
+   *
+   *  A cooldown sits over both. `/citizen/guide` costs about two seconds and
+   *  calls Mapbox Directions; re-solving on every four-second poll would spend
+   *  somebody's battery and data to redraw the same line.
+   */
+  useEffect(() => {
+    if (!navOn || !nav || !guide?.route?.length) return
+    if (nav.arrived) return
+
+    const solved = routeSolvedAt.current
+    if (!solved) return
+
+    const hazardsChanged = solved.hazards !== hazardSig
+    // 150 m, a little past the 120 m the screen already calls "off this route",
+    // so the advice and the automatic re-solve do not contradict each other.
+    const strayed = nav.offBy > 150
+    if (!hazardsChanged && !strayed) return
+
+    // A changed hazard picture is worth interrupting for; drift is not.
+    const cooldownMs = hazardsChanged ? 8000 : 20000
+    if (Date.now() - solved.at < cooldownMs) return
+
+    setRerouted(
+      hazardsChanged
+        ? "Conditions changed. This route has been redrawn."
+        : "You had left the route. It has been redrawn from where you are."
+    )
+    void ask(lastIntent.current, undefined, true)
+    // `ask` and `nav` are rebuilt every render by design; the guard above is
+    // what decides when this fires, not the dependency list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navOn, nav?.offBy, nav?.arrived, hazardSig, guide?.route?.length])
+
+  // The re-route notice is an explanation, not a state to sit in.
+  useEffect(() => {
+    if (!rerouted) return
+    const id = setTimeout(() => setRerouted(null), 6000)
+    return () => clearTimeout(id)
+  }, [rerouted])
 
   /** One step of movement, shared by the keyboard and the on-screen pad. */
   const nudge = useCallback((dx: number, dy: number) => {
@@ -769,11 +859,24 @@ export default function CitizenApp() {
 
                   {/* Being off the line is not a failure, but it does mean the
                       instruction above is about a street you are not on. */}
-                  {nav.strayed && !nav.arrived && (
+                  {/* The route redrew itself. Said out loud, because a line
+                      that moves on its own otherwise reads as a glitch and
+                      somebody may keep following the one they memorised. */}
+                  {rerouted && !nav.arrived && (
+                    <Alert className="py-2">
+                      <AlertDescription className="text-xs">{rerouted}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  {/* Being off the line is not a failure, but it does mean the
+                      instruction above is about a street you are not on. Hidden
+                      while the automatic re-solve is handling it, so the screen
+                      never asks for something it is already doing. */}
+                  {nav.strayed && !nav.arrived && !rerouted && (
                     <Alert variant="destructive" className="py-2">
                       <AlertDescription className="text-xs">
-                        You are about {readable(nav.offBy)} off this route. Ask
-                        again to get one from where you are now.
+                        You are about {readable(nav.offBy)} off this route.
+                        Redrawing it from where you are now.
                       </AlertDescription>
                     </Alert>
                   )}
