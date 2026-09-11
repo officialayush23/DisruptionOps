@@ -88,6 +88,10 @@ type Props = {
   onPickIncident?: (id: string) => void
   /** Recentre on `me` whenever it moves. On for the citizen, off for the console. */
   followMe?: boolean
+  /** Bump to recentre on `me` again without `me` having moved. A caller used to
+   *  do this by handing us a new object with the same coordinates in it, which
+   *  worked only because the effect below compared object identity. */
+  recentreKey?: number
 }
 
 const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
@@ -144,6 +148,40 @@ const esc = (v: unknown) =>
   String(v ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!
   )
+
+/** The basemap under everything else.
+ *
+ *  `light-v11` and `dark-v11` are built to disappear beneath a data overlay.
+ *  That is the right instinct for a choropleth an analyst reads, and the wrong
+ *  one for the citizen map: somebody deciding which way to walk out of a flood
+ *  navigates by the things those styles delete — the street name, the river,
+ *  the park, the petrol station that tells them they are on the right road.
+ *  These two carry that detail and still leave room for the overlay, because
+ *  the severity fill is 10-48% alpha and the ward shading is drawn *under* the
+ *  labels rather than over them.
+ */
+const BASEMAP = {
+  light: "mapbox://styles/mapbox/streets-v12",
+  dark: "mapbox://styles/mapbox/navigation-night-v1",
+} as const
+
+/** The lowest label layer in the basemap.
+ *
+ *  Anything inserted before it is drawn underneath every street name and place
+ *  name the style ships. Mapbox does not promise a stable id for it across
+ *  style versions, so find it by shape — the first symbol layer that draws
+ *  text — rather than hard-coding `road-label` and silently getting `undefined`
+ *  (which appends to the top) the next time the style is revised.
+ */
+function firstLabelLayer(m: mapboxgl.Map): string | undefined {
+  const layers = m.getStyle()?.layers ?? []
+  for (const l of layers) {
+    if (l.type !== "symbol") continue
+    const layout = (l as { layout?: Record<string, unknown> }).layout
+    if (layout && "text-field" in layout) return l.id
+  }
+  return undefined
+}
 
 const SEVERITY_COLOR = [
   "interpolate", ["linear"], ["coalesce", ["get", "severity"], 0],
@@ -275,7 +313,7 @@ export function LiveMap({
   wards = [], incidents = [], resources = [], facilities = [], blocks = [],
   needs = [], activity, routes = [],
   route, routeLabel, me, center = [73.88, 18.58], zoom = 10.2, className,
-  onPickIncident, followMe = false,
+  onPickIncident, followMe = false, recentreKey = 0,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<mapboxgl.Map | null>(null)
@@ -296,7 +334,7 @@ export function LiveMap({
     try {
       const m = new mapboxgl.Map({
         container: container.current,
-        style: dark ? "mapbox://styles/mapbox/dark-v11" : "mapbox://styles/mapbox/light-v11",
+        style: dark ? BASEMAP.dark : BASEMAP.light,
         center, zoom, attributionControl: true,
       })
       map.current = m
@@ -323,15 +361,21 @@ export function LiveMap({
           .then(() => setIconsReady(true))
           .catch(() => setIconsReady(true))
 
+        // Ward shading is context, not content: it goes beneath the street and
+        // place names. Painted over them it would hide the one thing a resident
+        // uses to confirm they are on the right road, and the colourful basemap
+        // would have bought nothing.
+        const belowLabels = firstLabelLayer(m)
+
         m.addSource("wards", { type: "geojson", data: fc([]) })
         m.addLayer({
           id: "ward-fill", type: "fill", source: "wards",
           paint: { "fill-color": SEVERITY_COLOR },
-        })
+        }, belowLabels)
         m.addLayer({
           id: "ward-line", type: "line", source: "wards",
-          paint: { "line-color": "#94a3b8", "line-opacity": 0.45, "line-width": 1 },
-        })
+          paint: { "line-color": "#64748b", "line-opacity": 0.55, "line-width": 1 },
+        }, belowLabels)
 
         m.addSource("route", { type: "geojson", data: fc([]) })
         m.addLayer({
@@ -840,19 +884,27 @@ export function LiveMap({
       : fc([]))
   }, [ready, route, routeLabel])
 
+  // Keyed on the coordinates rather than on the `me` object. Callers build that
+  // object inline in their JSX, so it was a new value on every render and this
+  // effect re-ran — and re-issued an `easeTo` — several times a second whether
+  // or not the person had moved a millimetre.
+  const meLng = me?.lng
+  const meLat = me?.lat
+  const meLabel = me?.label
   useEffect(() => {
     if (!ready) return
-    set("me", me
-      ? fc([point(me.lng, me.lat, {
+    const here = meLng !== undefined && meLat !== undefined
+    set("me", here
+      ? fc([point(meLng, meLat, {
           icon: imageName("ui-me", "#8b5cf6"),
-          tip: `<div class="ip-title">${esc(me.label ?? "You")}</div>` +
-               `<div class="ip-sub">${me.lat.toFixed(5)}, ${me.lng.toFixed(5)}</div>`,
+          tip: `<div class="ip-title">${esc(meLabel ?? "You")}</div>` +
+               `<div class="ip-sub">${meLat.toFixed(5)}, ${meLng.toFixed(5)}</div>`,
         })])
       : fc([]))
-    if (me && followMe) {
-      map.current?.easeTo({ center: [me.lng, me.lat], duration: 400 })
+    if (here && followMe) {
+      map.current?.easeTo({ center: [meLng, meLat], duration: 400 })
     }
-  }, [ready, me, followMe])
+  }, [ready, meLng, meLat, meLabel, followMe, recentreKey])
 
   /** Keep the canvas the size of its box.
    *

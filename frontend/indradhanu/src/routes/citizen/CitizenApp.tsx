@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass,
   Droplets, Hospital, Loader2, Mic, Navigation, Pill, Send, ShieldCheck,
@@ -173,11 +173,37 @@ export default function CitizenApp() {
   const [newAlert, setNewAlert] = useState<string | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
+  /** Bumped by the recentre button. It used to clone `pos` into a new object to
+   *  force the map to ease back — which also refetched the whole city state,
+   *  because the poll was keyed on that object's identity. Recentring the view
+   *  and asking the API a question are different things and now say so. */
+  const [recentre, setRecentre] = useState(0)
+
+  /** The request currently in flight, so a newer one can cancel it.
+   *
+   *  `/citizen/state` costs about 1.5s on a warm instance, and the poll is every
+   *  4s, so two can overlap whenever the network is slower than usual. Without
+   *  this the older reply can land second and overwrite the newer one, which
+   *  shows a resident a shelter they have already walked past. Last request
+   *  wins, and the superseded one is cancelled rather than merely ignored, so it
+   *  stops costing the phone's radio and the API a query. */
+  const active = useRef<AbortController | null>(null)
+  /** Whether the person has touched the page yet.
+   *
+   *  Chrome refuses `navigator.vibrate()` before a gesture and logs an
+   *  intervention for each attempt. A poll that fires every four seconds turns
+   *  that into a console full of them, which buries whatever real error appears
+   *  next. */
+  const gestured = useRef(false)
 
   const load = useCallback(async (p: { lng: number; lat: number }) => {
+    active.current?.abort()
+    const ctl = new AbortController()
+    active.current = ctl
     try {
       const next = await request<State>("/citizen/state", {
         query: { lng: p.lng, lat: p.lat, cityId: "pune" },
+        signal: ctl.signal,
       })
       setState(next)
       setUnreachable(false)
@@ -191,13 +217,16 @@ export default function CitizenApp() {
       if (fresh) {
         setNewAlert(fresh.headline)
         try {
-          navigator.vibrate?.([120, 60, 120])
+          if (gestured.current) navigator.vibrate?.([120, 60, 120])
           if ("Notification" in window && Notification.permission === "granted") {
             new Notification(fresh.headline, { body: fresh.action, tag: fresh.id })
           }
         } catch { /* a browser that will not buzz is not an error worth showing */ }
       }
     } catch (e) {
+      // A request we cancelled ourselves is not a failure and must not paint
+      // the offline banner: something newer is already on its way.
+      if (ctl.signal.aborted) return
       const message = e instanceof Error ? e.message : String(e)
       // `TypeError: Failed to fetch` is what a browser says when nothing
       // answered. It is the most common state during development and the least
@@ -208,11 +237,40 @@ export default function CitizenApp() {
     }
   }, [])
 
-  useEffect(() => { void load(pos) }, [load, pos])
+  /** The position the API is asked about, rounded.
+   *
+   *  Geolocation hands back fourteen decimal places — 73.88962765382259 — and
+   *  `pos` is a fresh object on every update, so keying the poll on it made
+   *  standing still look like movement: six identical queries in four seconds,
+   *  each one restarting the interval that was about to fire anyway. Five
+   *  decimals is about a metre, which is finer than any decision on this screen
+   *  and coarse enough that a stationary phone stays stationary.
+   */
+  const lng = Math.round(pos.lng * 1e5) / 1e5
+  const lat = Math.round(pos.lat * 1e5) / 1e5
+  const query = useMemo(() => ({ lng, lat }), [lng, lat])
+
+  // One effect, not two. Separately they raced: a position change fired an
+  // immediate load *and* tore down and rebuilt the interval, so a held arrow key
+  // produced a burst of requests rather than a walk.
   useEffect(() => {
-    const id = setInterval(() => void load(pos), 4000)
-    return () => clearInterval(id)
-  }, [load, pos])
+    void load(query)
+    const id = setInterval(() => void load(query), 4000)
+    return () => {
+      clearInterval(id)
+      active.current?.abort()
+    }
+  }, [load, query])
+
+  useEffect(() => {
+    const mark = () => { gestured.current = true }
+    window.addEventListener("pointerdown", mark, { once: true })
+    window.addEventListener("keydown", mark, { once: true })
+    return () => {
+      window.removeEventListener("pointerdown", mark)
+      window.removeEventListener("keydown", mark)
+    }
+  }, [])
 
   // Real GPS if they allow it, arrow keys either way. Declining location is an
   // ordinary choice, not an error state to sit in.
@@ -529,6 +587,7 @@ export default function CitizenApp() {
                 center={[pos.lng, pos.lat]}
                 zoom={13.5}
                 followMe
+                recentreKey={recentre}
               />
             )}
             footer={
@@ -550,7 +609,7 @@ export default function CitizenApp() {
                   </Button>
                   <Button size="icon" variant="outline" aria-label="Recentre on me"
                           className="size-10"
-                          onClick={() => setPos((pp) => ({ ...pp }))}>
+                          onClick={() => setRecentre((n) => n + 1)}>
                     <Navigation className="size-4" />
                   </Button>
                   <Button size="icon" variant="secondary" aria-label="Move east"
