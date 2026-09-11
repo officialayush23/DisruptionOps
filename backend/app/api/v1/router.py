@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     auth,
+    config,
     citizen,
     demo,
     geography,
@@ -33,3 +34,4 @@ api_router.include_router(geography.router)
 api_router.include_router(risk.router)
 api_router.include_router(operations.router)
 api_router.include_router(citizen.router)
+api_router.include_router(config.router)

@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  AlertTriangle, Compass, Hospital, Loader2, Navigation, Send, ShieldCheck, Siren,
+  AlertTriangle, Compass, Droplets, Hospital, Loader2, Mic, Navigation,
+  Pill, Send, ShieldCheck, Siren, Square, Utensils,
 } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
+import { MapStage } from "@/components/map/MapStage"
+import { OfflineBar } from "@/components/common/OfflineBar"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -42,6 +45,12 @@ type State = {
   categories: { id: string; label: string; lifeSafety: boolean }[]
 }
 
+type VoiceResult = {
+  heard: string; language: string; languageName: string
+  translated: boolean; latencyMs: number; notes: string[]
+  readAs: string; readAsLabel: string; readHow: string; readConfidence: number
+}
+
 type Guidance = {
   intent: string; headline: string; shouldMove: boolean
   reasoning: string[]; warnings: string[]
@@ -59,6 +68,9 @@ export default function CitizenApp() {
   const [pos, setPos] = useState<{ lng: number; lat: number }>({ lng: ALANDI[0], lat: ALANDI[1] })
   const [state, setState] = useState<State | null>(null)
   const [guide, setGuide] = useState<Guidance | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [heard, setHeard] = useState<VoiceResult | null>(null)
+  const recorder = useRef<MediaRecorder | null>(null)
   const [text, setText] = useState("")
   const [busy, setBusy] = useState<string | null>(null)
   const [filed, setFiled] = useState<Record<string, unknown> | null>(null)
@@ -109,6 +121,72 @@ export default function CitizenApp() {
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [])
+
+  /** Hold to talk.
+   *
+   *  Typing is the wrong input here. Somebody standing in water, on a phone, in
+   *  the dark, with one hand free is not going to fill in a form, and the
+   *  fastest report is the one that asked least of the person making it.
+   *
+   *  What comes back is put in the text box rather than filed straight away, so
+   *  the person reads what was heard before it becomes a report. A misheard
+   *  report filed automatically is worse than a slow one.
+   */
+  async function startRecording() {
+    setError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const chunks: BlobPart[] = []
+      const mime = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "audio/mp4"
+      const rec = new MediaRecorder(stream, { mimeType: mime })
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop())
+        setRecording(false)
+        const blob = new Blob(chunks, { type: mime })
+        if (blob.size < 1200) {
+          setError("That was too short to make out. Hold the button while you speak.")
+          return
+        }
+        setBusy("voice")
+        try {
+          const b64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onloadend = () => resolve(String(reader.result).split(",")[1] ?? "")
+            reader.onerror = () => reject(new Error("Could not read the recording."))
+            reader.readAsDataURL(blob)
+          })
+          const r = await request<VoiceResult>("/citizen/report/voice", {
+            method: "POST",
+            body: {
+              lng: pos.lng, lat: pos.lat, audioBase64: b64,
+              contentType: mime, language: "unknown",
+              fileIt: false, cityId: "pune",
+            },
+          })
+          setHeard(r)
+          setText(r.heard)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        } finally { setBusy(null) }
+      }
+      recorder.current = rec
+      rec.start()
+      setRecording(true)
+    } catch {
+      setError(
+        "The microphone is not available. Check the permission, or type the " +
+        "report instead."
+      )
+    }
+  }
+
+  function stopRecording() {
+    recorder.current?.stop()
+    recorder.current = null
+  }
 
   async function ask(intent: string, condition?: string) {
     setBusy(intent)
@@ -177,28 +255,52 @@ export default function CitizenApp() {
         </Alert>
       )}
 
+      <OfflineBar manifest="/manifest.webmanifest" />
+
       <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
         <div className="space-y-3">
-          <LiveMap
-            className="h-[460px] w-full rounded-lg border"
-            wards={[]}
-            incidents={state?.incidents ?? []}
-            resources={state?.unitsNearby?.map((u) => ({ ...u, capabilities: [] })) ?? []}
-            facilities={state?.facilities ?? []}
-            route={guide?.route}
-            routeLabel={guide?.headline}
-            blocks={state?.roadBlocks ?? []}
-            me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
-            center={[pos.lng, pos.lat]}
-            zoom={13.5}
-            followMe
+          <MapStage
+            panelTitle="Near you"
+            panel={
+              <div className="space-y-2 text-xs">
+                {(state?.incidents ?? []).slice(0, 12).map((i) => (
+                  <div key={i.id} className="rounded border border-slate-500/25 p-2">
+                    <div className="font-medium text-slate-100">{i.title}</div>
+                    <div className="text-slate-400">
+                      severity {i.severity} · {(i.distanceM / 1000).toFixed(1)} km away
+                    </div>
+                  </div>
+                ))}
+                {(state?.incidents?.length ?? 0) === 0 && (
+                  <p className="text-slate-400">Nothing reported near you.</p>
+                )}
+              </div>
+            }
+            map={(expanded) => (
+              <LiveMap
+                className={expanded ? "h-full w-full" : "h-[460px] w-full rounded-lg border"}
+                wards={[]}
+                incidents={state?.incidents ?? []}
+                resources={state?.unitsNearby?.map((u) => ({ ...u, capabilities: [] })) ?? []}
+                facilities={state?.facilities ?? []}
+                route={guide?.route}
+                routeLabel={guide?.headline}
+                blocks={state?.roadBlocks ?? []}
+                me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
+                center={[pos.lng, pos.lat]}
+                zoom={13.5}
+                followMe
+              />
+            )}
+            footer={
+              <p className="text-muted-foreground text-xs">
+                Arrow keys or WASD move you. The green line is the route the
+                agent recommends, on real streets, chosen against every hazard
+                that has been reported rather than for being shortest. Open the
+                legend for what the colours mean.
+              </p>
+            }
           />
-          <p className="text-muted-foreground text-xs">
-            Arrow keys or WASD move you. The green line is the route the agent
-            recommends, on real streets, chosen against every hazard that has
-            been reported rather than for being shortest. Red dots are open
-            incidents.
-          </p>
         </div>
 
         <div className="space-y-3">
@@ -226,6 +328,27 @@ export default function CitizenApp() {
                 <Button size="sm" variant="secondary" disabled={busy !== null}
                         onClick={() => ask("hospital", text || undefined)}>
                   <Hospital className="size-3.5" /> Hospital
+                </Button>
+                {/* PS20's first sentence is food, medical supplies and shelter.
+                    A resident could be told where to shelter and never where to
+                    eat, which is most of a relief operation missing. Each of
+                    these excludes places that have run the line out rather than
+                    ranking them low: queueing for food that is not there is
+                    worse than walking further. */}
+                <Button size="sm" variant="secondary" disabled={busy !== null}
+                        onClick={() => ask("food")}>
+                  {busy === "food" ? <Loader2 className="size-3.5 animate-spin" /> : <Utensils className="size-3.5" />}
+                  Food
+                </Button>
+                <Button size="sm" variant="secondary" disabled={busy !== null}
+                        onClick={() => ask("water")}>
+                  {busy === "water" ? <Loader2 className="size-3.5 animate-spin" /> : <Droplets className="size-3.5" />}
+                  Drinking water
+                </Button>
+                <Button size="sm" variant="secondary" disabled={busy !== null}
+                        onClick={() => ask("medical_supplies")}>
+                  {busy === "medical_supplies" ? <Loader2 className="size-3.5 animate-spin" /> : <Pill className="size-3.5" />}
+                  Medicine
                 </Button>
               </div>
 
@@ -293,13 +416,55 @@ export default function CitizenApp() {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">Tell us what you can see</CardTitle>
               <CardDescription className="text-xs">
-                Type it however you like, in English, Hindi or Marathi. No account needed.
+                Say it or type it, in English, Hindi or Marathi. No account needed.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
+              {/* Hold to talk. One hand, no form, no dropdown. The transcript
+                  lands in the box below so the person can read it before it
+                  becomes a report. */}
+              <Button
+                type="button"
+                variant={recording ? "destructive" : "secondary"}
+                className="w-full"
+                disabled={busy === "voice"}
+                onPointerDown={() => { if (!recording) void startRecording() }}
+                onPointerUp={() => { if (recording) stopRecording() }}
+                onPointerLeave={() => { if (recording) stopRecording() }}
+              >
+                {busy === "voice" ? (
+                  <><Loader2 className="size-4 animate-spin" /> Listening back…</>
+                ) : recording ? (
+                  <><Square className="size-4" /> Release to stop</>
+                ) : (
+                  <><Mic className="size-4" /> Hold to speak</>
+                )}
+              </Button>
+
+              {heard && (
+                <div className="space-y-1 rounded border p-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge variant="outline">{heard.languageName}</Badge>
+                    {heard.translated && (
+                      <Badge variant="secondary">translated to English</Badge>
+                    )}
+                    <span className="text-muted-foreground tabular-nums">
+                      {heard.latencyMs} ms
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    Read as <span className="text-foreground">{heard.readAsLabel}</span>.
+                    Correct the text below if that is wrong, then send.
+                  </div>
+                  {heard.notes.map((n, i) => (
+                    <div key={i} className="text-muted-foreground italic">{n}</div>
+                  ))}
+                </div>
+              )}
+
               <Textarea
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => { setText(e.target.value); setHeard(null) }}
                 placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
                 rows={3}
               />

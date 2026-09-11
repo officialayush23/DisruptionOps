@@ -73,9 +73,13 @@ export type Beat = {
   detail: Record<string, unknown>
 }
 export type Facility = {
-  id: string; name: string; kind: string; status: string
+  id: string; name: string; kind: string; kindLabel: string; status: string
   capacity: number | null; occupancy: number | null
   acceptsCasualties: boolean; location: [number, number]
+  wardId: string | null
+  /** Relief stock on hand: food packets, litres of water, medical kits. */
+  supplies: Record<string, number>
+  servedPerHour: number | null
 }
 export type RoadBlock = {
   id: string; reason: string; reportedBy: string; radiusM: number

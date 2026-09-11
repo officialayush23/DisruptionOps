@@ -29,7 +29,7 @@ from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.db.repositories import queries as q
 from app.guidance import router as guidance
-from app.incidents import intake, parse, vision, vision_client
+from app.incidents import intake, parse, speech, vision, vision_client
 from app.schemas.domain import Camel, CategoryId, LngLat
 from app.taxonomy import UnknownTaxonomyValue
 from app.taxonomy import cache as taxonomy
@@ -44,7 +44,10 @@ router = APIRouter(tags=["personas"])
 class GuideIn(Camel):
     lng: float = Field(ge=-180, le=180)
     lat: float = Field(ge=-90, le=90)
-    intent: Literal["shelter", "hospital", "safety", "ambulance"] = "safety"
+    intent: Literal[
+        "shelter", "hospital", "safety", "ambulance",
+        "food", "water", "medical_supplies",
+    ] = "safety"
     #: Free text: "my father is bleeding", "chest pain". Used to pick a facility
     #: that can actually treat it, never to invent one.
     condition: str | None = None
@@ -187,6 +190,131 @@ class VisionIn(Camel):
     ran_on: Literal["device", "server", "hosted"] = "device"
     #: What the reporter said it was, so the photo can be checked against it.
     category: CategoryId = "flooded_road"
+
+
+class VoiceReportIn(Camel):
+    """A spoken report. Base64 audio in, a filed report out."""
+
+    lng: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90)
+    #: Base64 of a short recording. `data:` prefixes are tolerated.
+    audio_base64: str
+    content_type: str = "audio/webm"
+    #: "unknown" asks the recogniser to detect it, which is the right default:
+    #: nobody reporting a flood should have to pick their language off a list.
+    language: str = "unknown"
+    #: When false, the transcript comes back and nothing is filed, so the person
+    #: can read what was heard before it becomes a report.
+    file_it: bool = True
+    city_id: str = "pune"
+
+
+@router.post("/citizen/report/voice")
+async def citizen_voice_report(
+    body: VoiceReportIn, principal: CurrentPrincipal
+) -> dict:
+    """Hold a button, say what you see.
+
+    Typing is the wrong input for this. Somebody standing in water, on a phone,
+    in the dark, with one hand free is not going to fill in a form, and the
+    fastest report is the one that asked least of the person making it.
+
+    The transcript then goes through exactly the same door as a typed report:
+    the same parser, the same trust scoring, the same clustering. Speech is an
+    input method, not a second pipeline, so nothing downstream has to know or
+    care that this one was spoken.
+    """
+    if not speech.configured():
+        raise BadRequest(
+            "Speech reporting is not configured. Set SARVAM_API_KEY, or type "
+            "the report instead."
+        )
+    try:
+        audio = speech.decode_audio(body.audio_base64)
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+
+    heard = await speech.transcribe(
+        audio, content_type=body.content_type, language=body.language
+    )
+    if heard is None or not heard.usable:
+        raise BadRequest(
+            "Nothing could be made out in that recording. Try again somewhere "
+            "quieter, or type it."
+        )
+
+    parsed = await parse.parse_with_model(heard.text)
+    payload: dict = {
+        "heard": heard.text,
+        "language": heard.language,
+        "languageName": heard.language_name,
+        "translated": heard.translated,
+        "latencyMs": heard.latency_ms,
+        "notes": heard.notes,
+        "readAs": parsed.category,
+        "readAsLabel": (taxonomy.categories[parsed.category].display_name
+                        if parsed.category in taxonomy.categories else parsed.category),
+        "readHow": parsed.explanation,
+        "readConfidence": parsed.confidence,
+        "filed": False,
+    }
+    if not body.file_it:
+        # The person reads what was heard first. A misheard report that gets
+        # filed anyway is worse than a slow one.
+        return payload
+
+    loc = await q.locate_ward(body.lng, body.lat, body.city_id)
+    if loc.ward is None or not loc.inside:
+        raise BadRequest(
+            loc.note or "You are outside the area this deployment covers, so "
+            "there is no ward to file this against."
+        )
+
+    try:
+        result = await intake.receive(
+            ward_id=loc.ward.id, category=parsed.category,
+            location=(body.lng, body.lat), note=heard.text,
+            source="app", reporter_id=principal.user_id,
+            reporter_name=principal.full_name or "Resident",
+            device_id=f"citizen-{principal.user_id or 'anon'}",
+            city_id=body.city_id, clock=clocks.WALL,
+        )
+    except UnknownTaxonomyValue as exc:
+        raise NotFound(str(exc)) from exc
+
+    await ev.append(
+        clock=clocks.WALL, kind="report.spoken",
+        actor=f"agent:speech:{heard.model}",
+        subject_type="report", subject_id=result.report_id,
+        ward_id=loc.ward.id,
+        payload={"language": heard.language, "translated": heard.translated,
+                 "latency_ms": heard.latency_ms, "chars": len(heard.text)},
+    )
+
+    from app.demo import runner as demo_runner
+
+    demo_runner.state.beat(
+        "you",
+        f"Spoken report in {heard.language_name}: “{heard.text[:60]}”",
+        incidentId=result.incident_id, wardId=loc.ward.id,
+    )
+    demo_runner.state.dirty = True
+
+    payload.update({
+        "filed": True,
+        "reportId": result.report_id,
+        "incidentId": result.incident_id,
+        "createdIncident": result.created_incident,
+        "linked": result.linked,
+        "wardId": loc.ward.id,
+        "wardName": loc.ward.name,
+        "trust": result.trust.score,
+        "trustStatus": result.trust.status,
+        "trustReasons": result.trust.reasons,
+        "linkScore": result.link_score,
+        "summary": result.summary,
+    })
+    return payload
 
 
 class VisionAnalyseIn(Camel):

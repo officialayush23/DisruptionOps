@@ -9,6 +9,7 @@ import {
   Radar,
   Radio,
   Route,
+  Settings2,
   Siren,
   TrendingUp,
   Truck,
@@ -45,6 +46,7 @@ const NAV = [
   { to: "/admin/resources", label: "Resources", icon: Truck },
   { to: "/admin/alerts", label: "Issued alerts", icon: Radio },
   { to: "/admin/after-action", label: "After-action", icon: History },
+  { to: "/admin/configuration", label: "Configuration", icon: Settings2 },
 ]
 
 /** The world clock, in the header.

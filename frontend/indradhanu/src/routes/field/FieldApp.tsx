@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react"
 import { AlertTriangle, CheckCircle2, Loader2, Radio, Truck } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
+import { MapStage } from "@/components/map/MapStage"
+import { OfflineBar } from "@/components/common/OfflineBar"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -134,43 +136,65 @@ export default function FieldApp() {
         </Alert>
       )}
 
+      <OfflineBar manifest="/field.webmanifest" />
+
       <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
-          <LiveMap
-            className="h-[420px] w-full rounded-lg border"
-            resources={state?.units.map((u) => ({ ...u, capabilities: [] })) ?? []}
-            facilities={state?.facilities ?? []}
-            incidents={
-              state?.units
-                .filter((u) => u.incidentLocation)
-                .map((u) => ({
-                  id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
-                  category: "", severity: 4, reportCount: 1,
-                  location: u.incidentLocation as [number, number],
-                })) ?? []
+          <MapStage
+            panelTitle="My units"
+            panel={
+              <div className="space-y-2 text-xs">
+                {(state?.units ?? []).map((u) => (
+                  <div key={u.id} className="rounded border border-slate-500/25 p-2">
+                    <div className="font-medium text-slate-100">{u.label}</div>
+                    <div className="text-slate-400">
+                      {u.status.replace(/_/g, " ")}
+                      {u.assignedTo ? ` → ${u.assignedTo}` : ""}
+                      {u.etaMinutes ? `, ${u.etaMinutes} min` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
             }
-            routes={
-              state?.units
-                .filter((u) => (u.route?.length ?? 0) > 1)
-                .map((u) => ({
-                  id: u.id, resourceId: u.id, resourceLabel: u.label,
-                  incidentTitle: u.assignedTo ?? "Task", status: u.status,
-                  etaMinutes: u.etaMinutes ?? null,
-                  distanceKm: u.distanceKm ?? null,
-                  engine: u.routeEngine, progress: u.progress,
-                  steps: u.steps, path: u.route as [number, number][],
-                })) ?? []
-            }
-            route={
-              (unit?.route?.length ?? 0) > 1
-                ? (unit!.route as number[][])
-                : unit?.incidentLocation
-                  ? [unit.location, unit.incidentLocation]
-                  : undefined
-            }
-            routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
-            center={unit?.location ?? [73.88, 18.58]}
-            zoom={12}
+            map={(expanded) => (
+                  <LiveMap
+                    className={expanded ? "h-full w-full" : "h-[420px] w-full rounded-lg border"}
+                resources={state?.units.map((u) => ({ ...u, capabilities: [] })) ?? []}
+                facilities={state?.facilities ?? []}
+                incidents={
+                  state?.units
+                    .filter((u) => u.incidentLocation)
+                    .map((u) => ({
+                      id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
+                      category: "", severity: 4, reportCount: 1,
+                      location: u.incidentLocation as [number, number],
+                    })) ?? []
+                }
+                routes={
+                  state?.units
+                    .filter((u) => (u.route?.length ?? 0) > 1)
+                    .map((u) => ({
+                      id: u.id, resourceId: u.id, resourceLabel: u.label,
+                      incidentId: u.incidentId ?? u.id,
+                      incidentTitle: u.assignedTo ?? "Task", status: u.status,
+                      etaMinutes: u.etaMinutes ?? null,
+                      distanceKm: u.distanceKm ?? null,
+                      engine: u.routeEngine, progress: u.progress,
+                      steps: u.steps, path: u.route as [number, number][],
+                    })) ?? []
+                }
+                route={
+                  (unit?.route?.length ?? 0) > 1
+                    ? (unit!.route as number[][])
+                    : unit?.incidentLocation
+                      ? [unit.location, unit.incidentLocation]
+                      : undefined
+                }
+                routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
+                center={unit?.location ?? [73.88, 18.58]}
+                zoom={12}
+              />
+            )}
           />
 
           {unit && (unit.steps?.length ?? 0) > 0 && (

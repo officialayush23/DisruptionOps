@@ -33,7 +33,25 @@ from app.solver import routing
 
 log = get_logger(__name__)
 
-Intent = Literal["shelter", "hospital", "safety", "ambulance", "stay"]
+Intent = Literal[
+    "shelter", "hospital", "safety", "ambulance", "stay",
+    # PS20's first sentence is "food, medical supplies, shelter capacity and
+    # rescue teams". Three of those were reachable from here and the supplies
+    # were not, so a resident could be told where to shelter and never where to
+    # eat.
+    "food", "water", "medical_supplies",
+]
+
+#: Which lifeline kinds answer which question, and which stock line has to
+#: actually be on the shelf for the answer to be worth giving.
+INTENT_KINDS: dict[str, tuple[tuple[str, ...], str | None]] = {
+    "hospital":         (("hospital",), None),
+    "shelter":          (("shelter", "relief_centre"), None),
+    "safety":           (("shelter", "relief_centre"), None),
+    "food":             (("relief_centre", "food_kitchen"), "food_packets"),
+    "water":            (("water_point", "relief_centre"), "water_litres"),
+    "medical_supplies": (("medical_camp", "relief_centre", "hospital"), "medical_kits"),
+}
 
 #: A candidate within this many metres of a known hazard is treated as exposed.
 HAZARD_RADIUS_M = 400
@@ -60,6 +78,10 @@ class Candidate:
     hours_to_full: float | None = None
     #: Minutes it would take to get there, once a route has been costed.
     travel_minutes: int | None = None
+    #: Stock on hand, for a relief centre, water point or medical camp.
+    supplies: dict[str, Any] = field(default_factory=dict)
+    #: Which line of that stock this request is about.
+    stock_line: str | None = None
     score: float = 0.0
     why: list[str] = field(default_factory=list)
 
@@ -68,6 +90,15 @@ class Candidate:
         if self.capacity is None:
             return None
         return max(0, self.capacity - (self.occupancy or 0))
+
+    @property
+    def stock_left(self) -> float | None:
+        if not self.stock_line:
+            return None
+        try:
+            return float(self.supplies.get(self.stock_line) or 0)
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass(slots=True)
@@ -106,12 +137,16 @@ async def _candidates(
     saturation: dict[str, float] | None = None,
 ) -> list[Candidate]:
     """Places that could actually take this person right now."""
+    kinds, stock_line = INTENT_KINDS.get(intent, (("shelter", "hospital"), None))
+    where = "l.kind = any($5::text[])"
     if intent == "hospital":
-        where = "l.kind = 'hospital' and l.accepts_casualties"
-    elif intent in ("shelter", "safety"):
-        where = "l.kind = 'shelter'"
-    else:
-        where = "l.kind in ('shelter','hospital')"
+        where += " and l.accepts_casualties"
+    if stock_line:
+        # A relief centre with no food is a building. Places that have run the
+        # line out are excluded here rather than ranked low, because sending
+        # somebody to queue for something that is not there is worse than
+        # sending them further.
+        where += f" and coalesce((l.supplies ->> '{stock_line}')::numeric, 0) > 0"
 
     rows = await db.fetch(
         f"""
@@ -120,7 +155,7 @@ async def _candidates(
                    extensions.ST_MakePoint($1,$2),4326)::extensions.geography g
         )
         select l.id, l.name, l.kind, l.capacity, l.occupancy, l.status,
-               l.specialities,
+               l.specialities, l.supplies,
                extensions.ST_X(l.location::extensions.geometry) lng,
                extensions.ST_Y(l.location::extensions.geometry) lat,
                extensions.ST_Distance(l.location, me.g) / 1000.0 km,
@@ -137,7 +172,7 @@ async def _candidates(
          order by km
          limit 12
         """,
-        lng, lat, city_id, HAZARD_RADIUS_M,
+        lng, lat, city_id, HAZARD_RADIUS_M, list(kinds),
     )
     return [
         Candidate(
@@ -148,6 +183,8 @@ async def _candidates(
             status=r["status"], specialities=list(r["specialities"] or []),
             hazards_near=r["hazards_near"], ward_severity=r["ward_severity"],
             hours_to_full=(saturation or {}).get(r["id"]),
+            supplies=dict(r["supplies"] or {}),
+            stock_line=stock_line,
         )
         for r in rows
     ]
@@ -177,6 +214,20 @@ def _score(c: Candidate, intent: Intent, condition: str | None) -> Candidate:
     elif c.status == "limited":
         score *= 0.7
         why.append("reported limited capacity")
+
+    # Supplies, when the question was about supplies. A centre with two hours
+    # of food left is a worse answer than one with a day of it, even if it is
+    # nearer, for the same reason a full shelter is.
+    left = c.stock_left
+    if left is not None:
+        if left <= 0:
+            return _reject(c, f"{c.name} has run out of {c.stock_line.replace('_', ' ')}.")
+        plenty = 400.0 if c.stock_line == "food_packets" else (
+            4000.0 if c.stock_line == "water_litres" else 25.0
+        )
+        score *= 0.4 + 0.6 * min(1.0, left / plenty)
+        unit = "litres" if c.stock_line == "water_litres" else c.stock_line.replace("_", " ")
+        why.append(f"{left:,.0f} {unit} on hand")
 
     if intent == "hospital" and condition:
         wanted = _speciality_for(condition)
@@ -299,6 +350,9 @@ async def guide(
 
     # Staying put is sometimes the correct instruction, and a system that always
     # sends people somewhere is one that creates its own crowd crush.
+    # Staying put answers "am I safe". It does not answer "where is the food",
+    # and returning it for a supply question would be a system refusing to help
+    # because it had decided the question was the wrong one.
     if intent == "safety" and (here_severity is None or here_severity <= 2):
         return Guidance(
             intent=intent,
@@ -364,10 +418,14 @@ async def guide(
             "ask for help instead of starting out."
         )
 
+    what = {
+        "food": "food", "water": "drinking water",
+        "medical_supplies": "medical supplies",
+    }.get(intent)
     headline = (
-        f"Go to {best.name}, {km:.1f} km away, about {minutes} minutes."
-        if intent != "hospital"
-        else f"Go to {best.name}, {km:.1f} km, about {minutes} minutes by road."
+        f"Collect {what} at {best.name}, {km:.1f} km away, about {minutes} minutes."
+        if what
+        else f"Go to {best.name}, {km:.1f} km away, about {minutes} minutes."
     )
 
     return Guidance(

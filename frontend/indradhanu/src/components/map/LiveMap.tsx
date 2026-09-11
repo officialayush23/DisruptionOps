@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
 import type { Feature, FeatureCollection } from "geojson"
+import { imageName, registerIcons } from "./icons"
 import "mapbox-gl/dist/mapbox-gl.css"
 
 /** The map, on Mapbox.
@@ -26,7 +27,7 @@ export type WardFeature = {
 export type IncidentFeature = {
   id: string; title: string; category: string; severity: number
   reportCount: number; confidence?: number; unitsEnRoute?: number
-  status?: string; createdAt?: string; wardId?: string
+  status?: string; createdAt?: string; wardId?: string; street?: string | null
   location: [number, number]
 }
 export type ResourceFeature = {
@@ -41,6 +42,10 @@ export type FacilityFeature = {
   id: string; name: string; kind: string; status: string
   capacity: number | null; occupancy: number | null; location: [number, number]
   acceptsCasualties?: boolean
+  kindLabel?: string
+  /** Relief stock on hand: food packets, litres of water, medical kits. */
+  supplies?: Record<string, number>
+  servedPerHour?: number | null
 }
 export type BlockFeature = {
   id: string; reason: string; location: [number, number]; reportedBy?: string
@@ -48,7 +53,7 @@ export type BlockFeature = {
 /** A unit's road geometry to what it was tasked with. */
 export type RouteFeature = {
   id: string; resourceId: string; resourceLabel: string
-  incidentTitle: string; status: string
+  incidentId: string; incidentTitle: string; status: string
   etaMinutes: number | null; distanceKm: number | null
   engine?: string | null; progress?: number
   steps?: { instruction: string; street: string; distanceM: number }[]
@@ -149,30 +154,61 @@ const SEVERITY_COLOR = [
   5, "rgba(239,68,68,0.48)",
 ] as unknown as mapboxgl.Expression
 
-const STATUS_COLOR = [
-  "match", ["get", "status"],
-  "available", "#64748b",
-  "assigned", "#0ea5e9",
-  "en_route", "#f59e0b",
-  "on_site", "#10b981",
-  "offline", "#dc2626",
-  "#94a3b8",
-] as unknown as mapboxgl.Expression
-
-/** Two letters, not an emoji.
+/** Which drawn icon, and in what colour.
  *
- *  The symbol layer used ⛵🚑🚒 and Mapbox answered `glyphs > 65535 not
- *  supported` on every frame: emoji live outside the Basic Multilingual Plane
- *  and the SDF glyph pipeline only covers codepoints below 65536, so the layer
- *  drew nothing and filled the console with errors. Latin letters are inside it.
+ *  These replace two-letter codes, which were a correct fix for the emoji
+ *  `glyphs > 65535` crash and a poor answer to "what is that dot". A tree reads
+ *  as a tree at any zoom; "FT" is a puzzle at every one. The icons are raster
+ *  images registered with `addImage`, so there is no codepoint limit to hit.
  */
-const GLYPH: Record<string, string> = {
-  boat: "BT", pump: "PU", ambulance: "AM", fire_engine: "FE",
-  rescue_team: "RT", bus: "BU", jcb: "JC", tanker: "TK",
-  medical_team: "MD", drone: "DR",
+const HAZARD_ICON: Record<string, string> = {
+  flooded_road: "hz-flooded_road",
+  waterlogging: "hz-waterlogging",
+  fallen_tree: "hz-fallen_tree",
+  power_line: "hz-power_line",
+  structural_damage: "hz-structural_damage",
+  blocked_drain: "hz-blocked_drain",
+  person_stranded: "hz-person_stranded",
+  heat_casualty: "hz-heat_casualty",
+  supply_shortage: "hz-supply_shortage",
+  fire: "hz-fire",
 }
-const glyphFor = (kind: string) =>
-  GLYPH[kind] ?? (kind.slice(0, 2).toUpperCase() || "UN")
+const hazardIcon = (category: string) =>
+  HAZARD_ICON[category] ?? "hz-default"
+
+const KIND_ICON: Record<string, string> = {
+  ambulance: "rk-ambulance", boat: "rk-boat", pump: "rk-pump",
+  fire_engine: "rk-fire_engine", rescue_team: "rk-rescue_team",
+  bus: "rk-bus", jcb: "rk-jcb",
+  supply_truck: "rk-supply_truck", water_tanker: "rk-water_tanker",
+}
+const kindIcon = (kind: string) => KIND_ICON[kind] ?? "rk-default"
+
+const LIFELINE_ICON: Record<string, string> = {
+  hospital: "lf-hospital", shelter: "lf-shelter",
+  relief_centre: "lf-relief_centre", food_kitchen: "lf-food_kitchen",
+  water_point: "lf-water_point", medical_camp: "lf-medical_camp",
+  pump_station: "lf-pump_station", school: "lf-school",
+  substation: "lf-substation",
+}
+const lifelineIcon = (kind: string) => LIFELINE_ICON[kind] ?? "lf-default"
+
+const LIFELINE_COLOUR: Record<string, string> = {
+  hospital: "#0284c7", shelter: "#0d9488",
+  relief_centre: "#7c3aed", food_kitchen: "#7c3aed",
+  water_point: "#0891b2", medical_camp: "#db2777",
+  pump_station: "#475569", school: "#475569", substation: "#475569",
+}
+
+const severityColour = (severity: number) =>
+  severity >= 5 ? "#ef4444" : severity >= 4 ? "#f97316" : "#eab308"
+
+const statusColour = (status: string) =>
+  status === "on_site" ? "#10b981"
+  : status === "en_route" ? "#f59e0b"
+  : status === "assigned" ? "#0ea5e9"
+  : status === "offline" ? "#dc2626"
+  : "#64748b"
 
 const FONT = ["DIN Offc Pro Medium", "Arial Unicode MS Bold"]
 
@@ -245,6 +281,7 @@ export function LiveMap({
   const map = useRef<mapboxgl.Map | null>(null)
   const popup = useRef<mapboxgl.Popup | null>(null)
   const [ready, setReady] = useState(false)
+  const [, setIconsReady] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
 
   useEffect(() => {
@@ -279,6 +316,13 @@ export function LiveMap({
       })
 
       m.on("load", () => {
+        // Register the drawn icons before any source gets data, so the first
+        // poll does not land on a sprite that does not exist yet and fill the
+        // console with missing-image warnings.
+        void registerIcons(m as unknown as Parameters<typeof registerIcons>[0])
+          .then(() => setIconsReady(true))
+          .catch(() => setIconsReady(true))
+
         m.addSource("wards", { type: "geojson", data: fc([]) })
         m.addLayer({
           id: "ward-fill", type: "fill", source: "wards",
@@ -328,71 +372,80 @@ export function LiveMap({
 
         m.addSource("facilities", { type: "geojson", data: fc([]) })
         m.addLayer({
-          id: "facility-dot", type: "circle", source: "facilities",
-          paint: {
-            "circle-radius": 6,
-            "circle-color": ["match", ["get", "status"], "full", "#dc2626",
-                             "limited", "#f59e0b", "#0284c7"],
-            "circle-stroke-width": 1.5, "circle-stroke-color": "#fff",
+          id: "facility-dot", type: "symbol", source: "facilities",
+          layout: {
+            "icon-image": ["get", "icon"],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.2, 13, 0.3, 16, 0.4],
+            "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
+        // A ring for anything that has reported itself full or closed. Colour
+        // alone is not enough when there are four kinds of facility on screen.
+        m.addLayer({
+          id: "facility-alarm", type: "circle", source: "facilities",
+          filter: ["in", ["get", "status"], ["literal", ["full", "closed"]]],
+          paint: {
+            "circle-radius": 13, "circle-color": "rgba(0,0,0,0)",
+            "circle-stroke-width": 2, "circle-stroke-color": "#ef4444",
+          },
+        }, "facility-dot")
 
         m.addSource("blocks", { type: "geojson", data: fc([]) })
         m.addLayer({
-          id: "block-dot", type: "circle", source: "blocks",
-          paint: {
-            "circle-radius": 7, "circle-color": "#ef4444", "circle-opacity": 0.5,
-            "circle-stroke-width": 2, "circle-stroke-color": "#ef4444",
+          id: "block-dot", type: "symbol", source: "blocks",
+          layout: {
+            "icon-image": ["get", "icon"],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.2, 14, 0.32],
+            "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
 
         m.addSource("incidents", { type: "geojson", data: fc([]) })
+        // The halo still carries severity and merge count — it is the thing you
+        // read across a whole city — and the icon on top of it carries what kind
+        // of hazard it is, which is the thing you read once you have found it.
         m.addLayer({
           id: "incident-halo", type: "circle", source: "incidents",
           paint: {
-            "circle-radius": ["+", 10, ["*", 3, ["get", "reportCount"]]],
-            "circle-color": ["match", ["to-string", ["get", "severity"]],
-                             "5", "#ef4444", "4", "#f97316", "#eab308"],
-            "circle-opacity": 0.16,
+            "circle-radius": ["+", 12, ["*", 3, ["get", "reportCount"]]],
+            "circle-color": ["get", "colour"],
+            "circle-opacity": 0.18,
+            "circle-stroke-width": 1, "circle-stroke-color": ["get", "colour"],
+            "circle-stroke-opacity": 0.4,
           },
         })
         m.addLayer({
-          id: "incident-dot", type: "circle", source: "incidents",
-          paint: {
-            "circle-radius": ["+", 5, ["*", 1.8, ["get", "reportCount"]]],
-            "circle-color": ["match", ["to-string", ["get", "severity"]],
-                             "5", "#ef4444", "4", "#f97316", "#eab308"],
-            "circle-stroke-width": 1.5, "circle-stroke-color": "#fff",
+          id: "incident-dot", type: "symbol", source: "incidents",
+          layout: {
+            "icon-image": ["get", "icon"],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.24, 13, 0.36, 16, 0.48],
+            "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
+        // The merge count sits beside the icon rather than inside it, so the
+        // hazard stays legible. It is the whole argument for deduplication and
+        // it should not be hidden behind a picture of a tree.
         m.addLayer({
           id: "incident-count", type: "symbol", source: "incidents",
           filter: [">", ["get", "reportCount"], 1],
           layout: {
             "text-field": ["to-string", ["get", "reportCount"]],
             "text-font": FONT, "text-size": 11, "text-allow-overlap": true,
+            "text-offset": [1.1, -1.0], "text-anchor": "left",
           },
-          paint: { "text-color": "#fff" },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(9,12,20,0.9)", "text-halo-width": 1.4,
+          },
         })
 
         m.addSource("resources", { type: "geojson", data: fc([]) })
         m.addLayer({
-          id: "resource-dot", type: "circle", source: "resources",
-          paint: {
-            "circle-radius": 10, "circle-color": STATUS_COLOR,
-            "circle-stroke-width": 2, "circle-stroke-color": "#fff",
-          },
-        })
-        m.addLayer({
-          id: "resource-glyph", type: "symbol", source: "resources",
+          id: "resource-dot", type: "symbol", source: "resources",
           layout: {
-            "text-field": ["get", "glyph"], "text-font": FONT,
-            "text-size": 9.5, "text-allow-overlap": true,
-            "text-ignore-placement": true, "text-letter-spacing": 0.02,
-          },
-          paint: {
-            "text-color": "#ffffff",
-            "text-halo-color": "rgba(15,23,42,0.65)", "text-halo-width": 0.8,
+            "icon-image": ["get", "icon"],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.24, 13, 0.34, 16, 0.44],
+            "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
 
@@ -402,32 +455,98 @@ export function LiveMap({
           paint: { "circle-radius": 20, "circle-color": "#8b5cf6", "circle-opacity": 0.18 },
         })
         m.addLayer({
-          id: "me-dot", type: "circle", source: "me",
-          paint: { "circle-radius": 8, "circle-color": "#8b5cf6",
-                   "circle-stroke-width": 3, "circle-stroke-color": "#fff" },
+          id: "me-dot", type: "symbol", source: "me",
+          layout: {
+            "icon-image": ["get", "icon"],
+            "icon-size": 0.34,
+            "icon-anchor": "bottom",
+            "icon-allow-overlap": true, "icon-ignore-placement": true,
+          },
         })
 
-        // Points first: a ward polygon covers the whole city, so if it answers
-        // the hover before the dot on top of it does, nothing else is ever
-        // hoverable.
-        const hoverable = [
-          "incident-dot", "resource-dot", "facility-dot", "block-dot",
-          "me-dot", "link-line", "route-line", "ward-fill",
+        // Where each route ends, which is the hazard the unit is going to.
+        // A line that fades out into a dot is a line going nowhere in
+        // particular; the endpoint names its destination.
+        m.addSource("endpoints", { type: "geojson", data: fc([]) })
+        m.addLayer({
+          id: "endpoint-ring", type: "circle", source: "endpoints",
+          paint: {
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 15, 15],
+            "circle-color": "rgba(0,0,0,0)",
+            "circle-stroke-width": 2.4,
+            "circle-stroke-color": ["get", "colour"],
+            "circle-stroke-opacity": 0.95,
+          },
+        })
+        m.addLayer({
+          id: "endpoint-label", type: "symbol", source: "endpoints",
+          minzoom: 12,
+          layout: {
+            "text-field": ["get", "label"], "text-font": FONT,
+            "text-size": 10.5, "text-offset": [0, 1.6], "text-anchor": "top",
+            "text-max-width": 12,
+          },
+          paint: {
+            "text-color": "#e6edf7",
+            "text-halo-color": "rgba(9,12,20,0.92)", "text-halo-width": 1.6,
+          },
+        })
+
+        // One handler, one priority order.
+        //
+        // Per-layer `mousemove` handlers were the bug: Mapbox fires them for
+        // every layer under the cursor independently, and a ward polygon covers
+        // the entire city, so the ward's handler fired last and overwrote
+        // whatever the incident or the unit had just put in the popup. Nothing
+        // on top of a ward was ever hoverable.
+        //
+        // Querying once and taking the first match in a deliberate order fixes
+        // it properly: the ward is the fallback rather than the winner, and the
+        // order here is "smallest and most specific first", which is also the
+        // order somebody's attention moves in.
+        const HOVER_ORDER = [
+          "me-dot", "incident-dot", "resource-dot", "facility-dot",
+          "block-dot", "endpoint-ring", "route-line", "link-line", "ward-fill",
         ]
-        for (const layer of hoverable) {
-          m.on("mousemove", layer, (e) => {
-            const html = propsOf(e.features?.[0]).tip
-            if (!html) return
-            m.getCanvas().style.cursor = layer === "ward-fill" ? "" : "pointer"
-            popup.current?.setLngLat(e.lngLat).setHTML(String(html)).addTo(m)
-          })
-          m.on("mouseleave", layer, () => {
+        const present = () => HOVER_ORDER.filter((id) => m.getLayer(id))
+
+        m.on("mousemove", (e) => {
+          const hits = m.queryRenderedFeatures(e.point, { layers: present() })
+          if (!hits.length) {
             m.getCanvas().style.cursor = ""
             popup.current?.remove()
-          })
-        }
-        m.on("click", "incident-dot", (e) => {
-          const id = propsOf(e.features?.[0]).id
+            return
+          }
+          const rank = new Map(HOVER_ORDER.map((id, i) => [id, i] as const))
+          let best = hits[0]
+          for (const f of hits) {
+            const a = rank.get(String(f.layer?.id)) ?? 99
+            const b = rank.get(String(best.layer?.id)) ?? 99
+            if (a < b) best = f
+          }
+          const html = propsOf(best).tip
+          if (!html) {
+            m.getCanvas().style.cursor = ""
+            popup.current?.remove()
+            return
+          }
+          m.getCanvas().style.cursor =
+            best.layer?.id === "ward-fill" ? "" : "pointer"
+          popup.current?.setLngLat(e.lngLat).setHTML(String(html)).addTo(m)
+        })
+
+        m.on("mouseout", () => {
+          m.getCanvas().style.cursor = ""
+          popup.current?.remove()
+        })
+
+        // Clicking picks the incident under the cursor, whether that was the
+        // hazard icon itself or the ring at the end of a route pointing at it.
+        m.on("click", (e) => {
+          const layers = ["incident-dot", "endpoint-ring"].filter((id) => m.getLayer(id))
+          if (!layers.length) return
+          const hits = m.queryRenderedFeatures(e.point, { layers })
+          const id = hits.length ? propsOf(hits[0]).incidentId ?? propsOf(hits[0]).id : null
           if (id && onPickIncident) onPickIncident(String(id))
         })
 
@@ -493,6 +612,7 @@ export function LiveMap({
       const tip =
         `<div class="ip-title">${esc(i.title)}</div>` +
         `<div class="ip-sub">${esc(i.category.replace(/_/g, " "))}` +
+        (i.street ? ` · ${esc(i.street)}` : "") +
         (i.createdAt ? ` · opened ${esc(ago(i.createdAt))}` : "") + `</div>` +
         chip(
           `Severity ${i.severity}${i.status ? ` · ${i.status.replace(/_/g, " ")}` : ""}`,
@@ -524,6 +644,8 @@ export function LiveMap({
         `<div class="ip-act"><span style="color:#64748b">Click to open it.</span></div>`
       return point(i.location[0], i.location[1], {
         id: i.id, severity: i.severity, reportCount: i.reportCount, tip,
+        colour: severityColour(i.severity),
+        icon: imageName(hazardIcon(i.category), severityColour(i.severity)),
       })
     })))
   }, [ready, incidents, needs, activity])
@@ -531,12 +653,7 @@ export function LiveMap({
   useEffect(() => {
     if (!ready) return
     set("resources", fc(resources.map((r) => {
-      const colour =
-        r.status === "on_site" ? "#10b981"
-        : r.status === "en_route" ? "#f59e0b"
-        : r.status === "assigned" ? "#0ea5e9"
-        : r.status === "offline" ? "#dc2626"
-        : "#64748b"
+      const colour = statusColour(r.status)
       const tip =
         `<div class="ip-title">${esc(r.label)}</div>` +
         `<div class="ip-sub">${esc(r.operator ?? "")}` +
@@ -558,66 +675,133 @@ export function LiveMap({
           : "") +
         activityBlock(activity?.get(r.id), "Agent actions")
       return point(r.location[0], r.location[1], {
-        id: r.id, status: r.status, glyph: glyphFor(r.kind), tip,
+        id: r.id, status: r.status, tip,
+        icon: imageName(kindIcon(r.kind), statusColour(r.status)),
       })
     })))
   }, [ready, resources, activity])
 
   useEffect(() => {
     if (!ready) return
+    const drawable = routes.filter((r) => r.path.length > 1)
+
     set("links", fc(
-      routes
-        .filter((r) => r.path.length > 1)
-        .map((r) => {
-          const turns = (r.steps ?? []).filter((s) => s.street)
-          const tip =
-            `<div class="ip-title">${esc(r.resourceLabel)} &rarr; ${esc(r.incidentTitle)}</div>` +
-            `<div class="ip-sub">${esc((r.engine ?? "route").replace(/-/g, " "))}` +
-            ` · ${Math.round((r.progress ?? 0) * 100)}% of the way</div>` +
-            chip(r.status.replace(/_/g, " "),
-                 r.status === "on_site" ? "#10b981"
-                 : r.status === "en_route" ? "#f59e0b" : "#0ea5e9") +
-            row("Distance", r.distanceKm ? `${r.distanceKm.toFixed(1)} km` : null) +
-            row("ETA", r.etaMinutes ? `${r.etaMinutes} min` : null) +
-            (turns.length
-              ? `<div class="ip-hr"></div><div class="ip-head">Streets</div>` +
-                turns.slice(0, 5).map((s) =>
-                  `<div class="ip-act"><i>${Math.round(s.distanceM)}m</i>` +
-                  `<span>${esc(s.instruction)}</span></div>`).join("")
-              : "")
-          return {
-            type: "Feature" as const,
-            geometry: { type: "LineString" as const, coordinates: r.path as number[][] },
-            properties: { id: r.id, status: r.status, tip },
-          }
-        })
+      drawable.map((r) => {
+        const turns = (r.steps ?? []).filter((s) => s.street)
+        const tip =
+          `<div class="ip-title">${esc(r.resourceLabel)} &rarr; ${esc(r.incidentTitle)}</div>` +
+          `<div class="ip-sub">${esc((r.engine ?? "route").replace(/-/g, " "))}` +
+          ` · ${Math.round((r.progress ?? 0) * 100)}% of the way</div>` +
+          chip(r.status.replace(/_/g, " "), statusColour(r.status)) +
+          row("Distance", r.distanceKm ? `${r.distanceKm.toFixed(1)} km` : null) +
+          row("ETA", r.etaMinutes ? `${r.etaMinutes} min` : null) +
+          (turns.length
+            ? `<div class="ip-hr"></div><div class="ip-head">Streets</div>` +
+              turns.slice(0, 5).map((s) =>
+                `<div class="ip-act"><i>${Math.round(s.distanceM)}m</i>` +
+                `<span>${esc(s.instruction)}</span></div>`).join("")
+            : "")
+        return {
+          type: "Feature" as const,
+          geometry: { type: "LineString" as const, coordinates: r.path as number[][] },
+          properties: { id: r.id, status: r.status, incidentId: r.incidentId, tip },
+        }
+      })
     ))
-  }, [ready, routes])
+
+    // Where each line ends, and what it ends at.
+    //
+    // A route that just fades out into the dot soup is a line going nowhere in
+    // particular. Marking the last vertex with a ring in the route's own colour,
+    // labelled with the incident, makes "this unit is going to that hazard"
+    // readable without hovering anything. One ring per destination, not one per
+    // unit, because three boats converging on one rescue is one place.
+    const byDestination = new Map<string, { at: [number, number]; title: string; n: number; status: string; incidentId: string }>()
+    for (const r of drawable) {
+      const last = r.path[r.path.length - 1] as [number, number]
+      const key = r.incidentId || `${last[0].toFixed(5)},${last[1].toFixed(5)}`
+      const held = byDestination.get(key)
+      if (held) {
+        held.n += 1
+        if (r.status === "on_site") held.status = "on_site"
+      } else {
+        byDestination.set(key, {
+          at: last, title: r.incidentTitle, n: 1,
+          status: r.status, incidentId: r.incidentId,
+        })
+      }
+    }
+
+    set("endpoints", fc(
+      [...byDestination.values()].map((d) =>
+        point(d.at[0], d.at[1], {
+          incidentId: d.incidentId,
+          colour: statusColour(d.status),
+          label: d.n > 1 ? `${d.title} · ${d.n} units` : d.title,
+          tip:
+            `<div class="ip-title">${esc(d.title)}</div>` +
+            `<div class="ip-sub">Destination of ${d.n} committed unit${d.n === 1 ? "" : "s"}</div>` +
+            chip(d.status.replace(/_/g, " "), statusColour(d.status)) +
+            activityBlock(activity?.get(d.incidentId), "What happened"),
+        })
+      )
+    ))
+  }, [ready, routes, activity])
 
   useEffect(() => {
     if (!ready) return
     set("facilities", fc(facilities.map((f) => {
-      const spare = f.capacity === null ? null
+      const spare = f.capacity === null || f.capacity === 0 ? null
         : Math.max(0, f.capacity - (f.occupancy ?? 0))
+      const colour = LIFELINE_COLOUR[f.kind] ?? "#0d9488"
+      const stock = Object.entries(f.supplies ?? {}).filter(
+        ([, v]) => typeof v === "number"
+      ) as [string, number][]
+      // What is actually on the shelf. A relief centre with no food is a
+      // building, and that is a thing an operator must be able to see from the
+      // map rather than from a report somebody files later.
+      const lowest = stock.length
+        ? stock.reduce((a, b) => (b[1] < a[1] ? b : a))
+        : null
+
       const tip =
         `<div class="ip-title">${esc(f.name)}</div>` +
-        `<div class="ip-sub">${esc(f.kind.replace(/_/g, " "))}</div>` +
+        `<div class="ip-sub">${esc(f.kindLabel ?? f.kind.replace(/_/g, " "))}</div>` +
         chip(
           f.status.replace(/_/g, " "),
           f.status === "full" || f.status === "closed" ? "#ef4444"
-            : f.status === "limited" ? "#f59e0b" : "#0284c7"
+            : f.status === "limited" ? "#f59e0b" : colour
         ) +
-        row("Capacity", f.capacity) +
-        row("Occupied", f.occupancy) +
+        (f.capacity ? row("Capacity", f.capacity) : "") +
+        (f.occupancy ? row("Occupied", f.occupancy) : "") +
         (spare !== null
           ? `<div class="ip-row"><span>Places free</span>` +
             `<span class="${spare > 0 ? "ip-ok" : "ip-warn"}">${spare}</span></div>`
           : "") +
-        (f.acceptsCasualties === false
+        (f.servedPerHour ? row("Serving", `${f.servedPerHour}/hour`) : "") +
+        (stock.length
+          ? `<div class="ip-hr"></div><div class="ip-head">Stock on hand</div>` +
+            stock
+              .map(([line, qty]) =>
+                `<div class="ip-row"><span>${esc(line.replace(/_/g, " "))}</span>` +
+                `<span class="${qty <= 0 ? "ip-warn" : ""}">` +
+                `${qty.toLocaleString()}</span></div>`)
+              .join("")
+          : "") +
+        (lowest && lowest[1] <= 0
+          ? `<div class="ip-act ip-warn"><span>Out of ` +
+            `${esc(lowest[0].replace(/_/g, " "))}. The citizen agent has stopped ` +
+            `sending anybody here for it.</span></div>`
+          : "") +
+        (f.acceptsCasualties === false && f.kind === "hospital"
           ? `<div class="ip-act ip-warn"><span>Not accepting casualties.</span></div>`
           : "") +
         activityBlock(activity?.get(f.id), "Reported by the crew")
-      return point(f.location[0], f.location[1], { id: f.id, status: f.status, tip })
+
+      return point(f.location[0], f.location[1], {
+        id: f.id, status: f.status, tip,
+        icon: imageName(lifelineIcon(f.kind), colour),
+      })
     })))
   }, [ready, facilities, activity])
 
@@ -626,6 +810,7 @@ export function LiveMap({
     set("blocks", fc(blocks.map((b) =>
       point(b.location[0], b.location[1], {
         id: b.id,
+        icon: imageName("ui-block", "#dc2626"),
         tip:
           `<div class="ip-title">Road blocked</div>` +
           `<div class="ip-sub">${esc(b.reason)}</div>` +
@@ -655,6 +840,7 @@ export function LiveMap({
     if (!ready) return
     set("me", me
       ? fc([point(me.lng, me.lat, {
+          icon: imageName("ui-me", "#8b5cf6"),
           tip: `<div class="ip-title">${esc(me.label ?? "You")}</div>` +
                `<div class="ip-sub">${me.lat.toFixed(5)}, ${me.lng.toFixed(5)}</div>`,
         })])

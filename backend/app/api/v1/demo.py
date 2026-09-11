@@ -656,9 +656,14 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
         for r in event_rows
     ]
     facilities = [
-        {"id": r["id"], "name": r["name"], "kind": r["kind"], "status": r["status"],
+        {"id": r["id"], "name": r["name"], "kind": r["kind"],
+         "kindLabel": r["kind_label"] or r["kind"].replace("_", " ").title(),
+         "status": r["status"],
          "capacity": r["capacity"], "occupancy": r["occupancy"],
          "acceptsCasualties": r["accepts_casualties"],
+         "wardId": r["ward_id"],
+         "supplies": r["supplies"] or {},
+         "servedPerHour": r["people_served_per_hour"],
          "location": [float(r["lng"]), float(r["lat"])]}
         for r in facility_rows
     ]

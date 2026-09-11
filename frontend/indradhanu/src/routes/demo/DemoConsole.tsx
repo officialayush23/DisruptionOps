@@ -3,7 +3,9 @@ import {
   AlertTriangle, Copy, Gavel, Loader2, Play, Square, Zap,
 } from "lucide-react"
 import { useDemo } from "./DemoProvider"
+import type { DemoState } from "./useDemo"
 import { LiveMap } from "@/components/map/LiveMap"
+import { MapStage } from "@/components/map/MapStage"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -32,6 +34,30 @@ const BEAT_STYLE: Record<string, string> = {
   plan: "text-blue-600 dark:text-blue-400",
   you: "text-violet-600 dark:text-violet-400 font-medium",
   error: "text-red-600 dark:text-red-400",
+}
+
+/** The narration, on its own, so the side panel and the full screen overlay
+ *  show the same thing rather than two views that can drift apart. */
+function BeatFeed({ beats }: { beats: DemoState["beats"] }) {
+  if (!beats.length) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        Press start. Reports arrive a few seconds apart.
+      </p>
+    )
+  }
+  return (
+    <div className="space-y-1.5">
+      {[...beats].reverse().map((b, i) => (
+        <div key={`${b.tick}-${i}`} className="flex gap-2 text-xs">
+          <span className="text-muted-foreground shrink-0 tabular-nums">
+            {String(b.tick).padStart(3, "0")}
+          </span>
+          <span className={BEAT_STYLE[b.kind] ?? ""}>{b.text}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export default function DemoConsole() {
@@ -96,32 +122,44 @@ export default function DemoConsole() {
 
       <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
-          <LiveMap
-            className="h-[520px] w-full rounded-lg border"
-            wards={state.wards}
-            incidents={state.incidents}
-            resources={state.resources}
-            facilities={state.facilities}
-            blocks={state.roadBlocks}
-            needs={state.needs}
-            activity={activity}
-            routes={state.routes}
-            route={state.citizenRoute?.path}
-            routeLabel={
-              state.citizenRoute
-                ? `Given to a resident: ${state.citizenRoute.headline}`
-                : undefined
+          <MapStage
+            panelTitle="What is happening"
+            panel={<BeatFeed beats={state.beats} />}
+            map={(expanded) => (
+              <LiveMap
+                className={
+                  expanded
+                    ? "h-full w-full"
+                    : "h-[520px] w-full rounded-lg border"
+                }
+                wards={state.wards}
+                incidents={state.incidents}
+                resources={state.resources}
+                facilities={state.facilities}
+                blocks={state.roadBlocks}
+                needs={state.needs}
+                activity={activity}
+                routes={state.routes}
+                route={state.citizenRoute?.path}
+                routeLabel={
+                  state.citizenRoute
+                    ? `Given to a resident: ${state.citizenRoute.headline}`
+                    : undefined
+                }
+                onPickIncident={setSelected}
+              />
+            )}
+            footer={
+              <p className="text-muted-foreground text-xs">
+                Coloured lines are the streets each committed unit is driving,
+                from the router, not a bearing, and each one ends in a ring on
+                the hazard it is going to. Green is the route the citizen agent
+                last gave a resident, so the control room can see the advice that
+                went out. Open the legend for what the colours mean, or expand to
+                full screen and keep the feed beside it.
+              </p>
             }
-            onPickIncident={setSelected}
           />
-          <p className="text-muted-foreground text-xs">
-            Coloured lines are the streets each committed unit is driving, from
-            the router, not a bearing. Green is the route the citizen agent last
-            gave a resident, so the control room can see the advice that went
-            out. A number inside an incident is how many reports collapsed into
-            it. Hover anything for what happened, its current state and what the
-            agents did about it.
-          </p>
 
           {selectedIncident && (
             <Card>
@@ -258,20 +296,8 @@ export default function DemoConsole() {
               <CardTitle className="text-sm">What is happening</CardTitle>
             </CardHeader>
             <CardContent>
-              <div ref={feedRef} className="max-h-[420px] space-y-1.5 overflow-y-auto">
-                {[...state.beats].reverse().map((b, i) => (
-                  <div key={`${b.tick}-${i}`} className="flex gap-2 text-xs">
-                    <span className="text-muted-foreground shrink-0 tabular-nums">
-                      {String(b.tick).padStart(3, "0")}
-                    </span>
-                    <span className={BEAT_STYLE[b.kind] ?? ""}>{b.text}</span>
-                  </div>
-                ))}
-                {state.beats.length === 0 && (
-                  <p className="text-muted-foreground text-xs">
-                    Press start. Reports arrive a few seconds apart.
-                  </p>
-                )}
+              <div ref={feedRef} className="max-h-[420px] overflow-y-auto">
+                <BeatFeed beats={state.beats} />
               </div>
             </CardContent>
           </Card>

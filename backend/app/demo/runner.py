@@ -53,6 +53,12 @@ ARRIVAL_METRES = 120
 WORK_TICKS = 8
 #: A re-plan runs at most this often, however many reports have arrived.
 REPLAN_EVERY_TICKS = 6
+#: Relief stock is checked and drawn down this often.
+SUPPLY_EVERY_TICKS = 5
+#: Below this fraction of its opening stock, a centre raises a real incident.
+SUPPLY_LOW = 0.25
+#: What a supply run puts back, as a fraction of opening stock.
+REFILL_FRACTION = 0.55
 
 
 REPORT_SCRIPT: list[tuple[str, str]] = [
@@ -113,6 +119,11 @@ class DemoState:
     #: (action_key, ward_id) already put to the gate this run. One road-closure
     #: decision per ward, not one per pothole.
     gated: set[tuple[str, str]] = field(default_factory=set)
+    #: lifeline id -> the stock it opened with, so "low" means low against its
+    #: own opening figure rather than against an arbitrary constant.
+    supply_baseline: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: Centres that already have a shortage incident open. One per centre.
+    supply_flagged: set[str] = field(default_factory=set)
     dirty: bool = False
     last_replan_tick: int = -99
     last_plan: dict[str, Any] | None = None
@@ -152,6 +163,8 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     state.beats.clear()
     state.working.clear()
     state.gated.clear()
+    state.supply_baseline.clear()
+    state.supply_flagged.clear()
     state.dirty = False
     state.last_replan_tick = -99
     state.last_plan = None
@@ -211,6 +224,9 @@ async def _tick_locked() -> None:
 
     if state.tick % state.report_every_ticks == 0:
         await _inject_report()
+
+    if state.tick % SUPPLY_EVERY_TICKS == 0:
+        await _draw_down_supplies()
 
     if state.tick == state.adversarial_at_tick:
         await _inject_adversarial_burst()
@@ -586,7 +602,8 @@ async def _work_and_resolve() -> None:
         """
         with finished as (
           select distinct on (a.resource_id)
-                 a.id aid, a.resource_id rid, a.incident_id iid, i.title, r.label
+                 a.id aid, a.resource_id rid, a.incident_id iid, i.title,
+                 i.category, r.label
             from assignments a
             join incidents i on i.id = a.incident_id
             join resources r on r.id = a.resource_id
@@ -612,13 +629,15 @@ async def _work_and_resolve() -> None:
              )
           returning id::text
         )
-        select f.rid, f.label, f.iid::text iid, f.title,
+        select f.rid, f.label, f.iid::text iid, f.title, f.category,
                (f.iid::text in (select id from resolve_i)) as resolved
           from finished f
         """,
         done,
     )
     for r in rows:
+        if r["category"] == "supply_shortage":
+            await _refill(r["rid"], r["iid"])
         if r["resolved"]:
             await ev.append(
                 clock=WALL, kind=ev.Kind.INCIDENT_RESOLVED, actor=ev.agent("field"),
@@ -631,6 +650,155 @@ async def _work_and_resolve() -> None:
                 resourceId=r["rid"], incidentId=r["iid"],
             )
             state.dirty = True
+
+
+#: What one person takes from a centre in an hour, per stock line. The numbers
+#: are ordinary relief-planning figures rather than anything clever: a packet of
+#: food and a few litres of water per person per day, scaled to the tick.
+CONSUMPTION = {
+    "food_packets": 0.42,
+    "water_litres": 3.1,
+    "medical_kits": 0.02,
+    "blankets": 0.18,
+}
+
+
+async def _draw_down_supplies() -> None:
+    """People arrive at relief centres, stock falls, and low stock is an incident.
+
+    This is the half of PS20 that was missing. Boats and pumps were modelled and
+    food, water and medical stock were not, so a shelter could be "open" with an
+    empty store and nothing anywhere would say so.
+
+    A centre running low does not get special handling. It opens an ordinary
+    `supply_shortage` incident, which acquires an ordinary `supply_delivery`
+    need, which the same solver covers with the nearest truck that can do it,
+    over the same road network, with the same switching cost. Relief logistics
+    is dispatch with different nouns, and modelling it as anything else would
+    have meant a second scheduler to keep in step with the first.
+    """
+    rows = await db.fetch(
+        """
+        select l.id, l.name, l.ward_id, l.kind, l.supplies,
+               coalesce(l.people_served_per_hour, 0) rate,
+               extensions.ST_X(l.location::extensions.geometry) lng,
+               extensions.ST_Y(l.location::extensions.geometry) lat,
+               coalesce(wr.severity, 1) severity
+          from lifelines l
+          left join lateral (
+            select severity from ward_risks
+             where ward_id = l.ward_id order by created_at desc limit 1
+          ) wr on true
+         where l.city_id = $1
+           and l.kind in ('relief_centre','water_point','medical_camp','food_kitchen')
+           and l.supplies <> '{}'::jsonb
+        """,
+        state.city_id,
+    )
+
+    for r in rows:
+        stock = dict(r["supplies"] or {})
+        if not stock:
+            continue
+        # A worse ward sends more people to its centre. One tick is half a
+        # simulated minute, so an hourly rate is scaled accordingly.
+        pressure = 0.4 + 0.4 * int(r["severity"] or 1)
+        people = float(r["rate"]) * pressure * (SIM_MINUTES_PER_TICK * SUPPLY_EVERY_TICKS / 60.0)
+
+        opening = state.supply_baseline.setdefault(r["id"], dict(stock))
+        drained: dict[str, float] = {}
+        for line, per_person in CONSUMPTION.items():
+            if line not in stock:
+                continue
+            used = people * per_person
+            left = max(0.0, float(stock[line]) - used)
+            drained[line] = round(left, 1)
+        if not drained:
+            continue
+        stock.update(drained)
+
+        await db.execute(
+            "update lifelines set supplies = $2, last_reported_at = now() where id = $1",
+            r["id"], stock,
+        )
+
+        # Lowest line relative to what this centre opened with.
+        worst_line, worst_ratio = "", 1.0
+        for line, left in drained.items():
+            base = float(opening.get(line) or 0) or 1.0
+            ratio = left / base
+            if ratio < worst_ratio:
+                worst_line, worst_ratio = line, ratio
+        if worst_ratio > SUPPLY_LOW or not worst_line:
+            continue
+        if r["id"] in state.supply_flagged:
+            continue
+        state.supply_flagged.add(r["id"])
+
+        pretty = worst_line.replace("_", " ")
+        exhausted = worst_ratio <= 0.02
+        note = (
+            f"{r['name']} has run out of {pretty}."
+            if exhausted
+            else f"{r['name']} is down to {worst_ratio:.0%} of its {pretty}."
+        )
+        try:
+            result = await intake.receive(
+                ward_id=r["ward_id"], category="supply_shortage",
+                location=(float(r["lng"]), float(r["lat"])), note=note,
+                source="field", reporter_name=r["name"],
+                device_id=f"lifeline-{r['id']}",
+                city_id=state.city_id, clock=WALL,
+            )
+        except Exception as exc:  # noqa: BLE001 - a stock check must not stop the world
+            log.warning("supply_shortage_failed", lifeline=r["id"], error=str(exc))
+            continue
+
+        state.beat(
+            "supply", note + " A delivery is now unmet demand.",
+            lifelineId=r["id"], incidentId=result.incident_id, wardId=r["ward_id"],
+        )
+        state.dirty = True
+
+
+async def _refill(resource_id: str, incident_id: str) -> None:
+    """A truck that reached a shortage puts stock back.
+
+    Deliberately partial. One truck does not restock a ward, and a system that
+    pretends otherwise stops showing the pressure that matters.
+    """
+    row = await db.fetchrow(
+        """
+        select l.id, l.name, l.supplies
+          from lifelines l
+          join incidents i on i.id = $1::uuid
+         where l.city_id = i.city_id
+           and l.kind in ('relief_centre','water_point','medical_camp','food_kitchen')
+         order by extensions.ST_Distance(l.location, i.location) asc
+         limit 1
+        """,
+        incident_id,
+    )
+    if row is None:
+        return
+    opening = state.supply_baseline.get(row["id"])
+    if not opening:
+        return
+    stock = dict(row["supplies"] or {})
+    for line, base in opening.items():
+        if line in stock:
+            stock[line] = round(
+                min(float(base), float(stock[line]) + float(base) * REFILL_FRACTION), 1
+            )
+    await db.execute(
+        "update lifelines set supplies = $2, last_reported_at = now() where id = $1",
+        row["id"], stock,
+    )
+    state.supply_flagged.discard(row["id"])
+    state.beat(
+        "supply", f"{row['name']} restocked by the delivery that reached it.",
+        lifelineId=row["id"], incidentId=incident_id,
+    )
 
 
 async def _pick_ward() -> dict | None:

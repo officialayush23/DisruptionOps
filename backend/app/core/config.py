@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     #: backs the report parser when its keyword pass is not confident.
     hf_api_token: str = ""
     hf_zero_shot_model: str = "joeddav/xlm-roberta-large-xnli"
+    #: Sarvam AI, for speech to text. Trained on Indian languages including the
+    #: code-mixed speech people actually use, which is the reason to prefer it
+    #: over a general multilingual recogniser here: the general ones drop
+    #: exactly the English loan words that carry the location.
+    #: Both spellings are accepted because both are plausible names for it.
+    sarvam_api_key: str = ""
+    sarvam_ai_api_key: str = ""
+    sarvam_stt_model: str = "saarika:v2.5"
+    sarvam_stt_translate_model: str = "saaras:v2.5"
+
     #: A vision model hosted elsewhere. Ours only has to post an image and read
     #: back the JSON in `app/incidents/vision.py`. Empty means photos are
     #: accepted and simply not looked at, which is a fine state to ship in.

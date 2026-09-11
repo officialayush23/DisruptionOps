@@ -10,6 +10,7 @@ import IntakeInbox from "@/routes/admin/IntakeInbox"
 import RiskBoard from "@/routes/admin/RiskBoard"
 import Forecast from "@/routes/admin/Forecast"
 import AgencyHandoff from "@/routes/admin/AgencyHandoff"
+import Configuration from "@/routes/admin/Configuration"
 import IncidentQueue from "@/routes/admin/IncidentQueue"
 import AllocationPlanner from "@/routes/admin/AllocationPlanner"
 import DecisionGate from "@/routes/admin/DecisionGate"
@@ -63,6 +64,7 @@ export function App() {
                 <Route path="resources" element={<ResourcesPage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
+                <Route path="configuration" element={<Configuration />} />
                 {/* `live` and `demo` were two names for overlapping things.
                     One console now; both old paths land on it. */}
                 <Route path="live" element={<Navigate to="/admin/console" replace />} />
