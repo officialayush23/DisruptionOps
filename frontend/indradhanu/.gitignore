@@ -30,3 +30,4 @@ dist/
 __pycache__/
 *.pyc
 .env
+.env.local
