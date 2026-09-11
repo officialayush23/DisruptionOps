@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { request } from "@/api/httpClient"
+import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 
 export type Ward = {
   id: string; name: string; number: string; centroid: [number, number]
@@ -231,11 +232,19 @@ export function useDemoPoll(pollMs = 1000) {
     }
   }, [])
 
+  // The console watches everything an officer acts on. `decisions` and
+  // `field_tasks` are the two that change because a *person* did something
+  // elsewhere, and those are exactly the ones worth not waiting for.
+  const { live } = useLiveSync(
+    ["ward_risks", "incidents", "decisions", "alerts", "field_tasks"],
+    () => void refresh()
+  )
+
   useEffect(() => {
     void refresh()
-    const id = setInterval(() => void refresh(), pollMs)
+    const id = setInterval(() => void refresh(), pollInterval(live, pollMs))
     return () => clearInterval(id)
-  }, [refresh, pollMs])
+  }, [refresh, pollMs, live])
 
   const act = useCallback(
     async (path: string, body?: unknown) => {
@@ -251,7 +260,7 @@ export function useDemoPoll(pollMs = 1000) {
     [refresh]
   )
 
-  return { state, error, latencyMs, refresh, act }
+  return { state, error, latencyMs, refresh, act, live }
 }
 
 /** Everything that has happened to one thing, newest first.

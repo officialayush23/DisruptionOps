@@ -9,6 +9,7 @@ import { LiveMap } from "@/components/map/LiveMap"
 import { MapStage } from "@/components/map/MapStage"
 import { OfflineBar } from "@/components/common/OfflineBar"
 import { DemoCredentials } from "@/auth/DemoCredentials"
+import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -270,18 +271,33 @@ export default function CitizenApp() {
   const lng = Math.round(pos.lng * 1e5) / 1e5
   const lat = Math.round(pos.lat * 1e5) / 1e5
   const query = useMemo(() => ({ lng, lat }), [lng, lat])
+  /** The current query, for a callback that outlives the render it was made in.
+   *  The realtime handler is installed once; reading `query` from its closure
+   *  would refetch the position the page happened to hold when the socket
+   *  connected, which is the same stale-closure bug that once sent a signed-in
+   *  commissioner to the resident portal, wearing a different coat. */
+  const queryRef = useRef(query)
+  useEffect(() => { queryRef.current = query }, [query])
+
+  // An alert is issued in a control room and matters to a resident *now*. The
+  // three tables below are the ones row-level security marks readable by `anon`,
+  // which is what lets this work with no account — the same policy that decides
+  // what an anonymous query may read decides what an anonymous socket receives.
+  const { live } = useLiveSync(["alerts", "incidents", "ward_risks"], () =>
+    void load(queryRef.current)
+  )
 
   // One effect, not two. Separately they raced: a position change fired an
   // immediate load *and* tore down and rebuilt the interval, so a held arrow key
   // produced a burst of requests rather than a walk.
   useEffect(() => {
     void load(query)
-    const id = setInterval(() => void load(query), 4000)
+    const id = setInterval(() => void load(query), pollInterval(live, 4000))
     return () => {
       clearInterval(id)
       active.current?.abort()
     }
-  }, [load, query])
+  }, [load, query, live])
 
   useEffect(() => {
     const mark = () => { gestured.current = true }

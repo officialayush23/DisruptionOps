@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
 import { DemoCredentials } from "@/auth/DemoCredentials"
+import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 
 /** The crew's interface.
  *
@@ -101,13 +102,19 @@ export default function FieldApp() {
     }
   }, [])
 
+  // A crew's screen changes because somebody in the control room tasked them.
+  // Waiting up to three seconds to find that out is three seconds of a driver
+  // sitting still, so the task arrives on the socket and the poll becomes the
+  // safety net rather than the mechanism.
+  const { live } = useLiveSync(["field_tasks", "incidents"], () => void load())
+
   // One effect, not two: separately, every change of `load` fired an immediate
   // request *and* rebuilt the interval that was about to fire anyway.
   useEffect(() => {
     void load()
-    const id = setInterval(() => void load(), 3000)
+    const id = setInterval(() => void load(), pollInterval(live, 3000))
     return () => clearInterval(id)
-  }, [load])
+  }, [load, live])
 
   const unit = state?.units.find((u) => u.id === selected) ?? null
 
