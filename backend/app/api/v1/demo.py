@@ -63,6 +63,23 @@ async def demo_stop(_: StaffPrincipal) -> dict:
     return {"running": False, "tick": runner.state.tick}
 
 
+@router.post("/demo/reset")
+async def demo_reset(body: StartIn, _: StaffPrincipal) -> dict:
+    """Stop the run and put the world back to its opening position.
+
+    Destructive on purpose and only over the *live* run: archived simulation
+    runs are somebody's saved scenario and are left where they are. The caches
+    below hold rows that no longer exist a moment after this returns, so they
+    go with it — otherwise the console spends the next twelve seconds drawing a
+    forecast of incidents it has just deleted.
+    """
+    cleared = await runner.reset(city_id=body.city_id)
+    invalidate_slow()
+    globals()["_dup_cache"] = (0.0, [])
+    globals()["_forecast_cache"] = (0.0, {})
+    return {"running": False, "tick": 0, "cleared": cleared}
+
+
 @router.post("/demo/replan")
 async def demo_replan(_: StaffPrincipal) -> dict:
     await runner.force_replan()

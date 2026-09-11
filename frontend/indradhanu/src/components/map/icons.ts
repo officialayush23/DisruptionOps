@@ -14,8 +14,8 @@
  *
  *  Two properties worth keeping if these are edited:
  *
- *    * **Square, 24×24 viewBox, centred.** Mapbox anchors on the image centre;
- *      an off-centre glyph drifts away from the thing it marks as you zoom.
+ *    * **Authored on a 24×24 grid, centred.** `pin()` scales each glyph into
+ *      the pin head; a glyph drawn off-centre sits off-centre in every pin.
  *    * **Solid silhouettes with a white keyline, no thin strokes.** These are
  *      drawn at roughly 18 screen pixels over a dark, busy basemap. A one-pixel
  *      outline disappears; a filled shape does not.
@@ -23,12 +23,33 @@
 
 type Svg = string
 
-const wrap = (body: Svg): Svg =>
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">${body}</svg>`
+/** The pin body: a 24-wide head tapering to a point at (12, 31).
+ *
+ *  A disc centred on the coordinate is ambiguous about *which* pixel it means,
+ *  and at the sizes an operator actually wants it covers the junction it is
+ *  reporting. A pin has a tip: the tip is the place, the head is the label, and
+ *  the head can therefore be large without hiding anything underneath it.
+ *
+ *  Every symbol layer that uses these must set `icon-anchor: "bottom"`, or the
+ *  pin will be drawn centred and the tip will float above its own incident.
+ */
+const PIN_BODY =
+  "M12 .9C6 .9 1.2 5.7 1.2 11.6c0 7.8 9.1 18.4 10.2 19.6a.8.8 0 0 0 1.2 0c" +
+  "1.1-1.2 10.2-11.8 10.2-19.6C22.8 5.7 18 .9 12 .9Z"
 
-/** A filled disc behind every icon, so it reads against water, roads or park. */
-const disc = (c: string) =>
-  `<circle cx="12" cy="12" r="11" fill="${c}" stroke="#ffffff" stroke-width="1.6"/>`
+const wrap = (body: Svg): Svg =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 32" width="24" height="32">${body}</svg>`
+
+/** The coloured pin, with its glyph scaled down into the head.
+ *
+ *  The glyphs below are all authored on a 24×24 grid centred at (12,12); the
+ *  transform drops them into the pin head at (12, 11.4) without any of them
+ *  having to know they are inside a pin.
+ */
+const pin = (c: string, glyph: Svg) =>
+  `<path d="${PIN_BODY}" fill="${c}" stroke="#ffffff" stroke-width="1.7"/>` +
+  `<circle cx="12" cy="11.4" r="8.4" fill="#0b1220" opacity=".18"/>` +
+  `<g transform="translate(12 11.4) scale(.68) translate(-12 -12)">${glyph}</g>`
 
 const g = (body: Svg) => `<g fill="#ffffff" fill-rule="evenodd">${body}</g>`
 
@@ -198,9 +219,11 @@ const SUBSTATION = g(
 
 // ------------------------------------------------------------------- self ---
 
-const PIN = g(
-  `<path d="M12 2.6a6.6 6.6 0 0 0-6.6 6.6c0 4.9 6.6 12.2 6.6 12.2s6.6-7.3 6.6-12.2A6.6 6.6 0 0 0 12 2.6Z"/>` +
-  `<circle cx="12" cy="9.2" r="2.6" fill="#0b1220"/>`
+/** "You are here". The pin shape is the container now, so the glyph inside it
+ *  is a person rather than a second pin. */
+const YOU = g(
+  `<circle cx="12" cy="6.4" r="3.2"/>` +
+  `<path d="M4.8 20.6c0-3.6 3.2-6.4 7.2-6.4s7.2 2.8 7.2 6.4v1.2H4.8v-1.2Z"/>`
 )
 
 const FLAG = g(
@@ -249,7 +272,7 @@ export const ICONS: Record<string, [Svg, string]> = {
   "lf-default": [SHELTER, "#0d9488"],
 
   // everything else
-  "ui-me": [PIN, "#8b5cf6"],
+  "ui-me": [YOU, "#8b5cf6"],
   "ui-destination": [FLAG, "#22c55e"],
   "ui-block": [CRACK, "#dc2626"],
 }
@@ -265,17 +288,27 @@ export const TINTS = [
 export const imageName = (icon: string, colour: string) =>
   `${icon}|${colour}`
 
-/** Rasterise one SVG at 3× and hand Mapbox an ImageBitmap.
+/** How large each pin is rasterised, and the ratio Mapbox is told to divide by.
+ *
+ *  96×128 at `pixelRatio: 4` is a 24×32 pt pin that stays crisp on a retina
+ *  laptop and on a 3× phone. Raising the bitmap rather than the `icon-size`
+ *  multiplier is what keeps a bigger icon from also being a blurry one.
+ */
+const PIN_W = 96
+const PIN_H = 128
+const PIN_RATIO = 4
+
+/** Rasterise one SVG at 4× and hand Mapbox an ImageBitmap.
  *
  *  `addImage` accepts an ImageBitmap directly, which avoids the usual
  *  `new Image()` + onload dance and, more importantly, avoids a race where the
  *  first poll's `setData` lands before the sprite exists and Mapbox logs a
  *  missing-image warning for every feature.
  */
-async function raster(svg: Svg, size = 72): Promise<ImageBitmap> {
+async function raster(svg: Svg, w = PIN_W, h = PIN_H): Promise<ImageBitmap> {
   const blob = new Blob([svg], { type: "image/svg+xml" })
   try {
-    return await createImageBitmap(blob, { resizeWidth: size, resizeHeight: size })
+    return await createImageBitmap(blob, { resizeWidth: w, resizeHeight: h })
   } catch {
     // Safari has historically refused SVG blobs in createImageBitmap. Going
     // through an <img> and a canvas costs a frame and works everywhere.
@@ -289,11 +322,11 @@ async function raster(svg: Svg, size = 72): Promise<ImageBitmap> {
         img.src = url
       })
       const canvas = document.createElement("canvas")
-      canvas.width = size
-      canvas.height = size
+      canvas.width = w
+      canvas.height = h
       const ctx = canvas.getContext("2d")
       if (!ctx) throw new Error("no 2d context")
-      ctx.drawImage(img, 0, 0, size, size)
+      ctx.drawImage(img, 0, 0, w, h)
       return await createImageBitmap(canvas)
     } finally {
       URL.revokeObjectURL(url)
@@ -320,11 +353,11 @@ export async function registerIcons(map: MapLike): Promise<void> {
     for (const colour of colours) {
       const key = imageName(name, colour)
       if (map.hasImage(key)) continue
-      const svg = wrap(disc(colour) + body)
+      const svg = wrap(pin(colour, body))
       jobs.push(
         raster(svg)
           .then((bitmap) => {
-            if (!map.hasImage(key)) map.addImage(key, bitmap, { pixelRatio: 3 })
+            if (!map.hasImage(key)) map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
           })
           .catch(() => {
             /* One icon failing to rasterise is a missing picture, not a broken

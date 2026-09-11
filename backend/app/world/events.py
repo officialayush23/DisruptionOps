@@ -40,6 +40,10 @@ log = get_logger(__name__)
 class Kind:
     RUN_STARTED = "run.started"
     RUN_FINISHED = "run.finished"
+    #: The world was put back to its opening position. The log is append-only,
+    #: so this is the mark that says where the current run begins rather than a
+    #: record of something being erased.
+    WORLD_RESET = "world.reset"
     RISK_UPDATED = "risk.updated"
     FEED_DEGRADED = "feed.degraded"
 

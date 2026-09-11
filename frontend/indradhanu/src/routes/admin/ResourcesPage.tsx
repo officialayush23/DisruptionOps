@@ -1,134 +1,294 @@
-import { Truck } from "lucide-react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useMemo, useState } from "react"
+import { Boxes, Truck, Warehouse } from "lucide-react"
+import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
-import { StatTile } from "@/components/common/indicators"
-import { useResources, useShelters } from "@/hooks/useApi"
-import { RESOURCE_LABEL } from "@/api/mock/world"
-import { wardName } from "@/api/mock/geo"
-import { cn } from "@/lib/utils"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table"
+import { Empty } from "./DecisionGate"
 
-const STATUS_CLASS: Record<string, string> = {
-  available: "bg-status-resolved text-white",
-  assigned: "bg-status-pending text-black",
-  en_route: "bg-status-active text-white",
-  on_site: "bg-status-active text-white",
+/** The inventory, live.
+ *
+ *  No city publishes unit availability as a feed, so this platform is the system
+ *  of record for it: the corporation enters its fleet once on the configuration
+ *  screen, and dispatch and closure keep it current from then on. Which means
+ *  this page has to be the same rows the allocator is solving over — a fixture
+ *  here would be a second, quieter answer to "what have we got", and the wrong
+ *  one.
+ *
+ *  Relief stock sits on the same page for the same reason. "Do we have enough"
+ *  is one question with two halves: vehicles that can move things, and the
+ *  things at the places they move them to.
+ */
+
+const STATUS_TONE: Record<string, string> = {
+  available: "bg-emerald-600 text-white",
+  assigned: "bg-amber-500 text-black",
+  proposed: "bg-amber-500 text-black",
+  en_route: "bg-sky-600 text-white",
+  on_site: "bg-violet-600 text-white",
+  unavailable: "bg-muted text-muted-foreground",
   offline: "bg-muted text-muted-foreground",
 }
 
-export default function ResourcesPage() {
-  const { data: resources = [] } = useResources()
-  const { data: shelters = [] } = useShelters()
+const pretty = (s: string) => s.replace(/_/g, " ")
 
-  const available = resources.filter((r) => r.status === "available").length
-  const committed = resources.length - available
-  const occupancy = shelters.reduce((a, s) => a + s.occupancy, 0)
-  const capacity = shelters.reduce((a, s) => a + s.capacity, 0)
+/** Stock names are data — a deployment can invent one — so the unit comes from
+ *  the name rather than a table this file would have to be edited to extend. */
+const unitOf = (item: string) =>
+  item.includes("litre") ? "L" : ""
+
+export default function ResourcesPage() {
+  const { state } = useDemo()
+  const [kind, setKind] = useState<string | null>(null)
+
+  const wardName = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const w of state.wards) m.set(w.id, w.name)
+    return m
+  }, [state.wards])
+
+  const fleet = useMemo(() => {
+    const rows = kind ? state.resources.filter((r) => r.kind === kind) : state.resources
+    return [...rows].sort(
+      (a, b) => a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label)
+    )
+  }, [state.resources, kind])
+
+  const kinds = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const r of state.resources) counts.set(r.kind, (counts.get(r.kind) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [state.resources])
+
+  const available = state.resources.filter((r) => r.status === "available").length
+  const operators = new Set(state.resources.map((r) => r.operator)).size
+
+  /** Shelter pressure, over everything that actually shelters people rather
+   *  than over the two kinds this page used to know the names of. */
+  const shelter = useMemo(() => {
+    const rows = state.facilities.filter((f) => (f.capacity ?? 0) > 0)
+    return {
+      rows: [...rows].sort(
+        (a, b) =>
+          (b.occupancy ?? 0) / Math.max(1, b.capacity ?? 1) -
+          (a.occupancy ?? 0) / Math.max(1, a.capacity ?? 1)
+      ),
+      occupancy: rows.reduce((n, f) => n + (f.occupancy ?? 0), 0),
+      capacity: rows.reduce((n, f) => n + (f.capacity ?? 0), 0),
+    }
+  }, [state.facilities])
+
+  /** Every stock line in the city, by item. The items are whatever the
+   *  lifelines carry; nothing here is hardcoded to food and water. */
+  const stock = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const f of state.facilities) {
+      for (const [item, qty] of Object.entries(f.supplies ?? {})) {
+        totals.set(item, (totals.get(item) ?? 0) + (Number(qty) || 0))
+      }
+    }
+    return [...totals.entries()].sort((a, b) => b[1] - a[1])
+  }, [state.facilities])
+
+  const supplyPoints = state.facilities.filter(
+    (f) => Object.keys(f.supplies ?? {}).length > 0
+  )
+
+  if (!state.resources.length) {
+    return (
+      <Empty
+        icon={<Truck className="text-muted-foreground size-8" />}
+        title="No units registered"
+        body="Register the fleet on the configuration screen. Until something is in the inventory the allocator has nothing to allocate, and this page is the honest version of that."
+      />
+    )
+  }
 
   return (
-    <div className="space-y-4 p-4">
-      <div>
-        <h1 className="text-lg font-semibold">Resources</h1>
-        <p className="text-sm text-muted-foreground">
-          No city publishes live unit availability, so the platform is the
-          system of record. The corporation enters its inventory once; dispatch
-          and closure keep it current.
-        </p>
+    <div className="space-y-3 p-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Units in fleet</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">{state.resources.length}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground pt-0 text-xs">
+            across {operators} operator{operators === 1 ? "" : "s"}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Available</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">{available}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground pt-0 text-xs">
+            {state.resources.length - available} committed right now
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Shelter occupancy</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">
+              {shelter.occupancy}/{shelter.capacity}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground pt-0 text-xs">
+            {shelter.rows.length} place{shelter.rows.length === 1 ? "" : "s"} with beds
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Distribution points</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">{supplyPoints.length}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground pt-0 text-xs">
+            holding {stock.length} kind{stock.length === 1 ? "" : "s"} of stock
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatTile
-          label="Units in fleet"
-          value={String(resources.length)}
-          sub="across 6 operators"
-        />
-        <StatTile
-          label="Available"
-          value={String(available)}
-          sub="ready to assign"
-        />
-        <StatTile
-          label="Committed"
-          value={String(committed)}
-          sub="assigned or en route"
-        />
-        <StatTile
-          label="Shelter occupancy"
-          value={`${occupancy}/${capacity}`}
-          sub={`${shelters.length} shelters activated`}
-        />
-      </div>
+      {stock.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Boxes className="size-4" /> Relief stock across the city
+            </CardTitle>
+            <CardDescription className="text-xs">
+              What is on the shelves right now. It drains as people are served
+              and goes back up when a supply run arrives — both are ordinary
+              assignments, not a separate logistics system.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {stock.map(([item, qty]) => (
+              <div key={item} className="rounded-md border p-2">
+                <div className="text-muted-foreground text-xs">{pretty(item)}</div>
+                <div className="text-lg font-semibold tabular-nums">
+                  {qty.toLocaleString()}{unitOf(item)}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <Truck className="size-4" />
-            Fleet
+            <Truck className="size-4" /> Fleet
           </CardTitle>
+          <div className="flex flex-wrap gap-1 pt-1">
+            <Button
+              size="sm" variant={kind === null ? "secondary" : "ghost"}
+              className="h-7 text-xs" onClick={() => setKind(null)}
+            >
+              All {state.resources.length}
+            </Button>
+            {kinds.map(([k, n]) => (
+              <Button
+                key={k} size="sm" variant={kind === k ? "secondary" : "ghost"}
+                className="h-7 text-xs" onClick={() => setKind(k)}
+              >
+                {pretty(k)} {n}
+              </Button>
+            ))}
+          </div>
         </CardHeader>
         <CardContent className="px-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Unit</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Operator</TableHead>
-                <TableHead className="text-right">Capacity</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {resources.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-medium">{r.label}</TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {RESOURCE_LABEL[r.kind]}
-                  </TableCell>
-                  <TableCell className="text-sm">{r.operator}</TableCell>
-                  <TableCell className="tabular text-right">
-                    {r.capacity}
-                  </TableCell>
-                  <TableCell>
-                    <Badge className={cn(STATUS_CLASS[r.status])}>
-                      {r.status.replace("_", " ")}
-                    </Badge>
-                  </TableCell>
+          <div className="max-h-[28rem] overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Unit</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Operator</TableHead>
+                  <TableHead>Can do</TableHead>
+                  <TableHead className="text-right">Capacity</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>On</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {fleet.map((r) => {
+                  const incident = state.incidents.find((i) => i.id === r.incidentId)
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-medium">{r.label}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {pretty(r.kind)}
+                      </TableCell>
+                      <TableCell className="text-sm">{r.operator}</TableCell>
+                      <TableCell className="max-w-[14rem]">
+                        <div className="flex flex-wrap gap-1">
+                          {r.capabilities.slice(0, 3).map((c) => (
+                            <Badge key={c} variant="outline" className="font-normal">
+                              {pretty(c)}
+                            </Badge>
+                          ))}
+                          {r.capabilities.length > 3 && (
+                            <span className="text-muted-foreground text-xs">
+                              +{r.capabilities.length - 3}
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{r.capacity}</TableCell>
+                      <TableCell>
+                        <Badge className={STATUS_TONE[r.status] ?? ""}>
+                          {pretty(r.status)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground max-w-[16rem] truncate text-xs">
+                        {incident
+                          ? `${incident.title}${r.etaMinutes != null ? ` · ETA ${r.etaMinutes}m` : ""}`
+                          : r.statusNote || "—"}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Shelters</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {shelters.map((s) => (
-            <div key={s.id} className="space-y-1.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                <span className="font-medium">{s.name}</span>
-                <span className="tabular text-xs text-muted-foreground">
-                  {wardName(s.wardId)} · {s.occupancy}/{s.capacity}
-                </span>
-              </div>
-              <Progress
-                value={(s.occupancy / s.capacity) * 100}
-                className="h-1.5"
-              />
-            </div>
-          ))}
-        </CardContent>
-      </Card>
+      {shelter.rows.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Warehouse className="size-4" /> Places with beds
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Ordered by how full they are, because the one at the top is the one
+              the citizen agent will stop sending people to next.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2.5">
+            {shelter.rows.map((f) => {
+              const pct = Math.min(
+                100, ((f.occupancy ?? 0) / Math.max(1, f.capacity ?? 1)) * 100
+              )
+              return (
+                <div key={f.id} className="space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span className="font-medium">{f.name}</span>
+                    <span className="text-muted-foreground text-xs tabular-nums">
+                      {f.kindLabel} · {wardName.get(f.wardId ?? "") ?? "—"} ·{" "}
+                      {f.occupancy ?? 0}/{f.capacity ?? 0}
+                      {f.status !== "open" && ` · ${pretty(f.status)}`}
+                    </span>
+                  </div>
+                  <Progress value={pct} className="h-1.5" />
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

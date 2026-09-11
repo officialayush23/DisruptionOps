@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
-  AlertTriangle, Copy, Gavel, Loader2, Play, Square, Zap,
+  AlertTriangle, Copy, Gavel, Loader2, Play, RotateCcw, Square, Zap,
 } from "lucide-react"
 import { useDemo } from "./DemoProvider"
 import type { DemoState } from "./useDemo"
@@ -63,6 +63,9 @@ function BeatFeed({ beats }: { beats: DemoState["beats"] }) {
 export default function DemoConsole() {
   const { state, error, activity, selected, setSelected, busy, run } = useDemo()
   const feedRef = useRef<HTMLDivElement>(null)
+  /** Reset throws away the run. It asks once, in place, rather than through a
+   *  browser dialog that would block the poll behind it. */
+  const [confirmReset, setConfirmReset] = useState(false)
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: 0, behavior: "smooth" })
@@ -98,6 +101,30 @@ export default function DemoConsole() {
           {busy === "replan" ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
           Re-plan now
         </Button>
+
+        {/* Without this, the second run of the day starts on the first run's
+            wreckage and "start" only ever adds to it. */}
+        {confirmReset ? (
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="destructive" size="sm" disabled={busy !== null}
+              onClick={() => {
+                setConfirmReset(false)
+                void run("reset", "/demo/reset", { cityId: "pune", reportEveryTicks: 4 })
+              }}
+            >
+              {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+              Delete this run
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmReset(false)}>
+              Keep it
+            </Button>
+          </div>
+        ) : (
+          <Button variant="outline" onClick={() => setConfirmReset(true)} disabled={busy !== null}>
+            <RotateCcw className="size-4" /> Reset world
+          </Button>
+        )}
 
         <div className="text-muted-foreground ml-2 flex flex-wrap items-center gap-3 text-xs">
           <span>tick <span className="tabular-nums font-medium">{state.tick}</span></span>

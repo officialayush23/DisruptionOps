@@ -375,7 +375,8 @@ export function LiveMap({
           id: "facility-dot", type: "symbol", source: "facilities",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.2, 13, 0.3, 16, 0.4],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.55, 13, 0.8, 16, 1.0],
+            "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
@@ -395,7 +396,8 @@ export function LiveMap({
           id: "block-dot", type: "symbol", source: "blocks",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.2, 14, 0.32],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 14, 0.95],
+            "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
@@ -418,7 +420,8 @@ export function LiveMap({
           id: "incident-dot", type: "symbol", source: "incidents",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.24, 13, 0.36, 16, 0.48],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.65, 13, 0.95, 16, 1.2],
+            "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
@@ -431,7 +434,7 @@ export function LiveMap({
           layout: {
             "text-field": ["to-string", ["get", "reportCount"]],
             "text-font": FONT, "text-size": 11, "text-allow-overlap": true,
-            "text-offset": [1.1, -1.0], "text-anchor": "left",
+            "text-offset": [1.3, -2.3], "text-anchor": "left",
           },
           paint: {
             "text-color": "#ffffff",
@@ -444,7 +447,8 @@ export function LiveMap({
           id: "resource-dot", type: "symbol", source: "resources",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.24, 13, 0.34, 16, 0.44],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 13, 0.85, 16, 1.05],
+            "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
         })
@@ -458,7 +462,7 @@ export function LiveMap({
           id: "me-dot", type: "symbol", source: "me",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": 0.34,
+            "icon-size": 1.0,
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },

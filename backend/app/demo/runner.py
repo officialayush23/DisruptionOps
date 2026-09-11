@@ -895,3 +895,127 @@ async def citizen_report(category: str, note: str) -> intake.IntakeResult:
 async def force_replan() -> None:
     async with _world:
         await _do_replan("manual")
+
+
+# -------------------------------------------------------------------- reset ---
+#: Everything a live run writes, in an order that respects the foreign keys:
+#: children before parents, every time.
+#:
+#: What is deliberately *not* here: `hazard_runs` and `ward_risks`, which are the
+#: hazard model's output rather than this run's dispatch state, and would leave
+#: the risk board blank until the next hazard pass; the taxonomy tables, which
+#: are configuration; `wards`, `lifelines` and `resources`, which are the city
+#: and are restored in place below rather than deleted.
+_RESET_ORDER = (
+    "report_links",
+    "agent_steps",
+    "alerts",
+    "decisions",
+    "agency_requests",
+    "field_reports",
+    "field_tasks",
+    "assignments",
+    "allocation_plans",
+    "agent_runs",
+    "incident_needs",
+    "citizen_reports",
+    "incidents",
+    "road_blocks",
+    "events",
+    "reporter_reliability",
+)
+
+
+async def reset(*, city_id: str = "pune") -> dict[str, int]:
+    """Put the world back to its opening position.
+
+    The second run of a demo used to start on the first run's wreckage: a couple
+    of hundred resolved incidents still on the map, half the fleet parked
+    wherever it finished, every relief centre at whatever stock the last flood
+    left it. "Start" only ever added to that, so there was no way back short of
+    re-running the migrations.
+
+    This deletes what the run produced and restores what the run consumed:
+    units go home and go available, lifelines go back to their recorded opening
+    stock and occupancy. It does not touch the city, the taxonomy, the accounts
+    or the hazard model's own output.
+
+    Archived simulation runs (`sim_run_id is not null`) are somebody's saved
+    scenario, not this run's mess, and are left alone.
+    """
+    await stop()
+
+    cleared: dict[str, int] = {}
+    # One transaction on one connection: `db.execute` would take a different
+    # connection from the pool each time and none of this would be atomic.
+    async with _world:
+        async with db.transaction() as conn:
+            for table in _RESET_ORDER:
+                sql = f"delete from {table}"
+                # Only the tables that record which run they belong to can be
+                # scoped; the join tables hang off rows that are going anyway.
+                if table in _SIM_SCOPED:
+                    sql += " where sim_run_id is null"
+                cleared[table] = _affected(await conn.execute(sql))
+
+            await conn.execute(
+                """
+                update resources
+                   set status = 'available', location = base_location,
+                       unavailable_reason = null, status_note = null,
+                       updated_at = now()
+                 where city_id = $1
+                """,
+                city_id,
+            )
+            await conn.execute(
+                """
+                update lifelines
+                   set supplies  = coalesce(supplies_baseline, '{}'::jsonb),
+                       occupancy = coalesce(occupancy_baseline, 0),
+                       status    = 'open',
+                       last_reported_at = null
+                 where city_id = $1
+                """,
+                city_id,
+            )
+
+    # The in-process state has to go back too, or the next run carries the last
+    # one's beats, gate history and supply baselines.
+    state.running = False
+    state.tick = 0
+    state.started_at = None
+    state.sim_now = None
+    state.city_id = city_id
+    state.beats.clear()
+    state.working.clear()
+    state.gated.clear()
+    state.supply_baseline.clear()
+    state.supply_flagged.clear()
+    state.citizen_route = None
+    state.last_plan = None
+    state.last_replan_tick = -99
+    state.script_index = 0
+    state.error = None
+    state.dirty = True
+    globals()["_rng"] = random.Random(state.seed)
+    state.beat("reset", "World reset to its opening position.")
+
+    log.info("demo_reset", city=city_id, cleared=cleared)
+    return cleared
+
+
+#: Tables carrying `sim_run_id`, so a live reset can spare archived scenarios.
+_SIM_SCOPED = frozenset({
+    "alerts", "decisions", "agency_requests", "field_reports", "field_tasks",
+    "assignments", "allocation_plans", "agent_runs", "citizen_reports",
+    "incidents", "road_blocks", "events",
+})
+
+
+def _affected(status: Any) -> int:
+    """asyncpg returns the command tag, e.g. `DELETE 213`."""
+    try:
+        return int(str(status).rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
