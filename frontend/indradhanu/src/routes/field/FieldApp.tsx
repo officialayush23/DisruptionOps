@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { AlertTriangle, CheckCircle2, Loader2, Radio, Truck } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
@@ -68,21 +68,43 @@ export default function FieldApp() {
   const [error, setError] = useState<string | null>(null)
   const [effects, setEffects] = useState<string[]>([])
 
+  /** `selected` as a ref, read inside `load` without `load` depending on it.
+   *
+   *  It used to be a dependency, which made this poll re-enter itself: the
+   *  first load auto-selects a unit, selecting changes `selected`, `load` gets
+   *  a new identity, and both effects below tear down and re-run — an extra
+   *  pair of requests and a restarted interval every time the operator so much
+   *  as picks a different vehicle, on a three-second poll hitting two endpoints
+   *  at once. */
+  const selectedRef = useRef<string | null>(null)
+  useEffect(() => { selectedRef.current = selected }, [selected])
+
+  /** True while a poll is outstanding. `/field/state` on a cold instance can
+   *  take longer than the three-second interval, and without this the requests
+   *  stack up faster than they drain. */
+  const inFlight = useRef(false)
+
   const load = useCallback(async () => {
+    if (inFlight.current) return
+    inFlight.current = true
     try {
       const [s, k] = await Promise.all([
         request<FieldState>("/field/state"),
         request<StatusKind[]>("/field/status-kinds"),
       ])
       setState(s); setKinds(k); setError(null)
-      if (!selected && s.units.length) setSelected(s.units[0].id)
+      if (!selectedRef.current && s.units.length) setSelected(s.units[0].id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      inFlight.current = false
     }
-  }, [selected])
+  }, [])
 
-  useEffect(() => { void load() }, [load])
+  // One effect, not two: separately, every change of `load` fired an immediate
+  // request *and* rebuilt the interval that was about to fire anyway.
   useEffect(() => {
+    void load()
     const id = setInterval(() => void load(), 3000)
     return () => clearInterval(id)
   }, [load])

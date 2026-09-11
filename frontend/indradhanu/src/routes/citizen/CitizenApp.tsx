@@ -65,6 +65,14 @@ type Guidance = {
 
 const STEP = 0.0035
 const ALANDI: [number, number] = [73.8989, 18.6773]
+/** The worst location fix this screen will act on, in metres.
+ *
+ *  A laptop with no GPS radio answers a location request from nearby Wi-Fi and
+ *  its IP address. That estimate is routinely 5-50 km wide and lands somewhere
+ *  different on every page load. Wards here are 1-3 km across, so anything
+ *  beyond this is not a rough position, it is a different ward — and a wrong
+ *  ward means the wrong shelter, the wrong hospital and the wrong roads. */
+const COARSE_FIX_M = 2000
 
 /** Metres between two lng/lat pairs. Equirectangular rather than haversine:
  *  over the few kilometres a person walks it agrees to well under a metre, and
@@ -274,13 +282,51 @@ export default function CitizenApp() {
 
   // Real GPS if they allow it, arrow keys either way. Declining location is an
   // ordinary choice, not an error state to sit in.
+  //
+  // `watchPosition`, not `getCurrentPosition`: a device without GPS answers the
+  // first call from Wi-Fi and IP trilateration, which is a guess with a radius
+  // of kilometres and a different guess every time the page loads. Taking that
+  // first answer is what put somebody standing in Alandi at a new random place
+  // on each reload. A watch keeps listening, so the coarse fix is replaced the
+  // moment a real one arrives instead of being frozen in as the truth.
   useEffect(() => {
     if (!("geolocation" in navigator)) return
-    navigator.geolocation.getCurrentPosition(
-      (g) => setPos({ lng: g.coords.longitude, lat: g.coords.latitude }),
-      () => setGpsNote("Location is off, so the map is starting in Alandi. Arrow keys move you."),
-      { enableHighAccuracy: true, timeout: 8000 }
+    const id = navigator.geolocation.watchPosition(
+      (g) => {
+        const acc = g.coords.accuracy
+        // Every decision on this screen is ward-shaped — which shelter, which
+        // hospital, is this road blocked. A fix that cannot say which ward you
+        // are in is not a small error, it is a different answer, so it is
+        // refused rather than rounded. Wards here run 1-3 km across.
+        if (acc > COARSE_FIX_M) {
+          setGpsNote(
+            `Your device can only place you to about ${Math.round(acc / 1000)} km, ` +
+            `which is wider than a ward, so the map is staying in Alandi. ` +
+            `Arrow keys move you.`
+          )
+          return
+        }
+        // Every fix inside the budget is accepted, including one slightly worse
+        // than the last. An "only ever improve" rule looks tempting here and is
+        // wrong: after the first good fix it would refuse every later one and
+        // freeze somebody in place while they walked, which on this screen is
+        // the more dangerous failure.
+        setGpsNote(null)
+        setPos({ lng: g.coords.longitude, lat: g.coords.latitude })
+      },
+      (e) => {
+        setGpsNote(
+          e.code === e.PERMISSION_DENIED
+            ? "Location is off, so the map is starting in Alandi. Arrow keys move you."
+            : "Your device could not get a location, so the map is starting in Alandi. Arrow keys move you."
+        )
+      },
+      // `maximumAge` lets a fix obtained seconds ago be reused instead of
+      // re-triangulating on every reload, which is the other half of why the
+      // position moved when the person did not.
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
     )
+    return () => navigator.geolocation.clearWatch(id)
   }, [])
 
   // Asked once, quietly. Declining is fine: the banner above still appears,

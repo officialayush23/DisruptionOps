@@ -33,6 +33,21 @@ const DATA = `${VERSION}-data`
  * below rather than listed here, because their names change every build. */
 const SHELL_URLS = ["/", "/citizen", "/field", "/manifest.webmanifest"]
 
+/* How many runtime entries the shell cache may hold on top of SHELL_URLS.
+ *
+ * Vite's asset names are content-hashed, so every deploy produces a new URL,
+ * which `cacheFirst` stores and nothing ever removed: `activate` only deletes
+ * caches whose name does not start with VERSION, and VERSION is a constant
+ * nobody remembers to bump. A phone that has visited across ten deploys was
+ * keeping ten JS bundles, ten stylesheets and ten copies of the font — growth
+ * with no ceiling, on exactly the cheap handset this app is meant for.
+ *
+ * A ceiling is the right fix rather than a version bump, because it needs no
+ * discipline at deploy time. One build's assets are a handful of files, so this
+ * holds the current build comfortably and lets the one before it age out.
+ * Entries are evicted oldest-first: `cache.keys()` returns insertion order. */
+const MAX_SHELL_ENTRIES = 24
+
 /* Requests whose responses are worth keeping to show offline. */
 const CACHEABLE_GET = [
   "/api/v1/citizen/state",
@@ -254,9 +269,23 @@ async function cacheFirst(request) {
   const response = await fetch(request)
   if (response.ok && new URL(request.url).origin === self.location.origin) {
     const cache = await caches.open(SHELL)
-    cache.put(request, response.clone())
+    await cache.put(request, response.clone())
+    await trimShell(cache)
   }
   return response
+}
+
+/** Keep the shell cache bounded, oldest runtime entry first.
+ *
+ *  The four SHELL_URLS are pinned: they are what makes a cold start on a dead
+ *  network open at all, and evicting one to make room for a stylesheet would
+ *  trade the whole offline story for nothing. */
+async function trimShell(cache) {
+  const keys = await cache.keys()
+  const pinned = new Set(SHELL_URLS.map((u) => new URL(u, self.location.origin).href))
+  const evictable = keys.filter((r) => !pinned.has(r.url))
+  const excess = evictable.length - MAX_SHELL_ENTRIES
+  for (let i = 0; i < excess; i++) await cache.delete(evictable[i])
 }
 
 // -------------------------------------------------------------------- sync --
