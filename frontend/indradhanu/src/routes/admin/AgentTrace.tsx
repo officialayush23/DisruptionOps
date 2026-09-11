@@ -1,238 +1,191 @@
-import { useState } from "react"
-import {
-  Activity,
-  Brain,
-  ChevronRight,
-  FileText,
-  Map,
-  Radio,
-  Route as RouteIcon,
-  Wrench,
-} from "lucide-react"
-import type { AgentName, AgentStep } from "@/api/types"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useMemo, useState } from "react"
+import { Activity, ChevronRight } from "lucide-react"
+import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import { useAgentRuns } from "@/hooks/useApi"
-import { timeOf } from "@/lib/format"
-import { Empty } from "./DecisionGate"
-import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import type { DemoEvent } from "@/routes/demo/useDemo"
 
-const AGENT_META: Record<
-  AgentName,
-  { label: string; icon: typeof Brain; className: string }
-> = {
-  hazard_analyst: {
-    label: "Hazard Analyst",
-    icon: Activity,
-    className: "bg-hazard-flood",
-  },
-  impact_exposure: {
-    label: "Impact & Exposure",
-    icon: Map,
-    className: "bg-hazard-air",
-  },
-  allocation_planner: {
-    label: "Allocation Planner",
-    icon: RouteIcon,
-    className: "bg-hazard-fire",
-  },
-  guidance_agent: {
-    label: "Guidance Agent",
-    icon: Radio,
-    className: "bg-hazard-heat",
-  },
-  policy_retriever: {
-    label: "Policy Retriever",
-    icon: FileText,
-    className: "bg-hazard-seismic",
-  },
+/** The audit log, as the agents wrote it.
+ *
+ *  Nothing on this screen is generated for the screen. `events` is append-only,
+ *  a database trigger refuses updates to it, and every row carries the id of the
+ *  event that caused it. That last field is what makes this a trace rather than
+ *  a log: a dispatch can be followed back to the plan that ordered it, to the
+ *  report that triggered the plan.
+ */
+
+const TONE: Record<string, string> = {
+  incident: "text-orange-600 dark:text-orange-400",
+  report: "text-sky-600 dark:text-sky-400",
+  assignment: "text-emerald-600 dark:text-emerald-400",
+  plan: "text-blue-600 dark:text-blue-400",
+  decision: "text-violet-600 dark:text-violet-400",
+  demand: "text-red-600 dark:text-red-400",
+  resource: "text-cyan-600 dark:text-cyan-400",
+  risk: "text-amber-600 dark:text-amber-400",
+  field: "text-cyan-600 dark:text-cyan-400",
+  alert: "text-fuchsia-600 dark:text-fuchsia-400",
+  road: "text-red-600 dark:text-red-400",
 }
+const toneFor = (kind: string) => TONE[kind.split(".")[0]] ?? "text-muted-foreground"
+
+const time = (iso: string) =>
+  new Date(iso).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  })
 
 export default function AgentTrace() {
-  const { data: runs = [] } = useAgentRuns()
-  const run = runs[0]
+  const { state } = useDemo()
+  const [actor, setActor] = useState<string | null>(null)
+  const [open, setOpen] = useState<number | null>(null)
 
-  if (!run) {
-    return (
-      <Empty
-        icon={<Brain className="size-8 text-muted-foreground" />}
-        title="No agent run in progress"
-        body="Every reasoning step, tool call and retrieved clause is recorded here while a hazard run is active — so a decision can be inspected rather than trusted."
-      />
-    )
+  const actors = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const e of state.events) counts.set(e.actor, (counts.get(e.actor) ?? 0) + 1)
+    return [...counts].sort((a, b) => b[1] - a[1])
+  }, [state.events])
+
+  const byId = useMemo(
+    () => new Map(state.events.map((e) => [e.id, e])),
+    [state.events]
+  )
+
+  const chainOf = (e: DemoEvent) => {
+    const chain: DemoEvent[] = []
+    let cursor: DemoEvent | undefined = e
+    const seen = new Set<number>()
+    while (cursor && !seen.has(cursor.id)) {
+      seen.add(cursor.id)
+      chain.push(cursor)
+      cursor = cursor.causationId ? byId.get(cursor.causationId) : undefined
+    }
+    return chain.reverse()
   }
 
-  const byAgent = run.steps.reduce<Record<string, number>>((a, s) => {
-    a[s.agent] = (a[s.agent] ?? 0) + 1
-    return a
-  }, {})
-  const totalMs = run.steps.reduce((a, s) => a + s.durationMs, 0)
+  const rows = actor ? state.events.filter((e) => e.actor === actor) : state.events
 
   return (
-    <div className="space-y-4 p-4">
-      <div>
-        <h1 className="text-lg font-semibold">Agent trace</h1>
-        <p className="text-sm text-muted-foreground">
-          What each agent did, which tool it called, and what came back. This is
-          the record a judge — or an auditor — reads instead of taking the
-          output on faith.
-        </p>
-      </div>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0">
-              <CardTitle className="text-sm">Run {run.id}</CardTitle>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {run.trigger}
-              </p>
-            </div>
-            <Badge
-              variant={run.engine === "gemini" ? "default" : "secondary"}
-              className="shrink-0"
-            >
-              {run.engine === "gemini"
-                ? "Gemini 2.0 Flash"
-                : "Deterministic fallback"}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            <Stat k="Steps" v={String(run.steps.length)} />
-            <Stat k="Agent time" v={`${(totalMs / 1000).toFixed(1)} s`} />
-            <Stat k="Started" v={`${timeOf(run.startedAt)} IST`} />
-            <Stat
-              k="Finished"
-              v={run.finishedAt ? `${timeOf(run.finishedAt)} IST` : "running"}
-            />
-            <Stat k="Agents involved" v={String(Object.keys(byAgent).length)} />
-          </div>
-          {run.summary && (
-            <>
-              <Separator className="my-3" />
-              <p className="text-sm">{run.summary}</p>
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <ScrollArea className="max-h-[calc(100vh-24rem)]">
-        <div className="space-y-2 pr-3">
-          {run.steps.map((s, i) => (
-            <StepRow key={s.id} step={s} index={i + 1} />
-          ))}
-        </div>
-      </ScrollArea>
-    </div>
-  )
-}
-
-function StepRow({ step, index }: { step: AgentStep; index: number }) {
-  const [open, setOpen] = useState(false)
-  const meta = AGENT_META[step.agent]
-  const Icon = meta.icon
-  const hasDetail = !!step.tool
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <div className="rounded-lg border bg-card">
-        <CollapsibleTrigger asChild disabled={!hasDetail}>
-          <button
-            className={cn(
-              "flex w-full items-start gap-3 p-3 text-left",
-              hasDetail && "rounded-lg hover:bg-accent"
-            )}
+    <div className="space-y-3 p-4">
+      <div className="flex flex-wrap items-center gap-1">
+        <Button
+          size="sm"
+          variant={actor === null ? "secondary" : "ghost"}
+          className="h-7 text-xs"
+          onClick={() => setActor(null)}
+        >
+          Everything <span className="text-muted-foreground ml-1">{state.events.length}</span>
+        </Button>
+        {actors.map(([a, n]) => (
+          <Button
+            key={a}
+            size="sm"
+            variant={actor === a ? "secondary" : "ghost"}
+            className="h-7 text-xs"
+            onClick={() => setActor(a)}
           >
-            <span className="tabular w-5 shrink-0 pt-0.5 text-xs text-muted-foreground">
-              {index}
-            </span>
-            <span
-              className={cn(
-                "flex size-7 shrink-0 items-center justify-center rounded-md text-white",
-                meta.className
-              )}
-            >
-              <Icon className="size-4" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="text-sm font-medium">{meta.label}</span>
-                <span className="tabular text-xs text-muted-foreground">
-                  {step.durationMs} ms
-                </span>
-                {step.status === "fallback" && (
-                  <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                    fallback
-                  </Badge>
-                )}
-                {step.citedClause && (
-                  <Badge
-                    variant="outline"
-                    className="h-4 gap-1 px-1.5 text-[10px]"
-                  >
-                    <FileText className="size-2.5" />
-                    {step.citedClause}
-                  </Badge>
-                )}
-              </span>
-              <span className="mt-1 block text-sm">{step.thought}</span>
-            </span>
-            {hasDetail && (
-              <ChevronRight
-                className={cn(
-                  "mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform",
-                  open && "rotate-90"
-                )}
-              />
-            )}
-          </button>
-        </CollapsibleTrigger>
-        {hasDetail && (
-          <CollapsibleContent>
-            <div className="space-y-2 border-t px-3 py-2.5 pl-[4.25rem]">
-              <div className="flex items-center gap-2">
-                <Wrench className="size-3.5 text-muted-foreground" />
-                <code className="text-xs font-medium">{step.tool}</code>
-              </div>
-              {step.toolInput && <Field label="Input" value={step.toolInput} />}
-              {step.toolOutput && (
-                <Field label="Output" value={step.toolOutput} />
-              )}
-            </div>
-          </CollapsibleContent>
-        )}
+            {a.replace(/^agent:/, "").replace(/_/g, " ")}
+            <span className="text-muted-foreground ml-1">{n}</span>
+          </Button>
+        ))}
       </div>
-    </Collapsible>
-  )
-}
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-        {label}
-      </p>
-      <pre className="mt-0.5 overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap">
-        {value}
-      </pre>
-    </div>
-  )
-}
+      {rows.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Activity className="size-4" /> Nothing written yet
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Every agent action appends here as it happens. Start live ingest on
+              the command console and the first rows will arrive within a second.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Append-only event log</CardTitle>
+            <CardDescription className="text-xs">
+              Newest first. Click a row to follow it back to what caused it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="max-h-[640px] space-y-0.5 overflow-y-auto">
+            {rows.map((e) => {
+              const expanded = open === e.id
+              const chain = expanded ? chainOf(e) : []
+              return (
+                <div key={e.id}>
+                  <button
+                    type="button"
+                    onClick={() => setOpen(expanded ? null : e.id)}
+                    className="hover:bg-muted/50 flex w-full items-start gap-2 rounded px-1.5 py-1 text-left text-xs"
+                  >
+                    <ChevronRight
+                      className={`mt-0.5 size-3 shrink-0 transition-transform ${
+                        expanded ? "rotate-90" : ""
+                      }`}
+                    />
+                    <span className="text-muted-foreground shrink-0 tabular-nums">
+                      {time(e.occurredAt)}
+                    </span>
+                    <Badge variant="outline" className="shrink-0 font-normal">
+                      {e.actor.replace(/^agent:/, "").replace(/_/g, " ")}
+                    </Badge>
+                    <span className={`shrink-0 ${toneFor(e.kind)}`}>{e.kind}</span>
+                    <span className="min-w-0 flex-1 truncate">{e.text}</span>
+                  </button>
 
-function Stat({ k, v }: { k: string; v: string }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{k}</p>
-      <p className="tabular font-medium">{v}</p>
+                  {expanded && (
+                    <div className="bg-muted/30 ml-6 mb-1 space-y-2 rounded border p-2 text-xs">
+                      <div>
+                        <div className="text-muted-foreground font-medium uppercase tracking-wide">
+                          Caused by
+                        </div>
+                        {chain.length <= 1 ? (
+                          <p className="text-muted-foreground mt-1">
+                            Nothing. This is the head of its chain.
+                          </p>
+                        ) : (
+                          <ol className="mt-1 space-y-1">
+                            {chain.map((c) => (
+                              <li key={c.id} className="flex gap-2">
+                                <span className="text-muted-foreground tabular-nums">
+                                  {time(c.occurredAt)}
+                                </span>
+                                <span className={toneFor(c.kind)}>{c.kind}</span>
+                                <span className="min-w-0 flex-1">{c.text}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        )}
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground font-medium uppercase tracking-wide">
+                          Subject
+                        </div>
+                        <div className="mt-1">
+                          {e.subjectType ?? "—"}
+                          {e.subjectId ? ` · ${e.subjectId}` : ""}
+                          {e.wardId ? ` · ward ${e.wardId}` : ""}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground font-medium uppercase tracking-wide">
+                          Payload as stored
+                        </div>
+                        <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed">
+                          {JSON.stringify(e.payload ?? {}, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

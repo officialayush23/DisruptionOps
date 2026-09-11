@@ -17,12 +17,16 @@ export const apiBaseUrl =
   "http://localhost:8000/api/v1"
 
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly detail?: unknown
-  ) {
+  // Written out rather than as constructor parameter properties: this project
+  // builds with `erasableSyntaxOnly`, which forbids the shorthand because it is
+  // TypeScript that emits runtime code rather than type syntax that erases.
+  readonly status: number
+  readonly detail?: unknown
+
+  constructor(status: number, message: string, detail?: unknown) {
     super(message)
+    this.status = status
+    this.detail = detail
     this.name = "ApiError"
   }
 

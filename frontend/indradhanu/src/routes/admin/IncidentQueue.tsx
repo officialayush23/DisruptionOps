@@ -1,233 +1,264 @@
-import { useState } from "react"
-import { Camera, Layers, Siren } from "lucide-react"
-import type { Incident } from "@/api/types"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useMemo, useState } from "react"
+import { Copy, Siren, TriangleAlert } from "lucide-react"
+import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable"
-import { MapView } from "@/components/map/MapView"
-import { SeverityBadge, StatTile } from "@/components/common/indicators"
-import { timeOf } from "@/lib/format"
-import {
-  useIncidents,
-  useReports,
-  useResources,
-  useWardRisks,
-  useWards,
-} from "@/hooks/useApi"
-import { wardName } from "@/api/mock/geo"
-import { useScenario } from "@/scenario/store"
-import { Empty } from "./DecisionGate"
-import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-const STATUS_CLASS: Record<Incident["status"], string> = {
-  reported: "bg-status-pending text-black",
-  confirmed: "bg-status-open text-white",
-  dispatched: "bg-status-active text-white",
-  in_progress: "bg-status-active text-white",
-  resolved: "bg-status-resolved text-white",
-}
+/** Every open incident, what it needs, and who is on it.
+ *
+ *  One row per incident, not per report. Four reports of the same flooded road
+ *  are one row with a merge count beside it, which is the point of the
+ *  deduplication and the only honest way to size the queue.
+ */
 
-const CATEGORY_LABEL: Record<string, string> = {
-  flooded_road: "Flooded road",
-  waterlogging: "Waterlogging",
-  fallen_tree: "Fallen tree",
-  blocked_drain: "Blocked drain",
-  structural_damage: "Structural damage",
-  person_stranded: "Person stranded",
-  power_line: "Power line",
-  heat_casualty: "Heat casualty",
+const SORTS = {
+  severity: "Severity",
+  newest: "Newest",
+  shortfall: "Biggest shortfall",
+  reports: "Most reports",
+} as const
+type SortKey = keyof typeof SORTS
+
+function since(iso: string) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000
+  if (!Number.isFinite(s) || s < 0) return ""
+  if (s < 90) return `${Math.round(s)}s`
+  if (s < 5400) return `${Math.round(s / 60)} min`
+  return `${Math.round(s / 3600)} h`
 }
 
 export default function IncidentQueue() {
-  const { data: incidents = [] } = useIncidents()
-  const { data: wards = [] } = useWards()
-  const { data: risks = [] } = useWardRisks("flood")
-  const { data: resources = [] } = useResources()
-  const { data: reports = [] } = useReports()
-  const focusWardId = useScenario((s) => s.focusWardId)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const { state, activity, selected, setSelected, busy, run } = useDemo()
+  const [sort, setSort] = useState<SortKey>("severity")
+  const [query, setQuery] = useState("")
 
-  const selected =
-    incidents.find((i) => i.id === selectedId) ?? incidents[0] ?? null
-  const clustered = reports.filter((r) => r.incidentId === selected?.id)
-  const unclustered = reports.filter((r) => !r.incidentId)
+  const wardName = useMemo(
+    () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
+    [state.wards]
+  )
 
-  if (!reports.length && !incidents.length) {
-    return (
-      <Empty
-        icon={<Siren className="size-8 text-muted-foreground" />}
-        title="No incidents reported"
-        body="Citizen photo reports are classified, geotagged and clustered here — so the console shows confirmed incidents rather than a raw report feed."
-      />
-    )
-  }
+  const rows = useMemo(() => {
+    const needsBy = new Map<string, typeof state.needs>()
+    for (const n of state.needs) {
+      const list = needsBy.get(n.incidentId)
+      if (list) list.push(n)
+      else needsBy.set(n.incidentId, [n])
+    }
+    const unitsBy = new Map<string, typeof state.resources>()
+    for (const r of state.resources) {
+      if (!r.incidentId) continue
+      const list = unitsBy.get(r.incidentId)
+      if (list) list.push(r)
+      else unitsBy.set(r.incidentId, [r])
+    }
+    const q = query.trim().toLowerCase()
+
+    const built = state.incidents
+      .map((i) => {
+        const needs = needsBy.get(i.id) ?? []
+        return {
+          ...i,
+          needs,
+          units: unitsBy.get(i.id) ?? [],
+          shortfall: needs.reduce((n, x) => n + Math.max(0, x.required - x.met), 0),
+          ward: wardName.get(i.wardId) ?? i.wardId,
+        }
+      })
+      .filter(
+        (i) =>
+          !q ||
+          i.title.toLowerCase().includes(q) ||
+          i.ward.toLowerCase().includes(q) ||
+          i.category.includes(q)
+      )
+
+    const cmp: Record<SortKey, (a: typeof built[0], b: typeof built[0]) => number> = {
+      severity: (a, b) => b.severity - a.severity || b.shortfall - a.shortfall,
+      newest: (a, b) => (a.createdAt < b.createdAt ? 1 : -1),
+      shortfall: (a, b) => b.shortfall - a.shortfall || b.severity - a.severity,
+      reports: (a, b) => b.reportCount - a.reportCount,
+    }
+    return built.sort(cmp[sort])
+  }, [state.incidents, state.needs, state.resources, wardName, sort, query])
+
+  const uncovered = rows.filter((r) => r.shortfall > 0).length
+  const merged = rows.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="grid grid-cols-2 gap-3 p-4 lg:grid-cols-4">
-        <StatTile
-          label="Reports received"
-          value={String(reports.length)}
-          sub="from residents"
+    <div className="space-y-3 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter by title, ward or category"
+          className="h-8 max-w-xs text-xs"
         />
-        <StatTile
-          label="Confirmed incidents"
-          value={String(incidents.length)}
-          sub={
-            incidents.length
-              ? `${reports.length - unclustered.length} reports clustered`
-              : "awaiting clustering"
-          }
-        />
-        <StatTile
-          label="Duplicates collapsed"
-          value={String(
-            Math.max(0, reports.length - unclustered.length - incidents.length)
+        <div className="flex gap-1">
+          {(Object.keys(SORTS) as SortKey[]).map((k) => (
+            <Button
+              key={k}
+              size="sm"
+              variant={sort === k ? "secondary" : "ghost"}
+              className="h-8 text-xs"
+              onClick={() => setSort(k)}
+            >
+              {SORTS[k]}
+            </Button>
+          ))}
+        </div>
+        <div className="text-muted-foreground ml-auto flex items-center gap-3 text-xs">
+          <span>{rows.length} open</span>
+          {merged > 0 && (
+            <Badge variant="outline" className="gap-1">
+              <Copy className="size-3" />
+              {merged} merged away
+            </Badge>
           )}
-          sub="reports merged into existing incidents"
-        />
-        <StatTile
-          label="Resolved"
-          value={String(
-            incidents.filter((i) => i.status === "resolved").length
+          {uncovered > 0 && (
+            <Badge variant="destructive">{uncovered} with a shortfall</Badge>
           )}
-          sub="closed with field proof"
-        />
+        </div>
       </div>
 
-      <ResizablePanelGroup
-        orientation="horizontal"
-        className="min-h-0 flex-1 border-t"
-      >
-        <ResizablePanel defaultSize={48} minSize={28}>
-          <MapView
-            className="h-full w-full"
-            expandable
-            wards={wards}
-            risks={risks}
-            incidents={incidents}
-            resources={resources}
-            focusWardId={focusWardId}
-          />
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={52} minSize={30}>
-          <ScrollArea className="h-full">
-            <div className="space-y-3 p-4">
-              {incidents.map((inc) => (
-                <Card
-                  key={inc.id}
-                  onClick={() => setSelectedId(inc.id)}
-                  className={cn(
-                    "cursor-pointer transition-colors",
-                    selected?.id === inc.id && "border-foreground"
-                  )}
-                >
-                  <CardHeader className="pb-2">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <CardTitle className="text-sm">{inc.title}</CardTitle>
-                        <p className="mt-0.5 text-xs text-muted-foreground">
-                          {wardName(inc.wardId)} ·{" "}
-                          {CATEGORY_LABEL[inc.category]} ·{" "}
-                          {timeOf(inc.createdAt)} IST
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <SeverityBadge
-                          severity={inc.severity}
-                          showLabel={false}
-                        />
-                        <Badge className={STATUS_CLASS[inc.status]}>
-                          {inc.status.replace("_", " ")}
-                        </Badge>
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                      <span className="inline-flex items-center gap-1.5 font-medium">
-                        <Layers className="size-3.5" />
-                        {inc.reportCount} report
-                        {inc.reportCount === 1 ? "" : "s"} clustered
-                      </span>
-                      <span className="tabular text-muted-foreground">
-                        cluster confidence {Math.round(inc.confidence * 100)}%
-                      </span>
-                    </div>
+      {rows.length === 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Siren className="size-4" /> Nothing open
+            </CardTitle>
+            <CardDescription className="text-xs">
+              {state.running
+                ? "Reports are arriving; the first incident will appear here within a few seconds."
+                : "Start live ingest on the command console and reports will land here."}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
-                    {selected?.id === inc.id && clustered.length > 0 && (
-                      <>
-                        <Separator className="my-3" />
-                        <p className="mb-2 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-                          Reports in this cluster
-                        </p>
-                        <div className="space-y-2">
-                          {clustered.map((r) => (
-                            <div
-                              key={r.id}
-                              className="flex items-start gap-2 text-xs"
-                            >
-                              <Camera className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                              <div className="min-w-0 flex-1">
-                                <p className="truncate">{r.note}</p>
-                                <p className="text-muted-foreground">
-                                  {r.reporterName} · {timeOf(r.createdAt)} ·
-                                  classified {CATEGORY_LABEL[r.classifiedAs]}{" "}
-                                  <span className="tabular">
-                                    (
-                                    {Math.round(
-                                      r.classificationConfidence * 100
-                                    )}
-                                    %)
-                                  </span>
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
-
-              {unclustered.length > 0 && (
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">
-                      Awaiting clustering ({unclustered.length})
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    {unclustered.map((r) => (
-                      <div
-                        key={r.id}
-                        className="flex items-start gap-2 text-xs"
+      <div className="space-y-2">
+        {rows.map((i) => {
+          const open = selected === i.id
+          return (
+            <Card
+              key={i.id}
+              className={`cursor-pointer transition-colors ${
+                open ? "border-primary" : "hover:border-muted-foreground/40"
+              }`}
+              onClick={() => setSelected(open ? null : i.id)}
+            >
+              <CardContent className="p-3">
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant={i.severity >= 4 ? "destructive" : "secondary"}
+                        className="tabular-nums"
                       >
-                        <Camera className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate">{r.note}</p>
-                          <p className="text-muted-foreground">
-                            {wardName(r.wardId)} · {r.reporterName} ·{" "}
-                            {timeOf(r.createdAt)}
-                          </p>
-                        </div>
-                      </div>
+                        sev {i.severity}
+                      </Badge>
+                      <span className="truncate text-sm font-medium">{i.title}</span>
+                    </div>
+                    <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-3 text-xs">
+                      <span>{i.ward}</span>
+                      <span>{i.category.replace(/_/g, " ")}</span>
+                      <span>{since(i.createdAt)} old</span>
+                      <span>confidence {(i.confidence * 100).toFixed(0)}%</span>
+                      {i.reportCount > 1 && (
+                        <span className="text-sky-600 dark:text-sky-400">
+                          {i.reportCount} reports merged
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-1">
+                    {i.needs.map((n) => (
+                      <Badge
+                        key={n.capability}
+                        variant={n.met >= n.required ? "secondary" : "destructive"}
+                        className="text-xs font-normal"
+                      >
+                        {n.capability.replace(/_/g, " ")} {n.met}/{n.required}
+                      </Badge>
                     ))}
-                  </CardContent>
-                </Card>
-              )}
-            </div>
-          </ScrollArea>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+                    {i.needs.length === 0 && (
+                      <span className="text-muted-foreground text-xs">no needs recorded</span>
+                    )}
+                  </div>
+                </div>
+
+                {open && (
+                  <div className="mt-3 grid gap-3 border-t pt-3 md:grid-cols-2">
+                    <div>
+                      <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
+                        Units on it
+                      </div>
+                      {i.units.length === 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          {i.shortfall > 0
+                            ? "Nothing committed yet."
+                            : "Nothing committed; nothing needed."}
+                        </p>
+                      ) : (
+                        i.units.map((r) => (
+                          <div key={r.id} className="flex items-center gap-2 text-xs">
+                            <Badge variant="outline">{r.label}</Badge>
+                            <span className="text-muted-foreground">
+                              {r.status.replace(/_/g, " ")}
+                              {r.etaMinutes ? `, ${r.etaMinutes} min out` : ""}
+                              {r.distanceKm ? `, ${r.distanceKm.toFixed(1)} km` : ""}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                      {i.shortfall > 0 && (
+                        <p className="text-destructive mt-2 inline-flex items-center gap-1 text-xs">
+                          <TriangleAlert className="size-3" />
+                          Short by {i.shortfall} unit(s). The planner records this
+                          rather than silently under-serving it.
+                        </p>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-2 h-7 text-xs"
+                        disabled={busy !== null}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void run("replan", "/demo/replan")
+                        }}
+                      >
+                        Re-plan now
+                      </Button>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
+                        What happened
+                      </div>
+                      {(activity.get(i.id) ?? []).map((a, n) => (
+                        <div key={n} className="text-xs">
+                          <span className="text-muted-foreground mr-2 tabular-nums">
+                            {new Date(a.at).toLocaleTimeString(undefined, {
+                              hour: "2-digit", minute: "2-digit", hour12: false,
+                            })}
+                          </span>
+                          {a.text}
+                        </div>
+                      ))}
+                      {(activity.get(i.id)?.length ?? 0) === 0 && (
+                        <p className="text-muted-foreground text-xs">
+                          Nothing recorded against this one yet.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
     </div>
   )
 }

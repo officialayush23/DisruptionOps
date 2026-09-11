@@ -447,10 +447,18 @@ async def field_status(body: FieldStatusIn, principal: CurrentPrincipal) -> dict
                  "note": body.note, "effects": effects},
     )
 
+    from app.api.v1 import demo as demo_api
     from app.demo import runner as demo_runner
 
-    demo_runner.state.beat("field", f"{reporter}: {kind['label']}. " + " ".join(effects))
+    demo_runner.state.beat(
+        "field", f"{reporter}: {kind['label']}. " + " ".join(effects),
+        subjectId=body.subject_id, subjectType=body.subject_type,
+    )
     demo_runner.state.dirty = True
+    # A crew pressing "full" or "puncture" has just made the console's cached
+    # facility and road-block reads wrong. Drop them rather than let the console
+    # show a stale shelter as open for the next two seconds.
+    demo_api.invalidate_slow()
 
     return {"ok": True, "statusKind": body.status_kind, "label": kind["label"],
             "effects": effects}

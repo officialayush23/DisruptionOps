@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { request } from "@/api/httpClient"
 
 export type Ward = {
@@ -11,11 +11,17 @@ export type Resource = {
   capacity: number; status: string; location: [number, number]
   capabilities: string[]; assignedTo: string | null
   incidentId: string | null; etaMinutes: number | null
+  assignmentStatus?: string | null; distanceKm?: number | null
+  statusNote?: string | null; unavailableReason?: string | null
+  updatedAt?: string | null
 }
 export type Incident = {
   id: string; title: string; category: string; wardId: string; severity: number
   status: string; reportCount: number; confidence: number
   location: [number, number]; createdAt: string; unitsEnRoute: number
+}
+export type Need = {
+  incidentId: string; capability: string; required: number; met: number
 }
 export type Decision = {
   id: string; action: string; target: string; wardId: string | null
@@ -23,26 +29,28 @@ export type Decision = {
   clause: string | null; delegatedTo: string | null
   withinDelegation: boolean | null; createdAt: string
 }
+export type DemoEvent = {
+  id: number; kind: string; actor: string
+  subjectType: string | null; subjectId: string | null
+  wardId: string | null; payload: Record<string, unknown>
+  text: string; occurredAt: string; causationId: number | null
+}
 export type Beat = {
   tick: number; at: string; kind: string; text: string
   detail: Record<string, unknown>
 }
-export type DemoState = {
-  running: boolean; tick: number; simNow: string | null; error: string | null
-  citizen: { lng: number; lat: number; wardId: string | null; wardName: string; inside: boolean; note?: string }
-  wards: Ward[]; resources: Resource[]; incidents: Incident[]
-  needs: { incidentId: string; capability: string; required: number; met: number }[]
-  decisions: Decision[]
-  events: { id: number; kind: string; actor: string; wardId: string | null; payload: Record<string, unknown>; occurredAt: string }[]
-  duplicates: { kind: string; incidentIds: string[]; wardId: string | null; agencies: string[]; detail: string; wastedUnits: number }[]
-  facilities: { id: string; name: string; kind: string; status: string; capacity: number | null; occupancy: number | null; acceptsCasualties: boolean; location: [number, number] }[]
-  roadBlocks: { id: string; reason: string; reportedBy: string; radiusM: number; location: [number, number] }[]
-  plan: null | {
-    headline: string; engine: string; coverage: number
-    assigned: RawChange[]; reassigned: RawChange[]; released: RawChange[]; kept: RawChange[]
-    uncovered: { ward_id?: string; capability?: string; reason: string }[]
-  }
-  beats: Beat[]
+export type Facility = {
+  id: string; name: string; kind: string; status: string
+  capacity: number | null; occupancy: number | null
+  acceptsCasualties: boolean; location: [number, number]
+}
+export type RoadBlock = {
+  id: string; reason: string; reportedBy: string; radiusM: number
+  location: [number, number]
+}
+export type Duplicate = {
+  kind: string; incidentIds: string[]; wardId: string | null
+  agencies: string[]; detail: string; wastedUnits: number
 }
 export type RawChange = {
   kind: string; resource_id: string; resource_label: string
@@ -50,8 +58,26 @@ export type RawChange = {
   from_incident_id: string | null; from_incident_title: string
   eta_minutes: number; reason: string
 }
+export type Plan = {
+  headline: string; engine: string; coverage: number
+  assigned: RawChange[]; reassigned: RawChange[]
+  released: RawChange[]; kept: RawChange[]
+  uncovered: { ward_id?: string; incident_id?: string; capability?: string; reason: string }[]
+}
+export type DemoState = {
+  running: boolean; tick: number; simNow: string | null; error: string | null
+  citizen: {
+    lng: number; lat: number; wardId: string | null
+    wardName: string; inside: boolean; note?: string
+  }
+  wards: Ward[]; resources: Resource[]; incidents: Incident[]
+  needs: Need[]; decisions: Decision[]; events: DemoEvent[]
+  duplicates: Duplicate[]; facilities: Facility[]; roadBlocks: RoadBlock[]
+  plan: Plan | null
+  beats: Beat[]
+}
 
-const EMPTY: DemoState = {
+export const EMPTY_DEMO: DemoState = {
   running: false, tick: 0, simNow: null, error: null,
   citizen: { lng: 73.8989, lat: 18.6773, wardId: null, wardName: "", inside: true },
   wards: [], resources: [], incidents: [], needs: [], decisions: [],
@@ -66,23 +92,43 @@ const EMPTY: DemoState = {
  *
  *  Overlapping responses are dropped rather than queued: if the network hiccups
  *  we want the newest world, not a backlog of stale ones replayed in order.
+ *
+ *  Ward polygons are asked for once. They are reference data, they were about
+ *  nine tenths of the payload, and re-sending forty of them every second was a
+ *  large part of why this endpoint took seconds rather than milliseconds. After
+ *  the first response the poll asks for `geometry=0` and the boundaries are
+ *  merged back in here from a ref.
  */
-export function useDemo(pollMs = 1000) {
-  const [state, setState] = useState<DemoState>(EMPTY)
+export function useDemoPoll(pollMs = 1000) {
+  const [state, setState] = useState<DemoState>(EMPTY_DEMO)
   const [error, setError] = useState<string | null>(null)
+  const [latencyMs, setLatencyMs] = useState<number | null>(null)
   const inFlight = useRef(false)
   const seq = useRef(0)
+  const geometry = useRef<Map<string, [number, number][] | null>>(new Map())
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return
     inFlight.current = true
     const mine = ++seq.current
+    const started = performance.now()
+    const withGeometry = geometry.current.size === 0
     try {
-      const next = await request<DemoState>("/demo/state")
-      if (mine === seq.current) {
-        setState(next)
-        setError(null)
+      const next = await request<DemoState>(
+        `/demo/state?geometry=${withGeometry ? 1 : 0}`
+      )
+      if (mine !== seq.current) return
+      if (withGeometry) {
+        for (const w of next.wards) geometry.current.set(w.id, w.boundary)
+      } else {
+        next.wards = next.wards.map((w) => ({
+          ...w,
+          boundary: geometry.current.get(w.id) ?? null,
+        }))
       }
+      setState(next)
+      setError(null)
+      setLatencyMs(Math.round(performance.now() - started))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -110,5 +156,57 @@ export function useDemo(pollMs = 1000) {
     [refresh]
   )
 
-  return { state, error, refresh, act }
+  return { state, error, latencyMs, refresh, act }
+}
+
+/** Everything that has happened to one thing, newest first.
+ *
+ *  Both halves are real: `events` is the append-only audit log the agents write
+ *  to, `beats` is the narration the runner produces as it paces the world. The
+ *  log knows what was decided; the narration knows what it looked like. A hover
+ *  card wants both, in one list, in time order.
+ */
+export function useActivityIndex(state: DemoState) {
+  return useMemo(() => {
+    const index = new Map<string, { at: string; text: string; kind: string }[]>()
+    const push = (id: unknown, entry: { at: string; text: string; kind: string }) => {
+      if (typeof id !== "string" || !id) return
+      const list = index.get(id)
+      if (list) list.push(entry)
+      else index.set(id, [entry])
+    }
+
+    for (const e of state.events) {
+      const entry = { at: e.occurredAt, text: e.text || e.kind, kind: e.kind }
+      push(e.subjectId, entry)
+      push(e.wardId, entry)
+      const p = e.payload ?? {}
+      push((p as Record<string, unknown>).resource_id, entry)
+      push((p as Record<string, unknown>).to_incident, entry)
+      push((p as Record<string, unknown>).from_incident, entry)
+    }
+    for (const b of state.beats) {
+      const entry = { at: b.at, text: b.text, kind: b.kind }
+      const d = b.detail ?? {}
+      push(d.incidentId, entry)
+      push(d.resourceId, entry)
+      push(d.wardId, entry)
+      push(d.subjectId, entry)
+      push(d.fromIncidentId, entry)
+    }
+
+    for (const [, list] of index) {
+      list.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+      // Same line written by both the log and the narration is one line.
+      const seen = new Set<string>()
+      let n = 0
+      for (let i = 0; i < list.length; i++) {
+        if (seen.has(list[i].text)) continue
+        seen.add(list[i].text)
+        list[n++] = list[i]
+      }
+      list.length = Math.min(n, 6)
+    }
+    return index
+  }, [state.events, state.beats])
 }

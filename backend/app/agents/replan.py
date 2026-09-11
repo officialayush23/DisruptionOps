@@ -373,17 +373,30 @@ async def replan(
 
         # Needs coverage, so the console can show a shortfall rather than make
         # someone derive it from two other screens.
+        # One aggregate pass, and only rows whose number actually moved.
+        #
+        # This was a correlated `select count(*)` evaluated once per need row,
+        # inside the same transaction that had just rewritten assignments and
+        # resources, while the demo tick loop was moving the whole fleet. Every
+        # need row took a row lock whether or not its value changed, the tick's
+        # fleet update waited on those locks, and the statement timed out. The
+        # `is distinct from` guard is the important half: on a normal re-plan
+        # almost nothing changes, so almost nothing is locked.
         await conn.execute(
             """
+            with counts as (
+              select a.incident_id, count(*)::int n
+                from assignments a
+               where a.status = any($1::assignment_status[])
+               group by a.incident_id
+            )
             update incident_needs n
-               set met = (
-                     select count(*) from assignments a
-                      where a.incident_id = n.incident_id
-                        and a.status = any($1::assignment_status[])
-                   ),
-                   updated_at = $2
-             where exists (select 1 from incidents i
-                            where i.id = n.incident_id and i.status <> 'resolved')
+               set met = coalesce(c.n, 0), updated_at = $2
+              from incidents i
+              left join counts c on c.incident_id = i.id
+             where i.id = n.incident_id
+               and i.status <> 'resolved'
+               and n.met is distinct from coalesce(c.n, 0)
             """,
             list(ACTIVE), now,
         )

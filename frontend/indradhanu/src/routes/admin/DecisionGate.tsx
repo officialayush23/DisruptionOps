@@ -1,311 +1,210 @@
-import { useState } from "react"
-import { toast } from "sonner"
-import {
-  CheckCircle2,
-  FileText,
-  ShieldAlert,
-  ShieldCheck,
-  XCircle,
-} from "lucide-react"
-import type { Decision } from "@/api/types"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useMemo, useState } from "react"
+import { ClipboardCheck, Gavel, Loader2, ShieldAlert } from "lucide-react"
+import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Separator } from "@/components/ui/separator"
-import { Textarea } from "@/components/ui/textarea"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "@/components/ui/hover-card"
-import { useDecisions } from "@/hooks/useApi"
-import { api } from "@/api/client"
-import { timeOf } from "@/lib/format"
-import { wardName } from "@/api/mock/geo"
-import { POLICY } from "@/api/mock/policy"
-import { cn } from "@/lib/utils"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
-const STATUS_META: Record<
-  Decision["status"],
-  { label: string; className: string }
-> = {
-  auto_issued: {
-    label: "Auto-issued",
-    className: "bg-status-resolved text-white",
-  },
-  awaiting_approval: {
-    label: "Awaiting approval",
-    className: "bg-sev-4 text-sev-4-foreground",
-  },
-  approved: { label: "Approved", className: "bg-status-resolved text-white" },
-  overridden: {
-    label: "Overridden",
-    className: "bg-status-pending text-black",
-  },
-  rejected: { label: "Rejected", className: "bg-sev-5 text-sev-5-foreground" },
+/** What the system proposed, and what it was not allowed to do on its own.
+ *
+ *  The gate is the part of this that is not a technology argument. An action the
+ *  delegation matrix reserves to a named officer does not issue because the
+ *  model was confident about it; it waits, and the interface names the clause
+ *  that made it wait. Everything else issues automatically and is listed here
+ *  afterwards, which is the other half of the same promise: nothing happens that
+ *  an officer cannot see.
+ */
+
+const TABS = {
+  awaiting_approval: "Waiting on an officer",
+  auto_issued: "Issued automatically",
+  approved: "Approved",
+  rejected: "Rejected",
+} as const
+type Tab = keyof typeof TABS
+
+const TONE: Record<string, string> = {
+  awaiting_approval: "border-destructive/50",
+  auto_issued: "border-emerald-500/40",
+  approved: "border-sky-500/40",
+  rejected: "border-slate-500/40",
+  overridden: "border-amber-500/40",
 }
 
-export default function DecisionGate() {
-  const { data: decisions = [], refetch } = useDecisions()
-  const [filter, setFilter] = useState<"pending" | "all">("pending")
-  const [dialog, setDialog] = useState<{
-    d: Decision
-    action: "approve" | "reject" | "override"
-  } | null>(null)
-  const [note, setNote] = useState("")
+const time = (iso: string) =>
+  new Date(iso).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  })
 
-  const pending = decisions.filter((d) => d.status === "awaiting_approval")
-  const shown =
-    filter === "pending" ? (pending.length ? pending : decisions) : decisions
-
-  async function act() {
-    if (!dialog) return
-    const { d, action } = dialog
-    await api.actOnDecision(d.id, action, note || undefined)
-    setDialog(null)
-    setNote("")
-    await refetch()
-    toast.success(
-      action === "approve"
-        ? "Action approved and issued"
-        : action === "reject"
-          ? "Action rejected"
-          : "Action overridden",
-      { description: `${d.action} — ${d.target}` }
-    )
-  }
-
-  if (!decisions.length) {
-    return (
-      <Empty
-        icon={<ShieldCheck className="size-8 text-muted-foreground" />}
-        title="No decisions yet"
-        body="Once a hazard run produces candidate actions, each one is checked against the policy corpus and lands here."
-      />
-    )
-  }
-
-  return (
-    <div className="space-y-4 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Decision gate</h1>
-          <p className="text-sm text-muted-foreground">
-            Every action is checked against the retrieved clause before it can
-            issue.
-            {pending.length > 0 && (
-              <>
-                {" "}
-                <span className="font-medium text-sev-4">
-                  {pending.length} need{pending.length === 1 ? "s" : ""} your
-                  approval.
-                </span>
-              </>
-            )}
-          </p>
-        </div>
-        <Tabs
-          value={filter}
-          onValueChange={(v) => setFilter(v as typeof filter)}
-        >
-          <TabsList>
-            <TabsTrigger value="pending">Needs approval</TabsTrigger>
-            <TabsTrigger value="all">All ({decisions.length})</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      </div>
-
-      <div className="grid gap-3 xl:grid-cols-2">
-        {shown.map((d) => {
-          const meta = STATUS_META[d.status]
-          const needsAction = d.status === "awaiting_approval"
-          const clause = POLICY.find((p) => p.clause === d.authority.clause)
-          return (
-            <Card
-              key={d.id}
-              className={cn(needsAction && "border-2 border-sev-4")}
-            >
-              <CardHeader className="pb-3">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <CardTitle className="text-base">{d.action}</CardTitle>
-                    <p className="mt-0.5 text-sm text-muted-foreground">
-                      {d.target}
-                    </p>
-                  </div>
-                  <Badge className={cn("shrink-0", meta.className)}>
-                    {meta.label}
-                  </Badge>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-sm">{d.rationale}</p>
-
-                <Separator />
-
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-xs">
-                    {d.authority.withinDelegation ? (
-                      <ShieldCheck className="size-4 shrink-0 text-status-resolved" />
-                    ) : (
-                      <ShieldAlert className="size-4 shrink-0 text-sev-4" />
-                    )}
-                    <span className="font-medium">
-                      {d.authority.withinDelegation
-                        ? "Within delegated authority"
-                        : "Outside delegated authority"}
-                    </span>
-                  </div>
-                  <HoverCard>
-                    <HoverCardTrigger asChild>
-                      <button className="flex w-full items-start gap-2 rounded-md border p-2 text-left hover:bg-accent">
-                        <FileText className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 text-xs">
-                          <span className="font-medium">
-                            {d.authority.clause}
-                          </span>
-                          <span className="block truncate text-muted-foreground">
-                            {d.authority.source} · delegated to{" "}
-                            {d.authority.delegatedTo}
-                          </span>
-                        </span>
-                      </button>
-                    </HoverCardTrigger>
-                    <HoverCardContent className="w-96" align="start">
-                      <p className="text-xs font-semibold">
-                        {d.authority.clause}
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {clause?.text ?? "Clause text unavailable."}
-                      </p>
-                    </HoverCardContent>
-                  </HoverCard>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                  <span className="tabular">
-                    Confidence {Math.round(d.confidence * 100)}%
-                  </span>
-                  <span className="tabular">{timeOf(d.createdAt)} IST</span>
-                  {d.wardId && <span>{wardName(d.wardId)}</span>}
-                </div>
-
-                {d.decidedBy && (
-                  <div className="rounded-md bg-muted p-2 text-xs">
-                    <span className="font-medium">{meta.label}</span> by{" "}
-                    {d.decidedBy} at {timeOf(d.decidedAt)}
-                    {d.overrideNote && (
-                      <p className="mt-1 text-muted-foreground">
-                        “{d.overrideNote}”
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {needsAction && (
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <Button
-                      size="sm"
-                      onClick={() => setDialog({ d, action: "approve" })}
-                    >
-                      <CheckCircle2 className="size-3.5" />
-                      Approve and issue
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setDialog({ d, action: "override" })}
-                    >
-                      Override
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setDialog({ d, action: "reject" })}
-                    >
-                      <XCircle className="size-3.5" />
-                      Reject
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )
-        })}
-      </div>
-
-      <AlertDialog open={!!dialog} onOpenChange={(o) => !o && setDialog(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {dialog?.action === "approve" && "Approve and issue this action?"}
-              {dialog?.action === "override" && "Override the recommendation?"}
-              {dialog?.action === "reject" && "Reject this action?"}
-            </AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>
-                  <span className="font-medium text-foreground">
-                    {dialog?.d.action}
-                  </span>{" "}
-                  — {dialog?.d.target}
-                </p>
-                <p className="text-xs">
-                  This will be recorded against {dialog?.d.authority.clause} and
-                  attributed to you in the after-action record.
-                </p>
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <Textarea
-            placeholder={
-              dialog?.action === "approve"
-                ? "Optional note for the record"
-                : "Why are you departing from the recommendation?"
-            }
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            rows={3}
-          />
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={act}>
-              {dialog?.action === "approve" ? "Approve and issue" : "Confirm"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
-  )
-}
-
+/** The "nothing here yet" panel, shared with the alerts and after-action
+ *  screens, which import it from this file. A screen with no rows should say
+ *  what would put rows in it, because an empty table and a broken table look
+ *  identical otherwise. */
 export function Empty({
-  icon,
-  title,
-  body,
+  icon, title, body,
 }: {
-  icon: React.ReactNode
+  icon?: React.ReactNode
   title: string
   body: string
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-10 text-center">
+    <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-8 text-center">
       {icon}
-      <div>
-        <p className="font-medium">{title}</p>
-        <p className="max-w-sm text-sm text-muted-foreground">{body}</p>
+      <p className="text-sm font-medium">{title}</p>
+      <p className="text-muted-foreground max-w-md text-xs">{body}</p>
+    </div>
+  )
+}
+
+export default function DecisionGate() {
+  const { state, activity, busy, run } = useDemo()
+  const [tab, setTab] = useState<Tab>("awaiting_approval")
+
+  const counts = useMemo(() => {
+    const c = new Map<string, number>()
+    for (const d of state.decisions) c.set(d.status, (c.get(d.status) ?? 0) + 1)
+    return c
+  }, [state.decisions])
+
+  const rows = state.decisions.filter((d) => d.status === tab)
+  const waiting = counts.get("awaiting_approval") ?? 0
+
+  return (
+    <div className="space-y-3 p-4">
+      {waiting > 0 && (
+        <Card className="border-destructive/50">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ShieldAlert className="size-4" />
+              {waiting} action{waiting === 1 ? "" : "s"} will not issue without you
+            </CardTitle>
+            <CardDescription className="text-xs">
+              These are held by the delegation matrix, not by a confidence
+              threshold. Until somebody with the delegation acts, nothing moves.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      <div className="flex flex-wrap gap-1">
+        {(Object.keys(TABS) as Tab[]).map((k) => (
+          <Button
+            key={k}
+            size="sm"
+            variant={tab === k ? "secondary" : "ghost"}
+            className="h-8 text-xs"
+            onClick={() => setTab(k)}
+          >
+            {TABS[k]}
+            <span className="text-muted-foreground ml-1.5 tabular-nums">
+              {counts.get(k) ?? 0}
+            </span>
+          </Button>
+        ))}
       </div>
+
+      {rows.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ClipboardCheck className="size-4" /> Nothing in this state
+            </CardTitle>
+            <CardDescription className="text-xs">
+              {state.running
+                ? "Decisions appear as the policy agent proposes them."
+                : "Start live ingest on the command console; the policy agent proposes as incidents open."}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : (
+        <div className="grid gap-2 xl:grid-cols-2">
+          {rows.map((d) => (
+            <Card key={d.id} className={TONE[d.status] ?? ""}>
+              <CardHeader className="pb-2">
+                <div className="flex items-start justify-between gap-2">
+                  <CardTitle className="text-sm">{d.action}</CardTitle>
+                  <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+                    {time(d.createdAt)}
+                  </span>
+                </div>
+                <CardDescription className="text-xs">
+                  {d.target}
+                  {d.wardId ? ` · ${d.wardId}` : ""} · confidence{" "}
+                  {(d.confidence * 100).toFixed(0)}%
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <p className="text-xs italic">{d.rationale}</p>
+
+                {d.clause ? (
+                  <div className="bg-muted/40 rounded border p-2 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <Gavel className="size-3 shrink-0" />
+                      <Badge variant="outline">{d.clause}</Badge>
+                    </div>
+                    <div className="text-muted-foreground mt-1">
+                      {d.withinDelegation === false
+                        ? `Outside the standing delegation. Reserved to ${d.delegatedTo ?? "a named officer"}.`
+                        : `Within the standing delegation of ${d.delegatedTo ?? "the duty officer"}.`}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground text-xs">
+                    No clause attached; this fell inside the standing delegation.
+                  </p>
+                )}
+
+                {(activity.get(d.id)?.length ?? 0) > 0 && (
+                  <div className="space-y-0.5 border-t pt-2">
+                    {activity.get(d.id)!.map((a, i) => (
+                      <div key={i} className="text-muted-foreground text-xs">
+                        <span className="mr-2 tabular-nums">{time(a.at)}</span>
+                        {a.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(d.status === "awaiting_approval" || d.status === "auto_issued") && (
+                  <div className="flex gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs"
+                      disabled={busy !== null}
+                      onClick={() => run(`ok-${d.id}`, `/demo/decisions/${d.id}/approve`)}
+                    >
+                      {busy === `ok-${d.id}` && (
+                        <Loader2 className="size-3 animate-spin" />
+                      )}
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      disabled={busy !== null}
+                      onClick={() => run(`no-${d.id}`, `/demo/decisions/${d.id}/reject`)}
+                    >
+                      Reject
+                    </Button>
+                    {d.status === "auto_issued" && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs"
+                        disabled={busy !== null}
+                        onClick={() => run(`ov-${d.id}`, `/demo/decisions/${d.id}/override`)}
+                      >
+                        Override
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

@@ -21,6 +21,7 @@ from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.demo import runner
 from app.incidents import duplicates
+from app import taxonomy
 from app.schemas.domain import Camel, CategoryId
 from app.taxonomy import UnknownTaxonomyValue
 from app.world import clock as clocks
@@ -161,12 +162,18 @@ async def demo_state(
     _: CurrentPrincipal,
     city_id: str = Query(default="pune"),
     since_event: int = Query(default=0, ge=0),
+    geometry: bool = Query(
+        default=True,
+        description="Ward polygons. The console asks for them once and then "
+                    "stops, because they are reference data and re-sending "
+                    "forty of them every second was most of this payload.",
+    ),
 ) -> dict:
     """Everything the console draws, in one round trip."""
     st = runner.state
 
     snapshot, dupes = await asyncio.gather(
-        _snapshot(city_id, since_event), _duplicates_cached(city_id)
+        _snapshot(city_id, since_event, geometry), _duplicates_cached(city_id)
     )
     (wards, resources, incidents, needs, decisions,
      events, facilities, blocks) = snapshot
@@ -196,34 +203,39 @@ async def demo_state(
         "beats": [
             {"tick": b.tick, "at": b.at.isoformat(), "kind": b.kind,
              "text": b.text, "detail": b.detail}
-            for b in st.beats[-40:]
+            for b in st.beats[-120:]
         ],
     }
 
 
-_WARDS_SQL = """
+#: Ward names, numbers, populations and polygons. None of it changes during a
+#: run, and PostGIS was re-serialising forty polygons to GeoJSON on every
+#: one-second poll. Read once per process, per city.
+_WARD_GEOM_SQL = """
 select w.id, w.name, w.number, w.population,
        extensions.ST_X(w.centroid::extensions.geometry) lng,
        extensions.ST_Y(w.centroid::extensions.geometry) lat,
-       extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' -> 0 as boundary,
-       r.score, r.severity, r.population_at_risk par
+       extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' -> 0 as boundary
   from wards w
-  left join lateral (
-    select score, severity, population_at_risk from ward_risks
-     where ward_id = w.id order by created_at desc limit 1
-  ) r on true
  where w.city_id = $1
  order by w.number::int
+"""
+
+#: What actually moves: the latest risk row per ward.
+_WARD_RISK_SQL = """
+select distinct on (ward_id) ward_id, score, severity, population_at_risk par
+  from ward_risks
+ order by ward_id, created_at desc
 """
 
 _RESOURCES_SQL = """
 select r.id, r.kind, r.label, r.operator, r.agency_id, r.capacity,
        r.status::text status, r.status_note, r.unavailable_reason,
+       r.updated_at,
        extensions.ST_X(r.location::extensions.geometry) lng,
        extensions.ST_Y(r.location::extensions.geometry) lat,
-       (select array_agg(capability_id) from resource_kind_capabilities
-         where kind_id = r.kind) caps,
-       a.incident_id::text incident_id, a.eta_minutes, i.title incident_title
+       a.incident_id::text incident_id, a.eta_minutes, a.status::text a_status,
+       a.distance_km, i.title incident_title
   from resources r
   left join lateral (
     select * from assignments x
@@ -272,7 +284,7 @@ select id, kind, actor, subject_type, subject_id, ward_id, payload,
        occurred_at, causation_id
   from events
  where sim_run_id is null and id > $1
- order by id desc limit 40
+ order by id desc limit 150
 """
 
 _FACILITIES_SQL = """
@@ -292,45 +304,160 @@ select id::text, reason, reported_by, radius_m,
 """
 
 
-async def _snapshot(city_id: str, since_event: int) -> tuple[Any, ...]:
-    """Eight independent reads, issued together.
+#: Ward geometry, per city, for the life of the process. Wards do not move.
+_ward_geom: dict[str, list[dict]] = {}
+
+
+async def _ward_geometry(city_id: str) -> list[dict]:
+    cached = _ward_geom.get(city_id)
+    if cached is not None:
+        return cached
+    rows = await db.fetch(_WARD_GEOM_SQL, city_id)
+    built = [
+        {"id": r["id"], "name": r["name"], "number": r["number"],
+         "centroid": [float(r["lng"]), float(r["lat"])],
+         "boundary": r["boundary"], "population": r["population"]}
+        for r in rows
+    ]
+    _ward_geom[city_id] = built
+    return built
+
+
+#: Facilities and road blocks change when a field crew presses a button, which
+#: is often but not sixty times a minute.
+_SLOW_TTL = 2.0
+_slow_cache: dict[str, tuple[float, Any]] = {}
+
+
+async def _slow(key: str, sql: str, *args: Any) -> Any:
+    now = time.monotonic()
+    hit = _slow_cache.get(key)
+    if hit and now - hit[0] < _SLOW_TTL:
+        return hit[1]
+    rows = await db.fetch(sql, *args)
+    _slow_cache[key] = (now, rows)
+    return rows
+
+
+def invalidate_slow() -> None:
+    """Called when a field status write makes the cached reads wrong."""
+    _slow_cache.clear()
+
+
+def _narrate(kind: str, actor: str, payload: dict) -> str:
+    """One readable line per event.
+
+    The audit log is the source of truth for what the agents did, but `payload`
+    as raw JSON is unreadable on a hover card. This renders the handful of kinds
+    that actually appear during a run and falls back to the kind name for the
+    rest, rather than inventing prose for something it does not understand.
+    """
+    p = payload if isinstance(payload, dict) else {}
+    who = actor.split(":", 1)[-1].replace("_", " ") if actor else "the system"
+    match kind:
+        case "incident.opened":
+            return f"Incident opened at {float(p.get('trust', 0)):.0%} confidence."
+        case "report.received":
+            return f"Report accepted, trust {float(p.get('trust', 0)):.0%}."
+        case "report.linked":
+            return (f"Report merged into this incident at "
+                    f"{float(p.get('score', 0)):.0%} match.")
+        case "report.rejected":
+            return f"Report held back: {p.get('reason', 'below the trust floor')}."
+        case "incident.resolved":
+            return "Closed by the crew on scene."
+        case "incident.severity_changed":
+            return f"Severity moved to {p.get('to', '?')}."
+        case "assignment.created":
+            return (f"{who} tasked a unit here, "
+                    f"{p.get('eta_minutes', '?')} min out, for "
+                    f"{str(p.get('capability', '')).replace('_', ' ')}.")
+        case "assignment.changed":
+            return p.get("reason") or f"{who} re-tasked a unit."
+        case "assignment.cancelled":
+            return f"{who} stood a unit down."
+        case "plan.generated":
+            return (f"{who} re-planned: {p.get('demands', 0)} need(s), "
+                    f"{p.get('units', 0)} unit(s), "
+                    f"{float(p.get('coverage', 0)):.0%} covered "
+                    f"({p.get('engine', '?')}).")
+        case "demand.uncovered":
+            return p.get("reason") or "A need could not be covered."
+        case "decision.proposed":
+            return f"{who} proposed {p.get('action', 'an action')}."
+        case "decision.gated":
+            return f"Held for an officer: {p.get('clause', 'delegation')}."
+        case "decision.acted":
+            return f"Officer {p.get('status', 'acted on')} {p.get('action', 'it')}."
+        case "resource.status_changed":
+            return (f"Status set to {str(p.get('to', '?')).replace('_', ' ')}"
+                    + (f": {p['note']}" if p.get("note") else "."))
+        case "risk.updated":
+            return (f"Risk rescored to severity {p.get('severity', '?')} "
+                    f"({float(p.get('score', 0)):.0%}).")
+        case "road.blocked":
+            return f"Road blocked: {p.get('reason', 'reported impassable')}."
+        case "alert.issued":
+            return f"Alert issued to {p.get('audience', 'the ward')}."
+        case "task.created":
+            return f"Field task raised for {p.get('operator', 'a crew')}."
+        case _:
+            return kind.replace(".", " ").replace("_", " ")
+
+
+async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any, ...]:
+    """The live reads, issued together; the static ones served from memory.
 
     They were sequential, which on a link to a database in another region meant
     a round trip each, on a poll that runs every second. The demo loop was
     competing with it for the same ten connections, ordinary requests started
     queueing behind the two of them, and the browser reported those timeouts as
-    CORS failures. Concurrency is the whole fix.
+    CORS failures.
+
+    Concurrency was half the fix. The other half is not reading things that
+    cannot have changed: ward polygons, ward names and the capability list for
+    each kind of vehicle are reference data, and they were the bulk of both the
+    query time and the payload.
     """
+    geom = await _ward_geometry(city_id)
+
     (
-        ward_rows, resource_rows, incident_rows, need_rows,
+        risk_rows, resource_rows, incident_rows, need_rows,
         decision_rows, event_rows, facility_rows, block_rows,
     ) = await asyncio.gather(
-        db.fetch(_WARDS_SQL, city_id),
+        db.fetch(_WARD_RISK_SQL),
         db.fetch(_RESOURCES_SQL, city_id),
         db.fetch(_INCIDENTS_SQL, city_id),
         db.fetch(_NEEDS_SQL),
         db.fetch(_DECISIONS_SQL),
         db.fetch(_EVENTS_SQL, since_event),
-        db.fetch(_FACILITIES_SQL, city_id),
-        db.fetch(_BLOCKS_SQL, city_id),
+        _slow(f"fac:{city_id}", _FACILITIES_SQL, city_id),
+        _slow(f"blk:{city_id}", _BLOCKS_SQL, city_id),
     )
 
-    wards = [
-        {"id": r["id"], "name": r["name"], "number": r["number"],
-         "centroid": [float(r["lng"]), float(r["lat"])],
-         "boundary": r["boundary"], "population": r["population"],
-         "score": float(r["score"]) if r["score"] is not None else None,
-         "severity": r["severity"], "populationAtRisk": r["par"]}
-        for r in ward_rows
-    ]
+    risk = {r["ward_id"]: r for r in risk_rows}
+    wards = []
+    for w in geom:
+        r = risk.get(w["id"])
+        wards.append({
+            **{k: v for k, v in w.items() if geometry or k != "boundary"},
+            "score": float(r["score"]) if r and r["score"] is not None else None,
+            "severity": r["severity"] if r else None,
+            "populationAtRisk": r["par"] if r else None,
+        })
+
+    kinds = taxonomy.cache.resource_kinds
     resources = [
         {"id": r["id"], "kind": r["kind"], "label": r["label"],
          "operator": r["operator"], "agencyId": r["agency_id"],
          "capacity": r["capacity"], "status": r["status"],
          "statusNote": r["status_note"], "unavailableReason": r["unavailable_reason"],
          "location": [float(r["lng"]), float(r["lat"])],
-         "capabilities": list(r["caps"] or []),
+         "capabilities": list(kinds[r["kind"]].capabilities) if r["kind"] in kinds else [],
          "assignedTo": r["incident_title"], "incidentId": r["incident_id"],
+         "assignmentStatus": r["a_status"],
+         "distanceKm": float(r["distance_km"]) if r["distance_km"] is not None else None,
+         "updatedAt": r["updated_at"].isoformat() if r["updated_at"] else None,
          "etaMinutes": r["eta_minutes"]}
         for r in resource_rows
     ]
@@ -361,6 +488,7 @@ async def _snapshot(city_id: str, since_event: int) -> tuple[Any, ...]:
         {"id": r["id"], "kind": r["kind"], "actor": r["actor"],
          "subjectType": r["subject_type"], "subjectId": r["subject_id"],
          "wardId": r["ward_id"], "payload": r["payload"],
+         "text": _narrate(r["kind"], r["actor"], r["payload"] or {}),
          "occurredAt": r["occurred_at"].isoformat(), "causationId": r["causation_id"]}
         for r in event_rows
     ]

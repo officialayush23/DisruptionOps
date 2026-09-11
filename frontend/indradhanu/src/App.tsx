@@ -1,6 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom"
 import { AdminShell } from "@/components/layout/AdminShell"
-import { useScenarioNavigation } from "@/scenario/useScenarioNavigation"
 import { RequireRole } from "@/auth/RequireRole"
 
 import Login from "@/routes/auth/Login"
@@ -24,8 +23,6 @@ import AfterAction from "@/routes/admin/AfterAction"
  *  on the operations console was simply the wrong screen for it.
  */
 export function App() {
-  useScenarioNavigation()
-
   return (
     <Routes>
       <Route path="/login" element={<Login />} />

@@ -122,6 +122,12 @@ state = DemoState()
 _task: asyncio.Task | None = None
 _rng = random.Random(state.seed)
 
+#: The tick loop and a re-plan both rewrite `assignments` and `resources`. When
+#: an officer pressed "Re-plan now" mid-tick the two transactions each held rows
+#: the other wanted and one of them sat on a lock until the statement timed out.
+#: They are not concurrent by nature, so they are not run concurrently.
+_world = asyncio.Lock()
+
 
 # ------------------------------------------------------------------ control ---
 async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoState:
@@ -178,6 +184,11 @@ async def _loop() -> None:
 
 # --------------------------------------------------------------------- tick ---
 async def _tick() -> None:
+    async with _world:
+        await _tick_locked()
+
+
+async def _tick_locked() -> None:
     state.tick += 1
     if state.sim_now:
         from datetime import timedelta
@@ -223,6 +234,7 @@ async def _inject_report() -> None:
             "incident",
             f"New incident in {ward['name']}: {note[:48]}",
             trust=result.trust.score, incidentId=result.incident_id,
+            wardId=ward["id"], note=note,
         )
         state.dirty = True
     elif result.linked:
@@ -231,6 +243,7 @@ async def _inject_report() -> None:
             f"Report merged into an existing incident at "
             f"{result.link_score:.0%} match, so it will not be dispatched twice.",
             trust=result.trust.score, incidentId=result.incident_id,
+            wardId=ward["id"], note=note,
         )
     else:
         state.beat(
@@ -289,16 +302,21 @@ async def _do_replan(trigger: str) -> None:
     if diff.changed:
         state.beat("plan", diff.headline)
         for c in diff.reassigned:
-            state.beat("reassign", f"{c.resource_label}: {c.reason}")
+            state.beat("reassign", f"{c.resource_label}: {c.reason}",
+                       resourceId=c.resource_id, incidentId=c.incident_id,
+                       fromIncidentId=c.from_incident_id)
         for c in diff.assigned:
             state.beat(
                 "dispatch",
                 f"{c.resource_label} sent to {c.incident_title}, {c.eta_minutes} min out.",
+                resourceId=c.resource_id, incidentId=c.incident_id,
             )
         for c in diff.released:
-            state.beat("release", f"{c.resource_label} stood down. {c.reason}")
+            state.beat("release", f"{c.resource_label} stood down. {c.reason}",
+                       resourceId=c.resource_id, incidentId=c.from_incident_id)
     for u in diff.uncovered[:2]:
-        state.beat("shortfall", f"{u.get('ward_id', '')}: {u['reason']}")
+        state.beat("shortfall", f"{u.get('ward_id', '')}: {u['reason']}",
+                   incidentId=u.get("incident_id"), wardId=u.get("ward_id"))
 
 
 async def _move_units() -> None:
@@ -318,7 +336,7 @@ async def _move_units() -> None:
     arrived = await db.fetch(
         """
         with near as (
-          select a.id aid, r.id rid
+          select a.id aid, r.id rid, r.label, i.title
             from assignments a
             join resources r on r.id = a.resource_id
             join incidents i on i.id = a.incident_id
@@ -329,16 +347,23 @@ async def _move_units() -> None:
         upd_a as (
           update assignments set status = 'on_site'
            where id in (select aid from near) returning resource_id
+        ),
+        upd_r as (
+          update resources set status = 'on_site', updated_at = now()
+           where id in (select rid from near)
+          returning id
         )
-        update resources set status = 'on_site', updated_at = now()
-         where id in (select rid from near)
-        returning id
+        select rid, label, title from near
         """,
         ARRIVAL_METRES,
     )
     for r in arrived:
-        state.working.setdefault(r["id"], 0)
-        state.beat("arrive", f"{r['id']} is on scene.")
+        state.working.setdefault(r["rid"], 0)
+        state.beat(
+            "arrive",
+            f"{r['label']} is on scene at {r['title']}.",
+            resourceId=r["rid"],
+        )
 
     # 2. Everyone else moves a fraction of the way there.
     await db.execute(
@@ -395,9 +420,10 @@ async def _work_and_resolve() -> None:
         """
         with finished as (
           select distinct on (a.resource_id)
-                 a.id aid, a.resource_id rid, a.incident_id iid, i.title
+                 a.id aid, a.resource_id rid, a.incident_id iid, i.title, r.label
             from assignments a
             join incidents i on i.id = a.incident_id
+            join resources r on r.id = a.resource_id
            where a.resource_id = any($1) and a.status = 'on_site'
            order by a.resource_id, a.created_at desc
         ),
@@ -420,7 +446,7 @@ async def _work_and_resolve() -> None:
              )
           returning id::text
         )
-        select f.rid, f.iid::text iid, f.title,
+        select f.rid, f.label, f.iid::text iid, f.title,
                (f.iid::text in (select id from resolve_i)) as resolved
           from finished f
         """,
@@ -433,7 +459,11 @@ async def _work_and_resolve() -> None:
                 subject_type="incident", subject_id=r["iid"], city_id=state.city_id,
                 payload={"resource_id": r["rid"]},
             )
-            state.beat("resolved", f"{r['title']} resolved. {r['rid']} is free again.")
+            state.beat(
+                "resolved",
+                f"{r['title']} resolved. {r['label']} is free again.",
+                resourceId=r["rid"], incidentId=r["iid"],
+            )
             state.dirty = True
 
 
@@ -506,4 +536,5 @@ async def citizen_report(category: str, note: str) -> intake.IntakeResult:
 
 
 async def force_replan() -> None:
-    await _do_replan("manual")
+    async with _world:
+        await _do_replan("manual")

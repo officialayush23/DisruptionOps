@@ -1,319 +1,190 @@
 import { useMemo, useState } from "react"
-import { AlertTriangle, Building2, Droplets, Users } from "lucide-react"
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Gauge, TriangleAlert } from "lucide-react"
+import { useDemo } from "@/routes/demo/DemoProvider"
+import { LiveMap } from "@/components/map/LiveMap"
 import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
-import { MapView } from "@/components/map/MapView"
-import {
-  ScoreBar,
-  SeverityBadge,
-  Sparkline,
-  StatTile,
-} from "@/components/common/indicators"
-import {
-  useLifelines,
-  useShelters,
-  useWardRisks,
-  useWards,
-} from "@/hooks/useApi"
-import { useScenario } from "@/scenario/store"
-import { cn } from "@/lib/utils"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 
-export default function RiskBoard() {
-  const { data: wards = [] } = useWards()
-  const { data: risks = [] } = useWardRisks("flood")
-  const { data: shelters = [] } = useShelters()
-  const { data: lifelines = [] } = useLifelines()
-  const focusWardId = useScenario((s) => s.focusWardId)
-  const [selected, setSelected] = useState<string | null>(null)
+/** Which wards are in trouble, and what is actually happening in them.
+ *
+ *  This read a fixture until now, which is why it sat empty while reports were
+ *  visibly arriving on the console next door. It is the same snapshot the map
+ *  draws from: ward risk is the agent's score, the counts beside it are the
+ *  incidents and units currently in that ward's polygon, and the two cannot
+ *  disagree because they are one object.
+ */
 
-  const activeWardId = selected ?? focusWardId ?? risks[0]?.wardId ?? null
-  const ward = wards.find((w) => w.id === activeWardId)
-  const risk = risks.find((r) => r.wardId === activeWardId)
-
-  const stats = useMemo(() => {
-    const high = risks.filter((r) => r.severity >= 4)
-    const atRisk = high.reduce((a, r) => a + r.populationAtRisk, 0)
-    const lifelinesAtRisk = lifelines.filter((l) =>
-      high.some((h) => h.wardId === l.wardId)
-    )
-    const lead = high.length
-      ? Math.min(...high.map((r) => r.leadTimeHours))
-      : null
-    return { high: high.length, atRisk, lifelinesAtRisk, lead }
-  }, [risks, lifelines])
-
-  if (!risks.length) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-10 text-center">
-        <Droplets className="size-8 text-muted-foreground" />
-        <div>
-          <p className="font-medium">No active hazard run</p>
-          <p className="max-w-sm text-sm text-muted-foreground">
-            Feeds are live and being polled. Start the guided demo above to
-            replay the Pune flood of 25 July 2024 through the pipeline.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="grid grid-cols-2 gap-3 p-4 lg:grid-cols-4">
-        <StatTile
-          label="Wards at severity 4+"
-          value={String(stats.high)}
-          sub={`of ${risks.length} scored`}
-        />
-        <StatTile
-          label="Residents in footprint"
-          value={stats.atRisk.toLocaleString("en-IN")}
-          sub="population-weighted exposure"
-        />
-        <StatTile
-          label="Lifelines exposed"
-          value={String(stats.lifelinesAtRisk.length)}
-          sub={
-            stats.lifelinesAtRisk
-              .slice(0, 3)
-              .map((l) => l.kind.replace("_", " "))
-              .join(", ") || "none"
-          }
-        />
-        <StatTile
-          label="Shortest lead time"
-          value={stats.lead != null ? `${stats.lead} h` : "—"}
-          sub="until expected impact"
-        />
-      </div>
-
-      <ResizablePanelGroup
-        orientation="horizontal"
-        className="min-h-0 flex-1 border-t"
-      >
-        <ResizablePanel defaultSize={54} minSize={30} data-tour="map">
-          <MapView
-            className="h-full w-full"
-            expandable
-            wards={wards}
-            risks={risks}
-            shelters={shelters}
-            selectedWardId={activeWardId}
-            focusWardId={focusWardId}
-            onSelectWard={setSelected}
-          />
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={46} minSize={28}>
-          <ResizablePanelGroup orientation="vertical">
-            <ResizablePanel defaultSize={55} minSize={25} data-tour="wardtable">
-              <ScrollArea className="h-full">
-                <Table>
-                  <TableHeader className="sticky top-0 z-10 bg-card">
-                    <TableRow>
-                      <TableHead className="w-[46px]">#</TableHead>
-                      <TableHead>Ward</TableHead>
-                      <TableHead>Risk</TableHead>
-                      <TableHead>Severity</TableHead>
-                      <TableHead className="text-right">At risk</TableHead>
-                      <TableHead className="text-right">Lead</TableHead>
-                      <TableHead className="w-[70px]">12 h</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {risks.map((r) => {
-                      const w = wards.find((x) => x.id === r.wardId)
-                      return (
-                        <TableRow
-                          key={r.wardId}
-                          onClick={() => setSelected(r.wardId)}
-                          className={cn(
-                            "cursor-pointer",
-                            r.wardId === activeWardId && "bg-accent"
-                          )}
-                        >
-                          <TableCell className="tabular text-muted-foreground">
-                            {w?.number}
-                          </TableCell>
-                          <TableCell className="font-medium">
-                            {w?.name}
-                          </TableCell>
-                          <TableCell>
-                            <ScoreBar score={r.score} severity={r.severity} />
-                          </TableCell>
-                          <TableCell>
-                            <SeverityBadge
-                              severity={r.severity}
-                              showLabel={false}
-                            />
-                          </TableCell>
-                          <TableCell className="tabular text-right">
-                            {r.populationAtRisk.toLocaleString("en-IN")}
-                          </TableCell>
-                          <TableCell className="tabular text-right text-muted-foreground">
-                            {r.leadTimeHours} h
-                          </TableCell>
-                          <TableCell>
-                            <Sparkline
-                              values={r.projection}
-                              severity={r.severity}
-                            />
-                          </TableCell>
-                        </TableRow>
-                      )
-                    })}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-            <ResizablePanel defaultSize={45} minSize={20}>
-              <ScrollArea className="h-full">
-                {ward && risk ? (
-                  <div className="space-y-4 p-4">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div>
-                        <h2 className="text-lg font-semibold">
-                          Ward {ward.number} — {ward.name}
-                        </h2>
-                        <p className="text-sm text-muted-foreground">
-                          {ward.population.toLocaleString("en-IN")} residents ·{" "}
-                          {ward.areaSqKm} km² · mean elevation {ward.elevationM}{" "}
-                          m
-                        </p>
-                      </div>
-                      <SeverityBadge severity={risk.severity} />
-                    </div>
-
-                    <Card>
-                      <CardHeader className="pb-3">
-                        <CardTitle className="flex items-center gap-2 text-sm">
-                          <AlertTriangle className="size-4" />
-                          Why is this ward being warned?
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        <div className="flex items-baseline gap-2">
-                          <span className="tabular text-3xl font-semibold">
-                            {Math.round(risk.score * 100)}
-                          </span>
-                          <span className="text-sm text-muted-foreground">
-                            / 100 · model confidence{" "}
-                            {Math.round(risk.confidence * 100)}%
-                          </span>
-                        </div>
-                        <Separator />
-                        <div className="space-y-2.5">
-                          {risk.drivers.map((d) => (
-                            <div key={d.label} className="space-y-1">
-                              <div className="flex items-center justify-between gap-3 text-sm">
-                                <span className="font-medium">{d.label}</span>
-                                <span className="tabular text-muted-foreground">
-                                  {Math.round(d.contribution * 100)}%
-                                </span>
-                              </div>
-                              <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-                                <div
-                                  className="h-full rounded-full bg-foreground"
-                                  style={{ width: `${d.contribution * 100}%` }}
-                                />
-                              </div>
-                              <p className="text-xs text-muted-foreground">
-                                {d.detail}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Card>
-                        <CardHeader className="pb-2">
-                          <CardTitle className="flex items-center gap-2 text-sm">
-                            <Users className="size-4" />
-                            Exposure
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-1 text-sm">
-                          <Row
-                            k="Residents at risk"
-                            v={risk.populationAtRisk.toLocaleString("en-IN")}
-                          />
-                          <Row
-                            k="Over 60"
-                            v={`${Math.round(ward.elderlyShare * 100)}%`}
-                          />
-                          <Row k="Lead time" v={`${risk.leadTimeHours} h`} />
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardHeader className="pb-2">
-                          <CardTitle className="flex items-center gap-2 text-sm">
-                            <Building2 className="size-4" />
-                            Lifelines in ward
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent className="space-y-1.5">
-                          {lifelines
-                            .filter((l) => l.wardId === ward.id)
-                            .map((l) => (
-                              <div
-                                key={l.id}
-                                className="flex items-center gap-2 text-sm"
-                              >
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] uppercase"
-                                >
-                                  {l.kind.replace("_", " ")}
-                                </Badge>
-                                <span className="truncate">{l.name}</span>
-                              </div>
-                            ))}
-                          {!lifelines.some((l) => l.wardId === ward.id) && (
-                            <p className="text-sm text-muted-foreground">
-                              No mapped lifelines in this ward.
-                            </p>
-                          )}
-                        </CardContent>
-                      </Card>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="p-4 text-sm text-muted-foreground">
-                    Select a ward to see the reasoning behind its score.
-                  </p>
-                )}
-              </ScrollArea>
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </ResizablePanel>
-      </ResizablePanelGroup>
-    </div>
-  )
+const SEV_TONE: Record<number, string> = {
+  5: "bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30",
+  4: "bg-orange-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30",
+  3: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30",
+  2: "bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30",
+  1: "bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/30",
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+export default function RiskBoard() {
+  const { state, activity, setSelected } = useDemo()
+  const [query, setQuery] = useState("")
+
+  const rows = useMemo(() => {
+    const incidentsBy = new Map<string, number>()
+    const severestBy = new Map<string, number>()
+    for (const i of state.incidents) {
+      incidentsBy.set(i.wardId, (incidentsBy.get(i.wardId) ?? 0) + 1)
+      severestBy.set(i.wardId, Math.max(severestBy.get(i.wardId) ?? 0, i.severity))
+    }
+    const unmetBy = new Map<string, number>()
+    const byIncident = new Map(state.incidents.map((i) => [i.id, i] as const))
+    for (const n of state.needs) {
+      if (n.met >= n.required) continue
+      const inc = byIncident.get(n.incidentId)
+      if (!inc) continue
+      unmetBy.set(inc.wardId, (unmetBy.get(inc.wardId) ?? 0) + (n.required - n.met))
+    }
+
+    const q = query.trim().toLowerCase()
+    return state.wards
+      .filter((w) => !q || w.name.toLowerCase().includes(q) || String(w.number).includes(q))
+      .map((w) => ({
+        ...w,
+        openIncidents: incidentsBy.get(w.id) ?? 0,
+        worstIncident: severestBy.get(w.id) ?? 0,
+        unmet: unmetBy.get(w.id) ?? 0,
+      }))
+      .sort(
+        (a, b) =>
+          (b.severity ?? 0) - (a.severity ?? 0) ||
+          (b.score ?? 0) - (a.score ?? 0) ||
+          b.openIncidents - a.openIncidents
+      )
+  }, [state.wards, state.incidents, state.needs, query])
+
+  const scored = rows.filter((r) => r.severity !== null).length
+  const atRisk = rows.reduce((n, r) => n + (r.populationAtRisk ?? 0), 0)
+
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-muted-foreground">{k}</span>
-      <span className="tabular font-medium">{v}</span>
+    <div className="space-y-3 p-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Wards scored</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">
+              {scored}
+              <span className="text-muted-foreground text-base font-normal">
+                {" "}/ {state.wards.length}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground text-xs">
+            A ward is scored when the hazard agent has run against a forecast for
+            it. Unscored is not the same as safe, and is shown as unscored.
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Estimated people exposed</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">
+              {atRisk.toLocaleString()}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground text-xs">
+            Summed from each ward's latest risk row, not from its population.
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Wards with an open incident</CardDescription>
+            <CardTitle className="text-2xl tabular-nums">
+              {rows.filter((r) => r.openIncidents > 0).length}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted-foreground text-xs">
+            {state.running ? "Reports are arriving now." : "Ingest is stopped."}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-[420px_1fr]">
+        <Card className="min-w-0">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Gauge className="size-4" /> Wards by risk
+            </CardTitle>
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter by name or number"
+              className="mt-2 h-8 text-xs"
+            />
+          </CardHeader>
+          <CardContent className="max-h-[560px] space-y-1 overflow-y-auto">
+            {rows.map((w) => (
+              <div
+                key={w.id}
+                className="hover:bg-muted/50 rounded-md border p-2 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{w.name}</div>
+                    <div className="text-muted-foreground text-xs">
+                      Ward {w.number} · {w.population?.toLocaleString()} people
+                    </div>
+                  </div>
+                  {w.severity !== null ? (
+                    <Badge
+                      variant="outline"
+                      className={`shrink-0 ${SEV_TONE[w.severity] ?? ""}`}
+                    >
+                      sev {w.severity} · {((w.score ?? 0) * 100).toFixed(0)}%
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="shrink-0 opacity-60">
+                      not scored
+                    </Badge>
+                  )}
+                </div>
+                <div className="text-muted-foreground mt-1.5 flex flex-wrap gap-3 text-xs">
+                  {w.populationAtRisk ? (
+                    <span>{w.populationAtRisk.toLocaleString()} exposed</span>
+                  ) : null}
+                  {w.openIncidents > 0 && (
+                    <span className="text-foreground">
+                      {w.openIncidents} open incident{w.openIncidents === 1 ? "" : "s"}
+                    </span>
+                  )}
+                  {w.unmet > 0 && (
+                    <span className="text-destructive inline-flex items-center gap-1">
+                      <TriangleAlert className="size-3" />
+                      {w.unmet} unit(s) short
+                    </span>
+                  )}
+                </div>
+                {activity.get(w.id)?.slice(0, 2).map((a, i) => (
+                  <div key={i} className="text-muted-foreground mt-1 truncate text-xs italic">
+                    {a.text}
+                  </div>
+                ))}
+              </div>
+            ))}
+            {rows.length === 0 && (
+              <p className="text-muted-foreground p-4 text-center text-xs">
+                No wards match that filter.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <LiveMap
+          className="h-[620px] w-full rounded-lg border"
+          wards={state.wards}
+          incidents={state.incidents}
+          needs={state.needs}
+          blocks={state.roadBlocks}
+          activity={activity}
+          onPickIncident={setSelected}
+        />
+      </div>
     </div>
   )
 }

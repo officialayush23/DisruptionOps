@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import {
   AlertTriangle, Copy, Gavel, Loader2, Play, Square, Zap,
 } from "lucide-react"
-import { useDemo } from "./useDemo"
+import { useDemo } from "./DemoProvider"
 import { LiveMap } from "@/components/map/LiveMap"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -16,39 +16,27 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
  *  between polls. Nothing is scripted in the browser.
  */
 
-
 const BEAT_STYLE: Record<string, string> = {
   incident: "text-orange-600 dark:text-orange-400",
   merge: "text-sky-600 dark:text-sky-400",
   held: "text-amber-600 dark:text-amber-400",
   attack: "text-red-600 dark:text-red-400",
   dispatch: "text-emerald-600 dark:text-emerald-400",
+  arrive: "text-emerald-600 dark:text-emerald-400",
   reassign: "text-violet-600 dark:text-violet-400",
   release: "text-muted-foreground",
   resolved: "text-emerald-600 dark:text-emerald-400",
   shortfall: "text-red-600 dark:text-red-400",
   decision: "text-blue-600 dark:text-blue-400",
+  field: "text-cyan-600 dark:text-cyan-400",
+  plan: "text-blue-600 dark:text-blue-400",
   you: "text-violet-600 dark:text-violet-400 font-medium",
   error: "text-red-600 dark:text-red-400",
 }
 
 export default function DemoConsole() {
-  const { state, error, refresh, act } = useDemo(1000)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [selected, setSelected] = useState<string | null>(null)
+  const { state, error, activity, selected, setSelected, busy, run } = useDemo()
   const feedRef = useRef<HTMLDivElement>(null)
-
-  const run = useCallback(
-    async (key: string, path: string, body?: unknown) => {
-      setBusy(key)
-      try {
-        return await act(path, body)
-      } finally {
-        setBusy(null)
-      }
-    },
-    [act]
-  )
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: 0, behavior: "smooth" })
@@ -61,6 +49,7 @@ export default function DemoConsole() {
   const autoIssued = state.decisions.filter((d) => d.status === "auto_issued").length
   const selectedIncident = state.incidents.find((i) => i.id === selected)
   const selectedNeeds = state.needs.filter((n) => n.incidentId === selected)
+  const selectedUnits = state.resources.filter((r) => r.incidentId === selected)
 
   const committed = state.resources.filter((r) => r.status !== "available").length
   const merged = state.incidents.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
@@ -72,7 +61,7 @@ export default function DemoConsole() {
           <Button onClick={() => run("start", "/demo/start", { cityId: "pune", reportEveryTicks: 4 })}
                   disabled={busy !== null}>
             {busy === "start" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-            Start demo
+            Start live ingest
           </Button>
         ) : (
           <Button variant="destructive" onClick={() => run("stop", "/demo/stop")} disabled={busy !== null}>
@@ -80,10 +69,11 @@ export default function DemoConsole() {
           </Button>
         )}
         <Button variant="outline" onClick={() => run("replan", "/demo/replan")} disabled={busy !== null}>
-          <Zap className="size-4" /> Re-plan now
+          {busy === "replan" ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+          Re-plan now
         </Button>
 
-        <div className="text-muted-foreground ml-2 flex items-center gap-3 text-xs">
+        <div className="text-muted-foreground ml-2 flex flex-wrap items-center gap-3 text-xs">
           <span>tick <span className="tabular-nums font-medium">{state.tick}</span></span>
           <span>{state.incidents.length} open incidents</span>
           <span>{committed}/{state.resources.length} units committed</span>
@@ -111,14 +101,17 @@ export default function DemoConsole() {
             wards={state.wards}
             incidents={state.incidents}
             resources={state.resources}
-            facilities={state.facilities ?? []}
-            blocks={state.roadBlocks ?? []}
+            facilities={state.facilities}
+            blocks={state.roadBlocks}
+            needs={state.needs}
+            activity={activity}
             onPickIncident={setSelected}
           />
           <p className="text-muted-foreground text-xs">
             Dashed amber lines are units en route to what they were tasked with.
             A number inside an incident is how many reports collapsed into it.
-            Hover anything for detail.
+            Hover anything for what happened, its current state and what the
+            agents did about it.
           </p>
 
           {selectedIncident && (
@@ -146,6 +139,32 @@ export default function DemoConsole() {
                 {selectedNeeds.length === 0 && (
                   <p className="text-muted-foreground text-xs">No capability needs recorded.</p>
                 )}
+                {selectedUnits.length > 0 && (
+                  <div className="mt-2 space-y-1 border-t pt-2">
+                    {selectedUnits.map((r) => (
+                      <div key={r.id} className="text-xs">
+                        <Badge variant="outline" className="mr-1">{r.label}</Badge>
+                        <span className="text-muted-foreground">
+                          {r.status.replace(/_/g, " ")}
+                          {r.etaMinutes ? `, ${r.etaMinutes} min out` : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(activity.get(selectedIncident.id)?.length ?? 0) > 0 && (
+                  <div className="mt-2 space-y-1 border-t pt-2">
+                    {activity.get(selectedIncident.id)!.map((a, i) => (
+                      <div key={i} className="text-muted-foreground text-xs">{a.text}</div>
+                    ))}
+                  </div>
+                )}
+                <div className="pt-1">
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs"
+                          onClick={() => setSelected(null)}>
+                    Close
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -241,7 +260,7 @@ export default function DemoConsole() {
                 ))}
                 {state.beats.length === 0 && (
                   <p className="text-muted-foreground text-xs">
-                    Press Start. Reports arrive a few seconds apart.
+                    Press start. Reports arrive a few seconds apart.
                   </p>
                 )}
               </div>

@@ -26,17 +26,10 @@ import {
 } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 import { PersonaSwitcher } from "./PersonaSwitcher"
-import { StatusStrip } from "./StatusStrip"
-import { ScenarioBar } from "@/scenario/ScenarioBar"
-import { useDecisions } from "@/hooks/useApi"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { HelpCircle } from "lucide-react"
-import { TourGuide } from "@/components/tour/TourGuide"
-import { useTour } from "@/components/tour/tourStore"
+import { DemoProvider, useDemo } from "@/routes/demo/DemoProvider"
 
 const NAV = [
-  // Live is first because it is the only screen reading the real API.
   { to: "/admin/console", label: "Command console", icon: Radar },
   { to: "/admin/risk", label: "Risk board", icon: Gauge },
   { to: "/admin/incidents", label: "Incident queue", icon: Siren },
@@ -48,12 +41,88 @@ const NAV = [
   { to: "/admin/after-action", label: "After-action", icon: History },
 ]
 
-export function AdminShell({ children }: { children: React.ReactNode }) {
+/** The world clock, in the header.
+ *
+ *  Every admin screen now reads one poll. This is the honest indicator of
+ *  whether it is arriving: a tick that is not advancing means the world is
+ *  stopped, and a latency number means the operator can see the thing degrade
+ *  before it fails, rather than after.
+ */
+function LiveBadge() {
+  const { state, error, latencyMs } = useDemo()
+  if (error) {
+    return (
+      <Badge variant="destructive" className="gap-1.5 font-normal">
+        Backend unreachable
+      </Badge>
+    )
+  }
+  return (
+    <div className="text-muted-foreground flex items-center gap-2 text-xs">
+      <span className="flex items-center gap-1.5">
+        <span
+          className={`size-2 rounded-full ${
+            state.running ? "animate-pulse bg-emerald-500" : "bg-slate-400"
+          }`}
+        />
+        {state.running ? "Live" : "Idle"}
+      </span>
+      <span className="tabular-nums">tick {state.tick}</span>
+      {latencyMs !== null && (
+        <span className="tabular-nums opacity-70">{latencyMs} ms</span>
+      )}
+    </div>
+  )
+}
+
+/** A count of what is waiting for a person, read from the live world rather
+ *  than from a fixture. It was showing zero during a run that had three
+ *  decisions sitting on the gate. */
+function GateCount() {
+  const { state } = useDemo()
+  const pending = state.decisions.filter(
+    (d) => d.status === "awaiting_approval"
+  ).length
+  if (!pending) return null
+  return (
+    <Badge
+      variant="secondary"
+      className="ml-auto h-5 min-w-5 bg-sev-4 px-1.5 text-sev-4-foreground group-data-[collapsible=icon]:hidden"
+    >
+      {pending}
+    </Badge>
+  )
+}
+
+/** Where the reports are coming from, as counted this second. */
+function LoadStrip() {
+  const { state } = useDemo()
+  const open = state.incidents.length
+  const committed = state.resources.filter((r) => r.status !== "available").length
+  const unmet = state.needs.filter((n) => n.met < n.required).length
+  const rows: [string, string, boolean][] = [
+    ["Open incidents", String(open), open > 0],
+    ["Units committed", `${committed}/${state.resources.length}`, committed > 0],
+    ["Unmet needs", String(unmet), unmet > 0],
+    ["Shelters and hospitals", String(state.facilities.length), false],
+    ["Roads blocked", String(state.roadBlocks.length), state.roadBlocks.length > 0],
+  ]
+  return (
+    <div className="space-y-1 px-2 py-1">
+      {rows.map(([label, value, hot]) => (
+        <div key={label} className="flex items-center justify-between text-xs">
+          <span className="text-muted-foreground truncate">{label}</span>
+          <span className={`tabular-nums ${hot ? "font-medium" : "text-muted-foreground"}`}>
+            {value}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function Chrome({ children }: { children: React.ReactNode }) {
   const location = useLocation()
-  const startTour = useTour((t) => t.start)
-  const { data: decisions } = useDecisions()
-  const pending =
-    decisions?.filter((d) => d.status === "awaiting_approval").length ?? 0
   const current = NAV.find((n) => location.pathname.startsWith(n.to))
 
   return (
@@ -75,8 +144,8 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
 
         <SidebarContent>
           <SidebarGroup>
-            <SidebarGroupLabel>Command console</SidebarGroupLabel>
-            <SidebarGroupContent data-tour="nav">
+            <SidebarGroupLabel>Operations</SidebarGroupLabel>
+            <SidebarGroupContent>
               <SidebarMenu>
                 {NAV.map((item) => (
                   <SidebarMenuItem key={item.to}>
@@ -88,14 +157,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                       <NavLink to={item.to}>
                         <item.icon />
                         <span>{item.label}</span>
-                        {item.to === "/admin/decisions" && pending > 0 && (
-                          <Badge
-                            variant="secondary"
-                            className="ml-auto h-5 min-w-5 bg-sev-4 px-1.5 text-sev-4-foreground group-data-[collapsible=icon]:hidden"
-                          >
-                            {pending}
-                          </Badge>
-                        )}
+                        {item.to === "/admin/decisions" && <GateCount />}
                       </NavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -105,9 +167,9 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
           </SidebarGroup>
 
           <SidebarGroup className="mt-auto group-data-[collapsible=icon]:hidden">
-            <SidebarGroupLabel>Feeds</SidebarGroupLabel>
-            <SidebarGroupContent data-tour="feeds">
-              <StatusStrip />
+            <SidebarGroupLabel>Right now</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <LoadStrip />
             </SidebarGroupContent>
           </SidebarGroup>
         </SidebarContent>
@@ -125,30 +187,24 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
               {current?.label ?? "Console"}
             </span>
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-8"
-              onClick={startTour}
-              title="Replay the walkthrough"
-              aria-label="Replay the walkthrough"
-            >
-              <HelpCircle className="size-4" />
-            </Button>
-            <div data-tour="personas">
-              <PersonaSwitcher />
-            </div>
+          <div className="ml-auto flex items-center gap-3">
+            <LiveBadge />
+            <PersonaSwitcher />
           </div>
         </header>
 
-        <div data-tour="scenario">
-          <ScenarioBar />
-        </div>
-
         <main className="min-w-0 flex-1 overflow-auto">{children}</main>
-        <TourGuide />
       </SidebarInset>
     </SidebarProvider>
+  )
+}
+
+/** The provider sits outside the chrome so the poll outlives navigation between
+ *  admin screens, and so the sidebar badges read the same world the map does. */
+export function AdminShell({ children }: { children: React.ReactNode }) {
+  return (
+    <DemoProvider>
+      <Chrome>{children}</Chrome>
+    </DemoProvider>
   )
 }
