@@ -377,6 +377,18 @@ select r.id::text, r.note, r.category, r.classified_as,
        r.trust_score, r.trust_breakdown, r.verification_status, r.street,
        r.ward_id, r.created_at, r.mesh_hops, r.photo_path,
        r.incident_id::text incident_id,
+       -- The human verdict, and who recorded it. Selected here because the
+       -- inbox is where somebody rules on a report, and a screen that offers
+       -- the ruling without showing the existing one invites a second officer
+       -- to overwrite the first without knowing they did.
+       r.outcome, r.outcome_by, r.outcome_at, r.reporter_id::text reporter_id,
+       -- That reporter's standing, as it is right now. `human_verdicts` travels
+       -- with `reliability` on purpose: 0.9 out of twenty officer rulings and
+       -- 0.9 out of the scorer's own opinion are different numbers and the
+       -- screen must not render them identically.
+       rr.reliability reporter_reliability,
+       rr.human_verdicts reporter_human_verdicts,
+       rr.total reporter_total,
        i.title incident_title, i.severity incident_severity,
        i.report_count, i.created_at incident_created_at,
        l.link_score, l.rationale link_reason, l.decided_by link_decided_by,
@@ -387,6 +399,7 @@ select r.id::text, r.note, r.category, r.classified_as,
   left join incidents i on i.id = r.incident_id
   left join report_links l on l.report_id = r.id
   left join wards w on w.id = r.ward_id
+  left join reporter_reliability rr on rr.reporter_id = r.reporter_id
  where r.city_id = $1 and r.sim_run_id is null
  order by r.created_at desc
  limit 80
@@ -685,7 +698,22 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
              and abs((r["created_at"] - r["incident_created_at"]).total_seconds()) < 2
          ),
          "linkScore": float(r["link_score"]) if r["link_score"] is not None else None,
-         "linkReason": r["link_reason"], "linkDecidedBy": r["link_decided_by"]}
+         "linkReason": r["link_reason"], "linkDecidedBy": r["link_decided_by"],
+         # Exposed as `verdict`, not `outcome`: the inbox already uses
+         # "outcome" for what the *system* did with a report (opened, merged,
+         # held). Two different meanings under one name on one screen is how
+         # somebody later reads "held" as "found to be false".
+         # null means nobody has ruled yet, which is different from "false".
+         "verdict": r["outcome"],
+         "verdictBy": r["outcome_by"],
+         "verdictAt": r["outcome_at"].isoformat() if r["outcome_at"] else None,
+         "reporterId": r["reporter_id"],
+         "reporterReliability": (
+             float(r["reporter_reliability"])
+             if r["reporter_reliability"] is not None else None
+         ),
+         "reporterHumanVerdicts": r["reporter_human_verdicts"],
+         "reporterTotal": r["reporter_total"]}
         for r in report_rows
     ]
     needs = [

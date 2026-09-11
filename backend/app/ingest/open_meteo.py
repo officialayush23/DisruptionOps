@@ -83,6 +83,29 @@ class DischargeBatch:
     discharge_m3s: list[float]
     #: Discharge relative to the 30-day mean for the same points.
     anomaly_ratio: list[float]
+    #: The GloFAS outlook, which is the part that makes this an *early* warning
+    #: rather than a description of today.
+    #:
+    #: The adapter used to read `river_discharge[0]` and discard the other six
+    #: days, which threw away the entire forecast: a ward whose river is normal
+    #: today and triples on Tuesday scored exactly like one that is normal all
+    #: week. These three carry that.
+    #:
+    #: Peak of the deterministic forecast over the horizon, as a multiple of the
+    #: seasonal mean.
+    peak_ratio: list[float]
+    #: Days until that peak. This is a real lead time, observed rather than
+    #: inferred from how high the score came out.
+    peak_day_offset: list[int]
+    #: The worst ensemble member at the peak, as a multiple of the mean. GloFAS
+    #: is an ensemble; `river_discharge_max` is the upper member, and the gap
+    #: between it and the deterministic run is the tail this system should care
+    #: about — a 1-in-20 member at four times normal is a different situation
+    #: from a confident forecast of the same central value.
+    ensemble_peak_ratio: list[float]
+    #: Interquartile spread at the peak, relative to the central value. Low
+    #: means the members agree. Used to temper confidence, never the score.
+    ensemble_spread: list[float]
     live: bool
 
 
@@ -97,7 +120,10 @@ async def fetch_river_discharge(
         {
             "latitude": lats,
             "longitude": lngs,
-            "daily": "river_discharge,river_discharge_mean",
+            "daily": (
+                "river_discharge,river_discharge_mean,river_discharge_max,"
+                "river_discharge_p25,river_discharge_p75"
+            ),
             "forecast_days": 7,
         },
         cache_key=f"om:flood:{lats}",
@@ -106,18 +132,43 @@ async def fetch_river_discharge(
     n = len(coords)
     discharge = [0.0] * n
     anomaly = [1.0] * n
+    peak_ratio = [1.0] * n
+    peak_day = [0] * n
+    ensemble_peak = [1.0] * n
+    spread = [0.0] * n
 
     for i, block in enumerate(_as_list(result.data)):
         if i >= n:
             break
         daily = block.get("daily") or {}
-        today = (daily.get("river_discharge") or [0.0])[0] or 0.0
+        series = [float(d) for d in (daily.get("river_discharge") or []) if d is not None]
+        today = series[0] if series else 0.0
         mean_series = [m for m in (daily.get("river_discharge_mean") or []) if m]
         mean = sum(mean_series) / len(mean_series) if mean_series else 0.0
         discharge[i] = float(today)
         anomaly[i] = float(today / mean) if mean > 0 else 1.0
 
-    return DischargeBatch(discharge, anomaly, live=result.live)
+        if series and mean > 0:
+            highest = max(series)
+            peak_ratio[i] = highest / mean
+            peak_day[i] = series.index(highest)
+
+            upper = [float(m) for m in (daily.get("river_discharge_max") or []) if m is not None]
+            if upper:
+                ensemble_peak[i] = max(upper) / mean
+
+            # Spread is read at the forecast peak rather than averaged over the
+            # week: the only day whose uncertainty matters is the bad one.
+            p25 = [float(m) for m in (daily.get("river_discharge_p25") or []) if m is not None]
+            p75 = [float(m) for m in (daily.get("river_discharge_p75") or []) if m is not None]
+            d = peak_day[i]
+            if len(p25) > d and len(p75) > d and highest > 0:
+                spread[i] = max(0.0, (p75[d] - p25[d]) / highest)
+
+    return DischargeBatch(
+        discharge, anomaly, peak_ratio, peak_day, ensemble_peak, spread,
+        live=result.live,
+    )
 
 
 @dataclass(slots=True)

@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react"
-import { Inbox, Link2, ShieldX, Sparkles } from "lucide-react"
+import {
+  CheckCircle2, Inbox, Link2, Loader2, ShieldX, Sparkles, XCircle,
+} from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
+import { request } from "@/api/httpClient"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -99,6 +102,39 @@ export default function IntakeInbox() {
   const [filter, setFilter] = useState<Outcome | "all">("all")
   const [query, setQuery] = useState("")
   const [open, setOpen] = useState<string | null>(null)
+  /** Which report is mid-ruling, and what went wrong on the last attempt. */
+  const [ruling, setRuling] = useState<string | null>(null)
+  const [rulingError, setRulingError] = useState<string | null>(null)
+
+  /** Record what was actually there.
+   *
+   *  The only ground truth this system will ever have. Everything else the
+   *  trust scorer reads is its own earlier opinion, which over a long run
+   *  hardens a first impression of a reporter into a fact — so this button is
+   *  not a nicety, it is the input that stops the loop being circular.
+   *
+   *  `wholeIncident` because that is usually what an officer means: a crew
+   *  standing at a flooded junction has just ruled on every report that merged
+   *  into it, not only the one that happened to be on screen.
+   */
+  async function rule(reportId: string, outcome: "confirmed" | "false", wholeIncident: boolean) {
+    setRuling(reportId)
+    setRulingError(null)
+    try {
+      await request(`/reports/${reportId}/verdict`, {
+        method: "POST",
+        body: { outcome, wholeIncident },
+      })
+      // The inbox polls, so the new verdict and the reporter's revised
+      // reliability arrive on the next tick rather than being patched in here.
+      // One source of truth for what the database says beats a local guess
+      // that can disagree with it.
+    } catch (e) {
+      setRulingError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRuling(null)
+    }
+  }
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -321,6 +357,112 @@ export default function IntakeInbox() {
                               officer can still act on it; what it could not do is
                               commit a unit on its own.
                             </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* What was actually there.
+                          The system's own read is above; this is the part only
+                          a person can supply, and until it existed the trust
+                          score was grading its own homework. */}
+                      <div>
+                        <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
+                          What was actually there
+                        </div>
+
+                        {r.verdict ? (
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                            {r.verdict === "confirmed" ? (
+                              <Badge className="gap-1 border-emerald-500/30 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                <CheckCircle2 className="size-3" /> Confirmed
+                              </Badge>
+                            ) : (
+                              <Badge className="gap-1 border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400">
+                                <XCircle className="size-3" /> Nothing there
+                              </Badge>
+                            )}
+                            <span className="text-muted-foreground">
+                              {r.verdictBy ? `recorded by ${r.verdictBy}` : "recorded"}
+                              {r.verdictAt ? ` · ${time(r.verdictAt)}` : ""}
+                            </span>
+                          </div>
+                        ) : (
+                          <>
+                            <p className="text-muted-foreground mb-1.5 text-xs">
+                              Nobody has ruled on this yet. A verdict overrides the
+                              automatic status for this row and changes what the
+                              reporter&rsquo;s next report scores.
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 gap-1.5 border-emerald-500/40 text-xs"
+                                disabled={ruling !== null}
+                                onClick={() => void rule(r.id, "confirmed", Boolean(r.incidentId))}
+                              >
+                                {ruling === r.id
+                                  ? <Loader2 className="size-3 animate-spin" />
+                                  : <CheckCircle2 className="size-3" />}
+                                It was real
+                              </Button>
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-7 gap-1.5 border-red-500/40 text-xs"
+                                disabled={ruling !== null}
+                                onClick={() => void rule(r.id, "false", false)}
+                              >
+                                <XCircle className="size-3" /> Nothing there
+                              </Button>
+                            </div>
+                            {r.incidentId && (
+                              <p className="text-muted-foreground mt-1 text-[11px]">
+                                &ldquo;It was real&rdquo; applies to every report merged
+                                into this incident. &ldquo;Nothing there&rdquo; applies
+                                to this one only — the others may still be real.
+                              </p>
+                            )}
+                          </>
+                        )}
+
+                        {rulingError && (
+                          <p className="text-destructive mt-1.5 text-xs">{rulingError}</p>
+                        )}
+
+                        {/* The reporter's standing, with the honesty column
+                            next to it. A reliability built out of the scorer's
+                            own opinion is a different number from one built out
+                            of officer rulings, and showing them identically is
+                            the bug this whole feature exists to fix. */}
+                        {/* An anonymous report has no reporter to hold a
+                            reputation, so a verdict on it is recorded for the
+                            audit trail and adjusts nobody's standing. Saying so
+                            matters: an officer ruling on twenty of these and
+                            seeing no number move would reasonably conclude the
+                            feature is broken. */}
+                        {!r.reporterId && (
+                          <p className="text-muted-foreground mt-2 text-[11px]">
+                            Filed anonymously, so a verdict here is recorded against
+                            the report and against no reporter — there is no history
+                            to correct. Reports filed from a signed-in account carry
+                            one, and those are the ones this loop improves.
+                          </p>
+                        )}
+
+                        {r.reporterReliability !== null && (
+                          <div className="bg-muted/40 mt-2 rounded border p-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-muted-foreground">
+                                This reporter&rsquo;s reliability
+                              </span>
+                              <span className="font-medium tabular-nums">
+                                {(r.reporterReliability * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <p className="text-muted-foreground mt-0.5">
+                              {r.reporterHumanVerdicts
+                                ? `From ${r.reporterHumanVerdicts} human verdict(s) out of ${r.reporterTotal ?? 0} report(s).`
+                                : `No human verdicts yet — this figure is the scorer's own opinion of ${r.reporterTotal ?? 0} report(s), not ground truth.`}
+                            </p>
                           </div>
                         )}
                       </div>

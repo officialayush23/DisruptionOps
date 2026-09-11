@@ -52,6 +52,22 @@ export type RawReport = {
   incidentSeverity: number | null; incidentReportCount: number | null
   opened: boolean
   linkScore: number | null; linkReason: string | null; linkDecidedBy: string | null
+  /** What somebody found out. `null` means nobody has ruled yet, which is not
+   *  the same as ruling that it was false.
+   *
+   *  Named `verdict` rather than `outcome` because the inbox already uses
+   *  "outcome" for what the system did with the report — opened, merged, held.
+   *  These are different questions and must not share a word. */
+  verdict: "confirmed" | "false" | null
+  verdictBy: string | null
+  verdictAt: string | null
+  reporterId: string | null
+  /** Wilson lower bound over this reporter's history. `reporterHumanVerdicts`
+   *  says how much of it is actual ground truth rather than the trust scorer
+   *  agreeing with itself — the two must never be shown as the same number. */
+  reporterReliability: number | null
+  reporterHumanVerdicts: number | null
+  reporterTotal: number | null
 }
 export type Need = {
   incidentId: string; capability: string; required: number; met: number

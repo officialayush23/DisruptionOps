@@ -24,6 +24,8 @@ RUN useradd --create-home --uid 10001 indradhanu \
     && chown -R indradhanu:indradhanu /app
 USER indradhanu
 
+# Render detects whichever port the service listens on, so a fixed port is
+# correct there and needs no $PORT indirection.
 EXPOSE 8000
 
 # Liveness only: readiness pulls the database and would fail the container on
@@ -33,4 +35,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # One worker per container; scale with replicas, not with in-process workers,
 # so each has its own connection pool against the Supabase pooler's limit.
+#
+# --proxy-headers because Render terminates TLS at its edge: without it every
+# request looks like plain http from a private address, and anything deriving a
+# URL or a client IP gets it wrong.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

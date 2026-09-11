@@ -167,6 +167,9 @@ export default function CitizenApp() {
   /** Alert ids already shown, so a new one can announce itself rather than
    *  appearing silently at the top of a page nobody is looking at. */
   const seenAlerts = useRef<Set<string>>(new Set())
+  /** The alert we have already routed for. An advisory should produce a route
+   *  once, not a fresh solve on every four-second poll. */
+  const routedFor = useRef<string | null>(null)
   const [newAlert, setNewAlert] = useState<string | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
@@ -362,6 +365,34 @@ export default function CitizenApp() {
     } finally { setBusy(null) }
   }
 
+  /** An alert in force routes you, without being asked.
+   *
+   *  This was the gap. An advisory said "move to a shelter" and then waited for
+   *  the person to notice a button labelled "Nearest shelter" and press it.
+   *  Somebody standing in water at night does not go looking for a button, and
+   *  the one thing the system already knows is where they should go — the
+   *  shelter is chosen by PostGIS on distance and spare capacity, and the route
+   *  avoids every hazard that has been reported. Withholding that until asked
+   *  was the interface getting in the way of the product.
+   *
+   *  Once per alert, not once per poll: `routedFor` holds the alert the route
+   *  belongs to. A new advisory re-routes, because it may name a different
+   *  shelter; the same one re-arriving does not, because the person may have
+   *  deliberately asked for something else since and having the screen snap
+   *  back to a shelter every four seconds is worse than not routing at all.
+   */
+  useEffect(() => {
+    const alert = state?.alerts?.[0]
+    if (!alert || !state?.inside) return
+    if (routedFor.current === alert.id) return
+    routedFor.current = alert.id
+    void ask("shelter")
+    // `ask` is stable enough for this: it closes over `pos`, and routing from
+    // the position held when the advisory arrived is correct — the turn-by-turn
+    // below re-projects against live position from there.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.alerts?.[0]?.id, state?.inside])
+
   const sev = state?.risk?.severity ?? 0
 
   /** Recomputed on every position change, which is what makes it navigation
@@ -450,6 +481,15 @@ export default function CitizenApp() {
           <AlertDescription>
             <div className="font-medium">{state.alerts[0].headline}</div>
             <div className="text-sm">{state.alerts[0].action}</div>
+            {state.alerts[0].safeLocation && (
+              <div className="mt-1 text-sm">
+                Go to <span className="font-medium">{state.alerts[0].safeLocation.name}</span>,{" "}
+                {state.alerts[0].safeLocation.distance_km} km away.{" "}
+                {guide?.route?.length
+                  ? "The route is on the map and the directions are below."
+                  : "Working out the safest way there…"}
+              </div>
+            )}
           </AlertDescription>
         </Alert>
       )}
