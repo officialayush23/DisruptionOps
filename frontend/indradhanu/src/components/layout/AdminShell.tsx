@@ -81,9 +81,12 @@ const NAV: {
   // were, which is the whole of the "too cluttered" complaint — not density on
   // any one screen, but no answer to "where do I start".
   { group: "Operations", to: "/admin/console", label: "Live map", icon: Radar },
+  // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
+  // authorises, and this is the ledger of what it did — which is what an
+  // officer was missing, not a second way to move a vehicle by hand.
   {
-    group: "Operations", to: "/admin/dispatch", label: "Dispatch", icon: Waypoints,
-    count: (c) => (c.short ? { n: c.short, tone: "gap", what: "incidents short of a unit" } : null),
+    group: "Operations", to: "/admin/dispatch", label: "Who is on what", icon: Waypoints,
+    count: (c) => (c.short ? { n: c.short, tone: "gap", what: "demands nobody has" } : null),
   },
   {
     group: "Operations", to: "/admin/decisions", label: "Approvals", icon: ClipboardCheck,
@@ -93,6 +96,9 @@ const NAV: {
     group: "Operations", to: "/admin/intake", label: "Reports", icon: Inbox,
     count: (c) => (c.held ? { n: c.held, tone: "blocked", what: "held for a human" } : null),
   },
+  // Promoted out of Analysis. It now leads with what got attached to what,
+  // which is a live operational question rather than an after-the-fact one.
+  { group: "Operations", to: "/admin/agent", label: "Agent log", icon: Activity },
 
   // Analysis: real work, none of it urgent. Collapsed by default, so the rail
   // reads as four things rather than sixteen and everything is still one click
@@ -122,7 +128,6 @@ const NAV: {
     count: (c) => (c.offline ? { n: c.offline, tone: "gap", what: "units out of the fleet" } : null),
   },
   { group: "Analysis", to: "/admin/alerts", label: "Issued alerts", icon: Radio },
-  { group: "Analysis", to: "/admin/agent", label: "Agent trace", icon: Activity },
   { group: "Analysis", to: "/admin/copilot", label: "Copilot, full screen", icon: BrainCircuit },
 
   { group: "Setup", to: "/admin/replay", label: "Replay", icon: Rewind },

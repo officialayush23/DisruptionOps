@@ -1,46 +1,47 @@
-import { useMemo, useState } from "react"
-import { CheckCircle2, Inbox, Loader2, Send, Siren, Truck } from "lucide-react"
+import { useMemo } from "react"
+import { Inbox, Siren, Truck } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table"
 
-/** Who is going where, and why — as one screen.
+/** The allocation ledger. Who is on what, what is spare, what nobody has.
  *
- *  This existed only on the map, which is the wrong instrument for it. A map
- *  answers "where", and the question an officer actually has is a chain:
+ *  The system assigns — CP-SAT solves it, the gate authorises it, the replanner
+ *  revisits it. This screen does not. Its whole job is to make what the system
+ *  decided legible, which until now was possible only by hovering coloured
+ *  lines on a map: the map answers "where", and the question is "what is this
+ *  unit attached to, and why that one".
  *
- *      four reports  →  one incident  →  two units  →  eleven minutes out
+ *  Three tables, because the question has three halves and an officer asks them
+ *  in this order:
  *
- *  Every link of that chain was on a different screen, joined by ids nothing
- *  showed, so the only way to follow it was to hover coloured lines and guess.
- *  A judge watching that concluded, correctly, that they could not see what the
- *  system was doing.
+ *    **Assigned** — every committed unit, the incident it is attached to, the
+ *    hazard behind that incident, how many reports built it, how far out it is,
+ *    and which actor made the attachment. One row per unit, so "where is
+ *    Ambulance 4" is a scan rather than a search.
  *
- *  Three columns, left to right in the order the work flows, and the middle one
- *  is the selection that drives the other two. Pick an incident: the left shows
- *  the reports that built it, the right shows the units that could serve what it
- *  still needs, nearest first, with a button. That button is the other thing
- *  that was missing — an officer could re-plan the whole city or approve
- *  something the Copilot had thought of, and could not send the boat two streets
- *  away that they could see was idle.
+ *    **Spare** — what is left. The other half of every coverage question, and
+ *    the one a map cannot show, because an idle unit looks exactly like a busy
+ *    one from above.
  *
- *  Nothing here writes an assignment. `POST /dispatch/assign` proposes through
- *  the same policy gate every agent uses; inside a ward officer's delegation it
- *  issues and is carried out in the same request, and outside it, it waits on
- *  the gate with the clause that held it. A dispatch board with its own path to
- *  the fleet would be the second source of truth this system exists to not have.
+ *    **Nobody has it** — demand with no unit against it. Not a failure to
+ *    display: the solver records these deliberately rather than quietly
+ *    under-serving them, and this is where they surface.
+ *
+ *  Everything is derived from the one poll the console already runs. No new
+ *  request, and no number on this screen that another screen could disagree
+ *  with.
  */
 
-const M_PER_DEG_LAT = 110_574
-
-function km(a: [number, number], b: [number, number]) {
-  const dx = (a[0] - b[0]) * 111_320 * Math.cos((((a[1] + b[1]) / 2) * Math.PI) / 180)
-  const dy = (a[1] - b[1]) * M_PER_DEG_LAT
-  return Math.sqrt(dx * dx + dy * dy) / 1000
-}
-
 const pretty = (s: string) => s.replace(/_/g, " ")
+
+const time = (iso: string) =>
+  new Date(iso).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  })
 
 const since = (iso: string) => {
   const s = (Date.now() - new Date(iso).getTime()) / 1000
@@ -50,377 +51,413 @@ const since = (iso: string) => {
   return `${Math.round(s / 3600)}h`
 }
 
+/** How far along the drive, as a bar rather than a percentage. A number needs
+ *  reading; a bar is read from the doorway. */
+function Progress({ value }: { value: number }) {
+  return (
+    <div className="bg-muted h-1.5 w-16 overflow-hidden rounded-full">
+      <div
+        className="h-1.5 rounded-full bg-emerald-500"
+        style={{ width: `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%` }}
+      />
+    </div>
+  )
+}
+
 export default function Dispatch() {
-  const { state, selected, setSelected, busy, run } = useDemo()
-  const [sent, setSent] = useState<string | null>(null)
+  const { state, selected, setSelected } = useDemo()
 
   const wardName = useMemo(
     () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
     [state.wards]
   )
-
-  /** Open incidents, worst first, each carrying what it needs and who is on it.
-   *
-   *  Assembled here rather than asked for, because every part of it is already
-   *  in the one poll the console runs — the joining is what was missing, not
-   *  the data. */
-  const rows = useMemo(() => {
-    const needsBy = new Map<string, { capability: string; met: number; required: number }[]>()
-    for (const n of state.needs) {
-      const list = needsBy.get(n.incidentId)
-      if (list) list.push(n)
-      else needsBy.set(n.incidentId, [n])
-    }
-    const unitsBy = new Map<string, typeof state.resources>()
-    for (const r of state.resources) {
-      if (!r.incidentId) continue
-      const list = unitsBy.get(r.incidentId)
-      if (list) list.push(r)
-      else unitsBy.set(r.incidentId, [r])
-    }
-    const reportsBy = new Map<string, typeof state.reports>()
-    for (const rep of state.reports) {
-      if (!rep.incidentId) continue
-      const list = reportsBy.get(rep.incidentId)
-      if (list) list.push(rep)
-      else reportsBy.set(rep.incidentId, [rep])
-    }
-
-    return state.incidents
-      .filter((i) => i.status !== "resolved")
-      .map((i) => {
-        const needs = needsBy.get(i.id) ?? []
-        return {
-          incident: i,
-          needs,
-          short: needs.filter((n) => n.met < n.required),
-          units: unitsBy.get(i.id) ?? [],
-          reports: (reportsBy.get(i.id) ?? []).sort((a, b) =>
-            a.createdAt < b.createdAt ? 1 : -1
-          ),
-        }
-      })
-      .sort(
-        (a, b) =>
-          b.short.length - a.short.length ||
-          b.incident.severity - a.incident.severity ||
-          b.reports.length - a.reports.length
-      )
-  }, [state.incidents, state.needs, state.resources, state.reports])
-
-  const current = rows.find((r) => r.incident.id === selected) ?? rows[0] ?? null
-
-  /** Units that could serve what the selected incident is still short of.
-   *
-   *  Capability first, then distance. An idle unit that cannot do the job is
-   *  not an option, and showing it as one is how a board like this starts
-   *  lying — so a unit appears here only if it holds a capability the incident
-   *  is actually short of, and the badge says which. */
-  const candidates = useMemo(() => {
-    if (!current || !current.short.length) return []
-    const wanted = new Set(current.short.map((n) => n.capability))
-    return state.resources
-      .filter((r) => r.status === "available" && !r.assignedTo)
-      .map((r) => ({
-        unit: r,
-        serves: r.capabilities.filter((c) => wanted.has(c)),
-        away: km(r.location, current.incident.location),
-      }))
-      .filter((c) => c.serves.length > 0)
-      .sort((a, b) => a.away - b.away)
-      .slice(0, 12)
-  }, [current, state.resources])
-
-  /** Reports that have not landed on an incident yet — the left edge of the
-   *  pipeline, and the only column that is not about the selection. Held or
-   *  still clustering, so it is small by design and alarming when it is not. */
-  const loose = useMemo(
-    () =>
-      state.reports
-        .filter((r) => !r.incidentId)
-        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-        .slice(0, 8),
-    [state.reports]
+  const byIncident = useMemo(
+    () => new Map(state.incidents.map((i) => [i.id, i] as const)),
+    [state.incidents]
   )
 
-  async function send(resourceId: string, label: string) {
-    const r = (await run(`send-${resourceId}`, "/dispatch/assign", {
-      resourceId,
-      incidentId: current!.incident.id,
-    })) as { note?: string } | undefined
-    setSent(r?.note ?? `${label} dispatched.`)
-    setTimeout(() => setSent(null), 8000)
-  }
+  /** Who attached this unit, and when.
+   *
+   *  Taken from the append-only log rather than from the assignment row,
+   *  because the assignment knows *that* it exists and the log knows who caused
+   *  it — the solver, the replanner, an officer's approval. "Assigned by" is
+   *  the column that turns a status board into an account of a decision. */
+  const attachedBy = useMemo(() => {
+    const m = new Map<string, { actor: string; at: string; text: string }>()
+    for (const e of state.events) {
+      if (!e.kind.startsWith("assignment")) continue
+      const rid = (e.payload as Record<string, unknown>)?.resource_id
+      if (typeof rid !== "string") continue
+      const prev = m.get(rid)
+      if (!prev || prev.at < e.occurredAt) {
+        m.set(rid, { actor: e.actor, at: e.occurredAt, text: e.text })
+      }
+    }
+    return m
+  }, [state.events])
 
-  if (!rows.length) {
-    return (
-      <div className="p-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Siren className="size-4" /> Nothing open
-            </CardTitle>
-            <CardDescription className="text-xs">
-              {state.running
-                ? "Reports are arriving. The first incident and everything routed to it will appear here."
-                : "Start the world on the command console and this fills."}
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      </div>
-    )
-  }
+  const reportsPerIncident = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const r of state.reports) {
+      if (!r.incidentId) continue
+      m.set(r.incidentId, (m.get(r.incidentId) ?? 0) + 1)
+    }
+    return m
+  }, [state.reports])
+
+  const progressOf = useMemo(
+    () => new Map(state.routes.map((r) => [r.resourceId, r.progress] as const)),
+    [state.routes]
+  )
+
+  const assigned = useMemo(
+    () =>
+      state.resources
+        .filter((r) => r.incidentId)
+        .map((r) => ({
+          unit: r,
+          incident: r.incidentId ? byIncident.get(r.incidentId) : undefined,
+          by: attachedBy.get(r.id),
+          // Only `UnitRoute` carries progress — a resource row does not know
+          // how far along its drive it is, and the fallback to `r.progress`
+          // was reaching for a field that has never existed on it. No route
+          // yet means not moving yet, which is what 0 says.
+          progress: progressOf.get(r.id) ?? 0,
+        }))
+        .sort(
+          (a, b) =>
+            (b.incident?.severity ?? 0) - (a.incident?.severity ?? 0) ||
+            (a.unit.etaMinutes ?? 999) - (b.unit.etaMinutes ?? 999)
+        ),
+    [state.resources, byIncident, attachedBy, progressOf]
+  )
+
+  const spare = useMemo(
+    () =>
+      state.resources
+        .filter((r) => !r.incidentId)
+        .sort(
+          (a, b) =>
+            Number(b.status === "available") - Number(a.status === "available") ||
+            a.kind.localeCompare(b.kind)
+        ),
+    [state.resources]
+  )
+
+  /** Demand with nothing against it, joined to the incident and the hazard it
+   *  came from, so the row says what is missing *and* what it is missing for. */
+  const unmet = useMemo(
+    () =>
+      state.needs
+        .filter((n) => n.met < n.required)
+        .map((n) => ({ ...n, incident: byIncident.get(n.incidentId) }))
+        .filter((n) => n.incident && n.incident.status !== "resolved")
+        .sort(
+          (a, b) =>
+            (b.incident?.severity ?? 0) - (a.incident?.severity ?? 0) ||
+            b.required - b.met - (a.required - a.met)
+        ),
+    [state.needs, byIncident]
+  )
+
+  const free = spare.filter((r) => r.status === "available").length
 
   return (
-    <div className="grid h-[calc(100svh-3.5rem)] grid-cols-1 gap-3 p-3 lg:grid-cols-[1fr_1.3fr_1fr]">
-      {/* ------------------------------------------------------- reports -- */}
-      <Panel
-        icon={<Inbox className="size-4" />}
-        title="Reports"
-        note={
-          current
-            ? `${current.reports.length} merged into the selected incident`
-            : "what came in"
-        }
-      >
-        {current?.reports.map((rep) => (
-          <div key={rep.id} className="rounded-md border p-2">
-            <p className="line-clamp-2 text-xs">{rep.text}</p>
-            <div className="text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
-              <Badge variant="outline" className="font-normal">
-                {pretty(rep.classifiedAs ?? rep.category)}
-              </Badge>
-              <span>{rep.source}</span>
-              {rep.trust !== null && (
-                <span className="tabular-nums">trust {rep.trust.toFixed(2)}</span>
-              )}
-              <span>{since(rep.createdAt)}</span>
-              {rep.opened ? (
-                <span className="text-orange-600 dark:text-orange-400">
-                  opened this incident
-                </span>
-              ) : (
-                <span className="text-sky-600 dark:text-sky-400">merged</span>
-              )}
-            </div>
-            {/* The join nobody could see: why this report was put with the
-                others rather than opening a second incident for the same
-                flooded road. */}
-            {rep.linkReason && !rep.opened && (
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                {rep.linkReason}
-                {rep.linkScore !== null ? ` · ${rep.linkScore.toFixed(2)}` : ""}
-              </p>
-            )}
-          </div>
-        ))}
-        {loose.length > 0 && (
-          <>
-            <div className="text-muted-foreground pt-1 text-[11px] font-medium uppercase tracking-wide">
-              Not on an incident yet
-            </div>
-            {loose.map((rep) => (
-              <div key={rep.id} className="rounded-md border border-dashed p-2">
-                <p className="line-clamp-2 text-xs">{rep.text}</p>
-                <p className="text-muted-foreground mt-1 text-[11px]">
-                  {pretty(rep.status)} · {since(rep.createdAt)}
-                </p>
-              </div>
-            ))}
-          </>
-        )}
-      </Panel>
+    <div className="space-y-3 p-4">
+      {/* Four numbers, and the only two that change a decision are the last
+          two. Red is reserved for the one that means somebody is not coming. */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Units committed" value={`${assigned.length}/${state.resources.length}`} />
+        <Stat label="Spare and ready" value={free} />
+        <Stat
+          label="Open incidents"
+          value={state.incidents.filter((i) => i.status !== "resolved").length}
+        />
+        <Stat label="Demands nobody has" value={unmet.length} tone={unmet.length ? "bad" : undefined} />
+      </div>
 
-      {/* ----------------------------------------------------- incidents -- */}
-      <Panel
-        icon={<Siren className="size-4" />}
-        title="Incidents"
-        note={`${rows.length} open, ${rows.filter((r) => r.short.length).length} short of something`}
-      >
-        {rows.map((r) => {
-          const open = current?.incident.id === r.incident.id
-          return (
-            <button
-              key={r.incident.id}
-              type="button"
-              onClick={() => setSelected(r.incident.id)}
-              className={`w-full rounded-md border p-2 text-left transition-colors ${
-                open ? "border-primary bg-primary/5" : "hover:border-muted-foreground/40"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant={r.incident.severity >= 4 ? "destructive" : "secondary"}
-                  className="tabular-nums"
-                >
-                  {r.incident.severity}
-                </Badge>
-                <span className="truncate text-sm font-medium">{r.incident.title}</span>
-              </div>
-              <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-2 text-[11px]">
-                <span>{wardName.get(r.incident.wardId) ?? r.incident.wardId}</span>
-                <span>{r.reports.length} report(s)</span>
-                <span>{since(r.incident.createdAt)} old</span>
-              </div>
-
-              {/* What it needs, and what is actually on the way. This pair is
-                  the whole screen: a need with nobody against it is the thing
-                  an officer is looking for. */}
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {r.needs.map((n) => (
-                  <Badge
-                    key={n.capability}
-                    variant={n.met >= n.required ? "secondary" : "destructive"}
-                    className="font-normal"
+      {/* ------------------------------------------------------- assigned -- */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Truck className="size-4" /> Assigned right now
+          </CardTitle>
+          <CardDescription className="text-xs">
+            One row per committed unit, live. The solver decided every one of
+            these; the last column says which actor wrote it and when, so a
+            re-tasking is visible as a re-tasking rather than as a line moving on
+            a map.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="px-0">
+          <div className="max-h-[26rem] overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Unit</TableHead>
+                  <TableHead>Attached to</TableHead>
+                  <TableHead>Hazard</TableHead>
+                  <TableHead>Ward</TableHead>
+                  <TableHead className="text-right">Reports</TableHead>
+                  <TableHead>State</TableHead>
+                  <TableHead className="text-right">ETA</TableHead>
+                  <TableHead>On the way</TableHead>
+                  <TableHead>Attached by</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {assigned.map(({ unit, incident, by, progress }) => (
+                  <TableRow
+                    key={unit.id}
+                    className={`cursor-pointer ${
+                      selected === incident?.id ? "bg-primary/5" : ""
+                    }`}
+                    onClick={() => setSelected(incident?.id ?? null)}
                   >
-                    {pretty(n.capability)} {n.met}/{n.required}
-                  </Badge>
-                ))}
-                {r.needs.length === 0 && (
-                  <span className="text-muted-foreground text-[11px]">
-                    no needs recorded
-                  </span>
-                )}
-              </div>
-
-              {r.units.length > 0 && (
-                <div className="mt-1.5 space-y-0.5 border-t pt-1.5">
-                  {r.units.map((u) => (
-                    <div
-                      key={u.id}
-                      className="flex flex-wrap items-center gap-1.5 text-[11px]"
-                    >
-                      <Truck className="size-3 shrink-0" />
-                      <span className="font-medium">{u.label}</span>
-                      <span className="text-muted-foreground">
-                        {pretty(u.assignmentStatus ?? u.status)}
+                    <TableCell className="font-medium">
+                      {unit.label}
+                      <span className="text-muted-foreground ml-1.5 text-xs font-normal">
+                        {pretty(unit.kind)}
                       </span>
-                      {u.etaMinutes != null && (
-                        <span className="tabular-nums text-emerald-600 dark:text-emerald-400">
-                          {u.etaMinutes} min out
+                    </TableCell>
+                    <TableCell className="max-w-[16rem]">
+                      <div className="flex items-center gap-1.5">
+                        {incident && (
+                          <Badge
+                            variant={incident.severity >= 4 ? "destructive" : "secondary"}
+                            className="tabular-nums"
+                          >
+                            {incident.severity}
+                          </Badge>
+                        )}
+                        <span className="truncate text-sm">
+                          {incident?.title ?? unit.assignedTo ?? "—"}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-xs">
+                      {incident ? pretty(incident.category) : "—"}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {incident ? wardName.get(incident.wardId) ?? incident.wardId : "—"}
+                    </TableCell>
+                    <TableCell className="text-right text-xs tabular-nums">
+                      {incident ? reportsPerIncident.get(incident.id) ?? 0 : "—"}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {pretty(unit.assignmentStatus ?? unit.status)}
+                    </TableCell>
+                    <TableCell className="text-right text-xs tabular-nums">
+                      {unit.etaMinutes != null ? `${unit.etaMinutes} min` : "—"}
+                      {unit.distanceKm != null && (
+                        <span className="text-muted-foreground ml-1">
+                          {unit.distanceKm.toFixed(1)} km
                         </span>
                       )}
-                      {u.distanceKm != null && (
-                        <span className="text-muted-foreground tabular-nums">
-                          {u.distanceKm.toFixed(1)} km
+                    </TableCell>
+                    <TableCell>
+                      <Progress value={progress} />
+                    </TableCell>
+                    <TableCell className="text-muted-foreground max-w-[13rem] text-xs">
+                      {by ? (
+                        <span className="block truncate" title={by.text}>
+                          {by.actor.replace(/^agent:/, "").replace(/[:_]/g, " ")} ·{" "}
+                          {time(by.at)}
                         </span>
+                      ) : (
+                        "—"
                       )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </button>
-          )
-        })}
-      </Panel>
-
-      {/* --------------------------------------------------------- units -- */}
-      <Panel
-        icon={<Truck className="size-4" />}
-        title="Send a unit"
-        note={
-          current
-            ? current.short.length
-              ? `${current.incident.title} is short of ${current.short
-                  .map((n) => pretty(n.capability))
-                  .join(", ")}`
-              : "Everything this incident needs is on the way"
-            : "pick an incident"
-        }
-      >
-        {sent && (
-          <div className="flex items-start gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/5 p-2 text-xs">
-            <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
-            <span>{sent}</span>
-          </div>
-        )}
-
-        {current && !current.short.length && (
-          <p className="text-muted-foreground text-xs">
-            Nothing is outstanding here. Units are only offered against a
-            capability an incident is actually short of — a board that let you
-            pile a second boat onto a covered incident would be helping you make
-            the mistake it exists to prevent.
-          </p>
-        )}
-
-        {candidates.map(({ unit, serves, away }) => (
-          <div key={unit.id} className="rounded-md border p-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-1.5 text-sm">
-                  <span className="font-medium">{unit.label}</span>
-                  <span className="text-muted-foreground text-xs">
-                    {unit.operator}
-                  </span>
-                </div>
-                <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px]">
-                  <span className="tabular-nums">{away.toFixed(1)} km away</span>
-                  {serves.map((c) => (
-                    <Badge key={c} variant="outline" className="font-normal">
-                      {pretty(c)}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-              <Button
-                size="sm"
-                className="h-7 shrink-0 text-xs"
-                disabled={busy !== null}
-                onClick={() => void send(unit.id, unit.label)}
-              >
-                {busy === `send-${unit.id}` ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Send className="size-3" />
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {assigned.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={9} className="text-muted-foreground text-xs">
+                      Nothing committed. Either nothing is open, or the planner
+                      has not run since it opened.
+                    </TableCell>
+                  </TableRow>
                 )}
-                Send
-              </Button>
-            </div>
+              </TableBody>
+            </Table>
           </div>
-        ))}
+        </CardContent>
+      </Card>
 
-        {current && current.short.length > 0 && candidates.length === 0 && (
-          <p className="text-destructive text-xs">
-            Nothing free in the municipal fleet holds{" "}
-            {current.short.map((n) => pretty(n.capability)).join(" or ")}. This is
-            the case for asking another agency, on the handoff screen.
-          </p>
-        )}
+      <div className="grid gap-3 lg:grid-cols-2">
+        {/* --------------------------------------------------------- left -- */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Inbox className="size-4" /> What is left
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Not committed to anything. A map cannot show this — an idle unit
+              looks exactly like a busy one from above — and it is half of every
+              question about whether the city is covered.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-0">
+            <div className="max-h-[22rem] overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Unit</TableHead>
+                    <TableHead>Can do</TableHead>
+                    <TableHead>State</TableHead>
+                    <TableHead>Why not available</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {spare.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-medium">
+                        {r.label}
+                        <span className="text-muted-foreground ml-1.5 text-xs font-normal">
+                          {pretty(r.kind)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="max-w-[12rem]">
+                        <div className="flex flex-wrap gap-1">
+                          {r.capabilities.slice(0, 2).map((c) => (
+                            <Badge key={c} variant="outline" className="font-normal">
+                              {pretty(c)}
+                            </Badge>
+                          ))}
+                          {r.capabilities.length > 2 && (
+                            <span className="text-muted-foreground text-xs">
+                              +{r.capabilities.length - 2}
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        <Badge
+                          variant={r.status === "available" ? "secondary" : "outline"}
+                          className="font-normal"
+                        >
+                          {pretty(r.status)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground max-w-[12rem] truncate text-xs">
+                        {r.status === "available"
+                          ? "—"
+                          : r.unavailableReason ?? r.statusNote ?? pretty(r.status)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {spare.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-muted-foreground text-xs">
+                        Every unit in the fleet is committed.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
 
-        <p className="text-muted-foreground border-t pt-2 text-[11px]">
-          Sending proposes through the policy gate, the same one every agent
-          uses. Inside a ward officer&rsquo;s delegation it issues and the unit
-          starts moving; beyond it, it waits on the decision gate with the
-          clause that held it.
-        </p>
-      </Panel>
+        {/* -------------------------------------------------------- unmet -- */}
+        <Card className={unmet.length ? "border-destructive/40" : undefined}>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Siren className="size-4" /> Demand nobody has
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Recorded rather than quietly under-served. Each row is a capability
+              an open incident needs and no unit is meeting — the case for asking
+              another agency, on the handoff screen.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-0">
+            <div className="max-h-[22rem] overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Needs</TableHead>
+                    <TableHead>For</TableHead>
+                    <TableHead>Ward</TableHead>
+                    <TableHead className="text-right">Short by</TableHead>
+                    <TableHead className="text-right">Waiting</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {unmet.map((n) => (
+                    <TableRow
+                      key={`${n.incidentId}-${n.capability}`}
+                      className={`cursor-pointer ${
+                        selected === n.incidentId ? "bg-primary/5" : ""
+                      }`}
+                      onClick={() => setSelected(n.incidentId)}
+                    >
+                      <TableCell className="font-medium">
+                        {pretty(n.capability)}
+                      </TableCell>
+                      <TableCell className="max-w-[12rem]">
+                        <div className="flex items-center gap-1.5">
+                          <Badge
+                            variant={
+                              (n.incident?.severity ?? 0) >= 4 ? "destructive" : "secondary"
+                            }
+                            className="tabular-nums"
+                          >
+                            {n.incident?.severity}
+                          </Badge>
+                          <span className="truncate text-sm">{n.incident?.title}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {n.incident
+                          ? wardName.get(n.incident.wardId) ?? n.incident.wardId
+                          : "—"}
+                      </TableCell>
+                      <TableCell className="text-right text-xs tabular-nums">
+                        {n.required - n.met} of {n.required}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-right text-xs tabular-nums">
+                        {n.incident ? since(n.incident.createdAt) : ""}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {unmet.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-muted-foreground text-xs">
+                        Everything every open incident needs has a unit against
+                        it.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }
 
-/** One column. Header pinned, body scrolls — three independently scrolling
- *  lists rather than one long page, so the selection never moves out from under
- *  the person reading it. */
-function Panel({
-  icon, title, note, children,
+function Stat({
+  label, value, tone,
 }: {
-  icon: React.ReactNode
-  title: string
-  note: string
-  children: React.ReactNode
+  label: string
+  value: string | number
+  tone?: "bad"
 }) {
   return (
-    <Card className="flex min-h-0 flex-col gap-0 py-0">
-      <CardHeader className="shrink-0 border-b py-3">
-        <CardTitle className="flex items-center gap-2 text-sm">
-          {icon} {title}
+    <Card>
+      <CardHeader className="pb-2">
+        <CardDescription>{label}</CardDescription>
+        <CardTitle
+          className={`text-2xl tabular-nums ${
+            tone === "bad" ? "text-red-600 dark:text-red-400" : ""
+          }`}
+        >
+          {value}
         </CardTitle>
-        <CardDescription className="text-xs">{note}</CardDescription>
       </CardHeader>
-      <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {children}
-      </CardContent>
     </Card>
   )
 }
