@@ -56,7 +56,11 @@ LIMITS: dict[str, tuple[int, int]] = {
     "/citizen/vision/analyse": (6, 60),    # the VLM, per call
     "/citizen/report": (10, 60),           # opens incidents
     "/citizen/arrived": (10, 60),          # writes occupancy
-    "/citizen/guide": (30, 60),            # Mapbox + the guidance agent
+    # 60, not 30. The resident app re-solves on its own whenever the person
+    # drifts off the line or a hazard near the route changes, on top of whatever
+    # they press — so the legitimate rate for one walking person is already
+    # several a minute, and the client's own cooldown is the real limiter here.
+    "/citizen/guide": (60, 60),            # Mapbox + the guidance agent
 }
 
 #: Stop the key space growing without bound when the callers are anonymous and
@@ -123,10 +127,29 @@ def _caller(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and len(auth) > 24:
         return "t:" + hashlib.sha256(auth[7:].encode()).hexdigest()[:24]
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return f"ip:{fwd.split(',')[0].strip()}"
-    return f"ip:{request.client.host if request.client else 'unknown'}"
+
+    ip = (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+
+    # The resident app needs no account, so every anonymous phone behind one
+    # municipal NAT used to be one caller with one allowance. At a demo that is
+    # every phone in the room sharing thirty guidance calls a minute, and the
+    # first person to be refused is refused mid-sentence.
+    #
+    # `X-Indradhanu-Device` is the same per-install id the trust scorer already
+    # counts reports against. It is not a credential and is not treated as one:
+    # it is appended to the address rather than replacing it, so a caller can
+    # still be found by IP in the log. The honest trade is that a script can
+    # mint device ids and buy itself more buckets — which is a real weakening,
+    # accepted because these limits exist to slow scripts down and not to
+    # authorise anybody, and because punishing everyone who shares an IP is the
+    # worse failure of the two.
+    device = request.headers.get("X-Indradhanu-Device", "")
+    if device and len(device) <= 64:
+        return f"ip:{ip}|d:{hashlib.sha256(device.encode()).hexdigest()[:12]}"
+    return f"ip:{ip}"
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

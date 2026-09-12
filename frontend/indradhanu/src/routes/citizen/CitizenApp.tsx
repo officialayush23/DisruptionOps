@@ -4,7 +4,7 @@ import {
   Droplets, Hospital, Loader2, Mic, Navigation, Pill, Send, ShieldCheck,
   Siren, Square, Utensils, WifiOff,
 } from "lucide-react"
-import { apiBaseUrl, request } from "@/api/httpClient"
+import { apiBaseUrl, deviceId, request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
 import { MapStage } from "@/components/map/MapStage"
 import { OfflineBar } from "@/components/common/OfflineBar"
@@ -16,31 +16,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Textarea } from "@/components/ui/textarea"
 
-/** A stable id for this install, and nothing more.
- *
- *  It is not identity: it is never sent with a name, it is not linked to an
- *  account, and clearing site data throws it away. What it buys is the ability
- *  to tell one phone from another, which the trust scorer needs — its anti-spam
- *  components count reports "from this source" in the last fifteen minutes, and
- *  without an id every anonymous report in the city shared one. During a real
- *  surge that reads as a single frantic reporter and quietly pushes everybody's
- *  score down at exactly the moment the scoring has to hold.
- *
- *  Wrapped in try/catch because private browsing and blocked site data both
- *  throw on access, and a resident in water must still be able to file. */
-function deviceId(): string | undefined {
-  try {
-    const KEY = "disruptionops.device"
-    let id = localStorage.getItem(KEY)
-    if (!id) {
-      id = crypto.randomUUID()
-      localStorage.setItem(KEY, id)
-    }
-    return id
-  } catch {
-    return undefined
-  }
-}
+/* `deviceId` now lives in the http client and is sent as a header on every
+   request, because the rate limiter needs the same value the trust scorer does:
+   at a demo, every phone in the room is behind one NAT and an IP bucket makes
+   them one caller. One definition, one localStorage key — two would drift, and
+   the trust attribution is the one that must not. */
+
 
 /** The resident's interface.
  *
@@ -213,6 +194,9 @@ export default function CitizenApp() {
   const [staleSince, setStaleSince] = useState<number | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
+  /** A "stay where you are" answer that arrived while a route was being walked.
+   *  Shown next to the navigation rather than replacing it. */
+  const [advice, setAdvice] = useState<string | null>(null)
   /** A photo, and what the model made of it.
    *
    *  `token` is the server's receipt for the assessment; `unanalysed` means a
@@ -514,20 +498,44 @@ export default function CitizenApp() {
 
   /** @param fromPerson  They pressed something. An advisory arriving on its own
    *  must not then overrule the destination they chose, so this is what marks
-   *  the difference between a route the system offered and one they asked for. */
+   *  the difference between a route the system offered and one they asked for.
+   *
+   *  Two things this used to get wrong, both of which ended with somebody under
+   *  an advisory and no navigation on screen.
+   *
+   *  **Asking a question is not choosing a destination.** `chosenByPerson` was
+   *  set by any press at all, and the most likely first press on this screen is
+   *  "Am I safe?" — which by design answers "stay where you are" and routes
+   *  nowhere. From that tap onwards the auto-route was permanently disabled, so
+   *  when an advisory did arrive it named a shelter, said "working out the
+   *  safest way there", and never worked anything out. It is only a choice if
+   *  an actual destination came back.
+   *
+   *  **A "stay put" answer must not wipe a route somebody is walking.** Tapping
+   *  "Am I safe?" halfway to a hospital replaced the live guidance with an
+   *  empty one and switched navigation off mid-journey. The answer is worth
+   *  showing; it is not worth the route. */
   async function ask(
     intent: string, condition?: string, silent = false, fromPerson = true
   ) {
     lastIntent.current = intent
-    if (fromPerson) chosenByPerson.current = true
     if (!silent) setBusy(intent)
     try {
       const g = await request<Guidance>("/citizen/guide", {
         method: "POST",
         body: { lng: pos.lng, lat: pos.lat, intent, condition, cityId: "pune" },
       })
+      const movable = Boolean(g.shouldMove && g.route?.length)
+      if (fromPerson && movable) chosenByPerson.current = true
+
+      if (!movable && navOn && guide?.route?.length) {
+        // Keep the route, show the advice alongside it.
+        setAdvice(g.headline)
+        return
+      }
+      setAdvice(null)
       setGuide(g)
-      setNavOn(Boolean(g.shouldMove && g.route?.length))
+      setNavOn(movable)
       routeSolvedAt.current = { lng: pos.lng, lat: pos.lat, hazards: hazardSig, at: Date.now() }
     } catch (e) {
       // A silent re-solve that fails leaves the previous route on screen, which
@@ -693,7 +701,14 @@ export default function CitizenApp() {
 
   useEffect(() => {
     const alert = state?.alerts?.[0]
-    if (!alert || !state?.inside) return
+    if (!alert) return
+    // `inside` means inside the wards this deployment scores. An advisory that
+    // has already picked a shelter for you does not need that check as well:
+    // standing just past a ward boundary is not a reason to be told a shelter
+    // exists and then shown no way to it. Without a named safe location the
+    // check still holds, because outside the covered area there is nothing to
+    // route against.
+    if (!state?.inside && !alert.safeLocation) return
     if (routedAlerts.current.has(alert.id)) return
     routedAlerts.current.add(alert.id)
     if (routedFor.current === alert.id) return
@@ -979,6 +994,21 @@ export default function CitizenApp() {
                   : "Working out the safest way there…"}
               </div>
             )}
+            {/* Never a dead end. If the automatic route did not happen — the
+                person had already chosen somewhere, the guidance call failed,
+                they pressed stop — an advisory naming a shelter still has one
+                press between it and directions. This banner used to say
+                "working out the safest way there" and offer nothing. */}
+            {state.alerts[0].safeLocation && !navOn && (
+              <button
+                type="button"
+                className="mt-2 rounded-md bg-background/90 px-3 py-1.5 text-sm font-medium text-foreground disabled:opacity-60"
+                disabled={busy === "shelter"}
+                onClick={() => void ask("shelter")}
+              >
+                {busy === "shelter" ? "Finding the way…" : "Take me there"}
+              </button>
+            )}
           </AlertDescription>
         </Alert>
       )}
@@ -1139,7 +1169,7 @@ export default function CitizenApp() {
                       <Navigation className="size-3" /> Navigating
                     </Badge>
                     <button type="button" className="text-muted-foreground text-xs underline"
-                            onClick={() => setNavOn(false)}>
+                            onClick={() => { setNavOn(false); setAdvice(null) }}>
                       Stop
                     </button>
                   </div>
@@ -1228,6 +1258,18 @@ export default function CitizenApp() {
                   {rerouted && !nav.arrived && (
                     <Alert className="py-2">
                       <AlertDescription className="text-xs">{rerouted}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  {/* They asked something while walking and the answer was
+                      "stay put". Worth saying, not worth their directions. */}
+                  {advice && !nav.arrived && (
+                    <Alert className="py-2">
+                      <AlertDescription className="text-xs">
+                        {advice} Your route to{" "}
+                        {guide?.destination?.name ?? "the destination"} is still
+                        on screen.
+                      </AlertDescription>
                     </Alert>
                   )}
 

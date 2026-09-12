@@ -91,8 +91,19 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    # DELETE was missing, and three endpoints use it: removing a ward, a
+    # resource or a lifeline on the configuration screen. Same origin in
+    # development, so it worked on a laptop; cross-origin in production, where
+    # the preflight refused the method and every delete button failed with an
+    # opaque network error and nothing in the API log, because the request never
+    # arrived.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # `X-Indradhanu-Device` labels an anonymous caller for the rate limiter and
+    # the trust scorer. A header the preflight does not allow is not dropped —
+    # the whole request is refused — so it has to be named here.
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Request-ID", "X-Indradhanu-Device",
+    ],
     expose_headers=["X-Request-ID"],
 )
 

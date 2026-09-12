@@ -256,39 +256,121 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
 }
 
+/** How long a request may hang before it is abandoned.
+ *
+ *  `fetch` has no timeout of its own. Without one, a request on a congested
+ *  venue network — or against a Render instance that has gone cold — stays
+ *  pending forever, and *that* is what freezes a screen rather than any error:
+ *  every polling screen in this app guards itself with an `inFlight` ref so
+ *  polls do not stack, and that ref is only cleared in a `finally`. A promise
+ *  that never settles never reaches the `finally`, so the poll stops for good
+ *  and the operator is left looking at a city that has quietly stopped
+ *  updating. One hung request used to end the demo.
+ *
+ *  Generous rather than snappy: a cold Render instance legitimately takes tens
+ *  of seconds to answer the first call, and killing that would turn a slow
+ *  start into a failure.
+ */
+const TIMEOUT_MS = 25_000
+/** The vision call is a GPU on the other side of a tunnel — six seconds warm,
+ *  up to a minute on a cold model load. It gets its own budget. */
+const SLOW: [RegExp, number][] = [[/^\/citizen\/vision/, 130_000]]
+
+const budgetFor = (path: string) =>
+  SLOW.find(([re]) => re.test(path))?.[1] ?? TIMEOUT_MS
+
+/** A stable id for this browser, for the calls nobody signs in to make.
+ *
+ *  Two jobs, and they want the same value. The trust scorer needs to tell one
+ *  resident filing four reports from four angles apart from four residents, and
+ *  the rate limiter needs to tell two phones apart when they are behind one
+ *  municipal NAT — which, at a demo on venue wifi, is every phone in the room.
+ *  Keeping one key for both is deliberate: two ids would drift, and the trust
+ *  attribution is the one that must not.
+ *
+ *  Wrapped in try/catch because private browsing and blocked site data both
+ *  throw on access, and a resident in water must still be able to file.
+ */
+export function deviceId(): string | undefined {
+  try {
+    const KEY = "disruptionops.device"
+    let id = localStorage.getItem(KEY)
+    if (!id) {
+      id = crypto.randomUUID()
+      localStorage.setItem(KEY, id)
+    }
+    return id
+  } catch {
+    return undefined
+  }
+}
+
 async function send<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const token = await accessToken()
   const headers: Record<string, string> = { Accept: "application/json" }
   if (token) headers.Authorization = `Bearer ${token}`
   if (opts.body !== undefined) headers["Content-Type"] = "application/json"
+  // Sent on every request so the API can tell anonymous callers apart. Not a
+  // credential and never treated as one — it labels a bucket, nothing more.
+  const device = deviceId()
+  if (device) headers["X-Indradhanu-Device"] = device
 
-  const res = await fetch(buildUrl(path, opts.query), {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    signal: opts.signal,
-  })
+  // Our own controller, chained to the caller's signal rather than replacing
+  // it, so a component unmounting still cancels and a timeout is still
+  // distinguishable from it. `AbortSignal.timeout` is not used: its abort is
+  // indistinguishable from an unmount at the catch site, and the two deserve
+  // different sentences.
+  const ctl = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    ctl.abort()
+  }, budgetFor(path))
+  const relay = () => ctl.abort()
+  opts.signal?.addEventListener("abort", relay, { once: true })
 
-  opts.onMeta?.({
-    stale: res.headers.get("X-Indradhanu-Stale") === "1",
-    status: res.status,
-  })
+  try {
+    const res = await fetch(buildUrl(path, opts.query), {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: ctl.signal,
+    })
 
-  if (res.status === 204) return undefined as T
+    opts.onMeta?.({
+      stale: res.headers.get("X-Indradhanu-Stale") === "1",
+      status: res.status,
+    })
 
-  const text = await res.text()
-  const payload = text ? safeJson(text) : null
+    if (res.status === 204) return undefined as T
 
-  if (!res.ok) {
-    // The API's error handler returns {detail: ...} or {message, clause, ...}.
-    // Prefer whatever human sentence it gave us over "Request failed".
-    const message =
-      pick(payload, "message") ??
-      pick(payload, "detail") ??
-      `${res.status} ${res.statusText}`
-    throw new ApiError(res.status, message, payload)
+    // Inside the same budget as the fetch: headers can arrive promptly and the
+    // body still stall, which hangs exactly as hard as no response at all.
+    const text = await res.text()
+    const payload = text ? safeJson(text) : null
+
+    if (!res.ok) {
+      // The API's error handler returns {detail: ...} or {message, clause, ...}.
+      // Prefer whatever human sentence it gave us over "Request failed".
+      const message =
+        pick(payload, "message") ??
+        pick(payload, "detail") ??
+        `${res.status} ${res.statusText}`
+      throw new ApiError(res.status, message, payload)
+    }
+    return payload as T
+  } catch (e) {
+    if (timedOut) {
+      throw new ApiError(
+        408,
+        "The server took too long to answer. It may be waking up — try again."
+      )
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener("abort", relay)
   }
-  return payload as T
 }
 
 function safeJson(text: string): unknown {
