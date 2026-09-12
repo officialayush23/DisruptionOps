@@ -67,6 +67,25 @@ type FieldState = {
 
 type Category = { id: string; displayName: string }
 
+/** The live fix, and why there isn't one.
+ *
+ *  `stale` is the state that did not exist before and matters most: a fix we
+ *  still have and still believe, from a watch that has since stopped answering.
+ *  Collapsing that into "no GPS" is what sent reports to the depot.
+ */
+type Gps = {
+  state: "locating" | "ok" | "stale" | "denied" | "failed" | "unsupported"
+  fix?: { lng: number; lat: number; accuracy: number; at: number }
+}
+
+/** Metres of accuracy beyond which a fix is not a place, it is a
+ *  neighbourhood. A hazard report names a street; 120 m is about as coarse as
+ *  that survives. A phone with a real GPS lock answers in 5 to 20. */
+const USABLE_FIX_M = 120
+/** Seconds after which a fix is too old to file against. A crew in a truck
+ *  covers a few hundred metres in a minute. */
+const STALE_FIX_S = 120
+
 /** What a filed hazard came back as. */
 type Filed = {
   incidentId: string | null; createdIncident: boolean; linked: boolean
@@ -93,7 +112,11 @@ export default function FieldApp() {
   const [cats, setCats] = useState<Category[]>([])
   const [hazardText, setHazardText] = useState("")
   const [hazardCat, setHazardCat] = useState("")
-  const [myPos, setMyPos] = useState<[number, number] | null>(null)
+  const [gps, setGps] = useState<Gps>({ state: "locating" })
+  /** Bumped by "Try again", which restarts the watch. A permission granted
+   *  after the first refusal does not reach a watch that was already running. */
+  const [gpsAttempt, setGpsAttempt] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
   const [filed, setFiled] = useState<Filed | null>(null)
 
   /** `selected` as a ref, read inside `load` without `load` depending on it.
@@ -157,18 +180,88 @@ export default function FieldApp() {
   // of "report what is in front of me" — and the position of the unit they have
   // selected as the fallback, because a tablet bolted into a truck cab often
   // has no geolocation permission and a crew should not be blocked by that.
+  //
+  // The first version of this was three lines and wrong in four ways, all of
+  // which ended with a hazard filed at the truck's registered depot rather than
+  // where the crew was standing, and nothing on screen saying so.
+  //
+  //  1. **The error handler wiped a good fix.** `watchPosition` calls it on
+  //     every failure, including a momentary timeout under a flyover, and
+  //     `setMyPos(null)` threw away a perfectly good position from four seconds
+  //     ago. One bad moment and the crew silently fell back to the depot.
+  //  2. **A ten-second timeout with `enableHighAccuracy`.** A cold GPS fix
+  //     routinely takes longer than that, so the very first callback on a phone
+  //     that had just been unlocked was usually an error — see (1).
+  //  3. **No accuracy gate.** A phone indoors answers from Wi-Fi with a radius
+  //     of kilometres. Filing "wall collapsed here" against that is worse than
+  //     filing nothing, because it is wrong with confidence.
+  //  4. **No way to say any of this.** The card said "Filed at your GPS
+  //     position" or "No GPS", with nothing about how good the fix was, how old
+  //     it was, or how to fix a denied permission.
+  //
+  // What follows keeps the last good fix, states its accuracy and age, and only
+  // treats a fix as usable for reporting when it is actually good enough to
+  // report against.
   useEffect(() => {
-    if (!navigator.geolocation) return
+    if (!navigator.geolocation) {
+      setGps({ state: "unsupported" })
+      return
+    }
+    setGps((g) => (g.fix ? g : { state: "locating" }))
     const id = navigator.geolocation.watchPosition(
-      (p) => setMyPos([p.coords.longitude, p.coords.latitude]),
-      () => setMyPos(null),
-      { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 }
+      (p) =>
+        setGps({
+          state: "ok",
+          fix: {
+            lng: p.coords.longitude,
+            lat: p.coords.latitude,
+            accuracy: p.coords.accuracy,
+            at: Date.now(),
+          },
+        }),
+      (e) =>
+        setGps((g) => ({
+          // A denied permission is a decision and sticks. A timeout or a lost
+          // signal is weather: keep the last fix and let the age counter say
+          // how stale it has become.
+          state: e.code === e.PERMISSION_DENIED ? "denied" : g.fix ? "stale" : "failed",
+          fix: e.code === e.PERMISSION_DENIED ? undefined : g.fix,
+        })),
+      // 30s, because a cold fix is slow and a timeout used to cost the crew
+      // their position. `maximumAge` small: a crew moves.
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 30_000 }
     )
     return () => navigator.geolocation.clearWatch(id)
-  }, [])
+  }, [gpsAttempt])
+
+  /** Ages the fix on its own clock, so "42s ago" is the real age rather than
+   *  the age it had when something else last re-rendered.
+   *
+   *  Ten seconds, not one. This re-renders the whole screen including the map's
+   *  props, and the staleness gate is a two-minute line — a second of precision
+   *  on it buys nothing and costs a redraw a second. It also only runs while
+   *  there is a fix to age. */
+  const hasFix = Boolean(gps.fix)
+  useEffect(() => {
+    if (!hasFix) return
+    const id = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(id)
+  }, [hasFix])
+
+  const fix = gps.fix ?? null
+  const fixAgeS = fix ? Math.max(0, Math.round((now - fix.at) / 1000)) : null
+  /** Good enough to hang a report on. Anything coarser is a different street. */
+  const fixUsable = Boolean(
+    fix && fix.accuracy <= USABLE_FIX_M && (fixAgeS ?? 0) <= STALE_FIX_S
+  )
+  const myPos: [number, number] | null = fix ? [fix.lng, fix.lat] : null
 
   const unit = state?.units.find((u) => u.id === selected) ?? null
-  const reportAt = myPos ?? unit?.location ?? null
+  /** The position a report is filed at, and the reason for it. Both, because a
+   *  crew has to be able to see that it is about to file against the depot. */
+  const reportAt = (fixUsable ? myPos : null) ?? unit?.location ?? null
+  const reportSource: "gps" | "unit" | "none" =
+    fixUsable && myPos ? "gps" : unit?.location ? "unit" : "none"
 
   /** File a hazard at the crew's own position, through the same intake door
    *  every other report goes through. */
@@ -212,7 +305,11 @@ export default function FieldApp() {
         method: "POST",
         body: {
           subjectType, subjectId, statusKind: kind, note,
-          lng: unit?.location?.[0], lat: unit?.location?.[1],
+          // The crew's own fix when it is good enough, the unit's record
+          // position otherwise. A crew standing at a hospital declaring it full
+          // is better evidence of where that happened than the row the truck
+          // was last written to, which is where this used to send.
+          lng: reportAt?.[0], lat: reportAt?.[1],
         },
       })
       // Offline, the service worker answers 202 with `queued` and none of the
@@ -341,7 +438,12 @@ export default function FieldApp() {
                       : undefined
                 }
                 routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
-                center={unit?.location ?? [73.88, 18.58]}
+                // The crew on their own map. `LiveMap` has taken a `me` marker
+                // all along and this screen never passed one, so a driver could
+                // see their truck's last recorded position and every incident
+                // in the city, and not themselves.
+                me={myPos ? { lng: myPos[0], lat: myPos[1], label: "You" } : null}
+                center={myPos ?? unit?.location ?? [73.88, 18.58]}
                 zoom={12}
               />
             )}
@@ -392,12 +494,15 @@ export default function FieldApp() {
               <CardTitle className="flex items-center gap-2 text-sm">
                 <MapPin className="size-4" /> Report a hazard here
               </CardTitle>
-              <CardDescription className="text-xs">
-                {myPos
-                  ? "Filed at your GPS position."
-                  : unit
-                    ? `No GPS — this will be filed at ${unit.label}'s position.`
-                    : "No position yet. Allow location, or pick one of your units."}
+              <CardDescription className="space-y-1 text-xs">
+                <GpsLine
+                  gps={gps}
+                  fixAgeS={fixAgeS}
+                  usable={fixUsable}
+                  source={reportSource}
+                  unitLabel={unit?.label}
+                  onRetry={() => setGpsAttempt((n) => n + 1)}
+                />
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
@@ -580,5 +685,90 @@ export default function FieldApp() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** What the GPS is doing, in a sentence a driver can act on.
+ *
+ *  The rule this follows: never claim a position the fix does not support, and
+ *  never make the crew guess which position a report is about to carry. Every
+ *  branch below names the place the report will be filed, because that is the
+ *  only fact on this card that changes what lands in the control room.
+ */
+function GpsLine({
+  gps, fixAgeS, usable, source, unitLabel, onRetry,
+}: {
+  gps: Gps
+  fixAgeS: number | null
+  usable: boolean
+  source: "gps" | "unit" | "none"
+  unitLabel?: string
+  onRetry: () => void
+}) {
+  const fix = gps.fix
+  const age =
+    fixAgeS === null
+      ? ""
+      : fixAgeS < 15
+        ? "just now"
+        : fixAgeS < 90
+          ? `${Math.round(fixAgeS / 10) * 10}s ago`
+          : `${Math.round(fixAgeS / 60)} min ago`
+
+  const fallback =
+    source === "unit" && unitLabel
+      ? ` This will be filed at ${unitLabel}'s recorded position instead.`
+      : source === "none"
+        ? " Nothing will file until there is a position — allow location, or pick one of your units."
+        : ""
+
+  const retry = (
+    <button type="button" onClick={onRetry} className="underline underline-offset-2">
+      Try again
+    </button>
+  )
+
+  if (gps.state === "unsupported") {
+    return <span>This device has no location service.{fallback}</span>
+  }
+  if (gps.state === "denied") {
+    return (
+      <span>
+        Location is blocked for this site. Allow it in the address bar, then {retry}.
+        {fallback}
+      </span>
+    )
+  }
+  if (!fix) {
+    return (
+      <span>
+        {gps.state === "locating"
+          ? "Finding you — a first fix outdoors takes a few seconds."
+          : "No position yet."}
+        {gps.state === "failed" && <> {retry}.</>}
+        {fallback}
+      </span>
+    )
+  }
+
+  const accuracy = `±${Math.round(fix.accuracy)} m`
+  const coords = `${fix.lat.toFixed(5)}, ${fix.lng.toFixed(5)}`
+
+  if (usable) {
+    return (
+      <span>
+        Filed at where you are standing — {coords}, {accuracy}, {age}.
+      </span>
+    )
+  }
+  // There is a fix and it is not good enough. Say which of the two reasons,
+  // because they have different fixes: go outside, or wait.
+  return (
+    <span>
+      {fix.accuracy > USABLE_FIX_M
+        ? `Your device can only place you to ${accuracy}, which is wider than the street.`
+        : `Your last fix is ${age} and too old to file against.`}{" "}
+      {coords}. {retry}.{fallback}
+    </span>
   )
 }
