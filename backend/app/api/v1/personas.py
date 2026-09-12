@@ -117,6 +117,16 @@ class CitizenReportIn(Camel):
     #: the server remembers what it showed" without the client being able to say
     #: what it showed. The image itself never has to leave the phone.
     photo_token: str | None = None
+    #: A stable per-install id the app keeps in local storage. Not identity —
+    #: it is never linked to a person and survives nothing but a reinstall —
+    #: but it is what separates one phone from another.
+    #:
+    #: Without it every anonymous report shared the device id `citizen-anon`,
+    #: which meant the anti-spam components read the whole city's anonymous
+    #: traffic as one very busy reporter: `recent_from_source` climbed with
+    #: total volume and quietly pushed everybody's trust score down during
+    #: exactly the surge the scoring exists to survive.
+    device_id: str | None = Field(default=None, max_length=64)
     city_id: str = "pune"
 
 
@@ -161,7 +171,11 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
             source="app",
             reporter_id=principal.user_id,
             reporter_name=principal.full_name or "Resident",
-            device_id=f"citizen-{principal.user_id or 'anon'}",
+            device_id=(
+                f"citizen-{principal.user_id}" if principal.user_id
+                else f"device-{body.device_id}" if body.device_id
+                else "citizen-anon"
+            ),
             city_id=body.city_id,
             clock=clocks.WALL,
         )
@@ -290,6 +304,8 @@ class VoiceReportIn(Camel):
     #: When false, the transcript comes back and nothing is filed, so the person
     #: can read what was heard before it becomes a report.
     file_it: bool = True
+    #: Same per-install id as the typed route. See `CitizenReportIn.device_id`.
+    device_id: str | None = Field(default=None, max_length=64)
     city_id: str = "pune"
 
 
@@ -360,7 +376,11 @@ async def citizen_voice_report(
             location=(body.lng, body.lat), note=heard.text,
             source="app", reporter_id=principal.user_id,
             reporter_name=principal.full_name or "Resident",
-            device_id=f"citizen-{principal.user_id or 'anon'}",
+            device_id=(
+                f"citizen-{principal.user_id}" if principal.user_id
+                else f"device-{body.device_id}" if body.device_id
+                else "citizen-anon"
+            ),
             city_id=body.city_id, clock=clocks.WALL,
         )
     except UnknownTaxonomyValue as exc:

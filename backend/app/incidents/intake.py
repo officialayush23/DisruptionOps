@@ -125,6 +125,7 @@ async def _trust_inputs(
     has_photo: bool,
     now: datetime,
     corroborations: int,
+    photo_agreement: float | None = None,
 ) -> trust.TrustInputs:
     reliability = None
     if reporter_id:
@@ -217,6 +218,11 @@ async def _trust_inputs(
         recent_from_source=int(recent),
         near_duplicate_text=int(near_dupe),
         implied_speed_kmh=speed,
+        # What the photo said, if anything looked at it. `has_photo` only knows
+        # that a file was attached; this knows whether the file agreed with the
+        # sentence, which is the difference between "they sent something" and
+        # "the picture shows knee-deep water exactly as they typed".
+        photo_agreement=photo_agreement,
     )
 
 
@@ -308,6 +314,16 @@ async def receive(
     location: tuple[float, float],
     note: str = "",
     photo_url: str | None = None,
+    #: How well an attached photo agreed with what was typed, -1..1, from
+    #: `vision.assess`. None when there was no photo, or nothing looked at it.
+    #:
+    #: This parameter is why every typed citizen report returned 500 for three
+    #: hours: the route had already been taught to redeem a photo-evidence token
+    #: and pass the agreement figure, and `receive` had never been taught to
+    #: accept it, so every call died on `TypeError: unexpected keyword argument`
+    #: before it touched the database. The `/reports` route, which does not send
+    #: it, kept working — which is exactly why the pipeline looked healthy.
+    photo_agreement: float | None = None,
     source: str = "app",
     reporter_id: str | None = None,
     reporter_name: str = "Anonymous",
@@ -366,6 +382,7 @@ async def receive(
             conn=conn, source=source, reporter_id=reporter_id, device_id=device_id,
             ward_id=ward_id, category=category, lng=lng, lat=lat, note=note,
             has_photo=bool(photo_url), now=occurred, corroborations=int(corroborations),
+            photo_agreement=photo_agreement,
         )
         if ev_obj.injection_suspected:
             t_inputs.near_duplicate_text += 1  # feeds the anomaly component

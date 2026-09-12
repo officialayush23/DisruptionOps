@@ -16,6 +16,32 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Textarea } from "@/components/ui/textarea"
 
+/** A stable id for this install, and nothing more.
+ *
+ *  It is not identity: it is never sent with a name, it is not linked to an
+ *  account, and clearing site data throws it away. What it buys is the ability
+ *  to tell one phone from another, which the trust scorer needs — its anti-spam
+ *  components count reports "from this source" in the last fifteen minutes, and
+ *  without an id every anonymous report in the city shared one. During a real
+ *  surge that reads as a single frantic reporter and quietly pushes everybody's
+ *  score down at exactly the moment the scoring has to hold.
+ *
+ *  Wrapped in try/catch because private browsing and blocked site data both
+ *  throw on access, and a resident in water must still be able to file. */
+function deviceId(): string | undefined {
+  try {
+    const KEY = "disruptionops.device"
+    let id = localStorage.getItem(KEY)
+    if (!id) {
+      id = crypto.randomUUID()
+      localStorage.setItem(KEY, id)
+    }
+    return id
+  } catch {
+    return undefined
+  }
+}
+
 /** The resident's interface.
  *
  *  Its own URL, because a resident and a ward officer need different things and
@@ -461,7 +487,7 @@ export default function CitizenApp() {
             body: {
               lng: pos.lng, lat: pos.lat, audioBase64: b64,
               contentType: mime, language: "unknown",
-              fileIt: false, cityId: "pune",
+              fileIt: false, cityId: "pune", deviceId: deviceId(),
             },
           })
           setHeard(r)
@@ -609,6 +635,7 @@ export default function CitizenApp() {
         method: "POST",
         body: {
           lng: pos.lng, lat: pos.lat, text, cityId: "pune",
+          deviceId: deviceId(),
           photoToken: photo?.token ?? undefined,
           // A photo nobody could look at is still a photo. The trust model
           // scores "attached an image" separately from "the image agreed", so

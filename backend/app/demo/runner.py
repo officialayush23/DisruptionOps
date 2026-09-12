@@ -1569,6 +1569,13 @@ _RESET_ORDER = (
     "citizen_reports",
     "incidents",
     "road_blocks",
+    # A proposal is a prediction about a run, so it goes when the run does.
+    # Leaving these behind is worse than losing them: `preposition_outcomes` is
+    # settled by looking for an assignment that used the proposed unit, and once
+    # reset has deleted every assignment, every pending proposal would resolve
+    # as a miss and drag the learned hit-rate down for something that never
+    # actually happened.
+    "preposition_outcomes",
     # `events` is deliberately absent. It is the audit log, and the database
     # enforces that with an `events_no_delete` trigger that raises on DELETE.
     # Listing it here meant reset opened a transaction, deleted fifteen tables,
@@ -1576,8 +1583,33 @@ _RESET_ORDER = (
     # and, worse, reset nothing at all while appearing to have tried. What takes
     # its place is the `world.reset` mark appended below: the log keeps every
     # run, and the console reads forward from the mark.
-    "reporter_reliability",
+    #
+    # `reporter_reliability` is deliberately absent for a related reason: it is a
+    # VIEW over `citizen_reports`, not a table. Listing it cost the same 500 all
+    # over again — Postgres refuses `delete from` a view with SQLSTATE 55000, the
+    # transaction rolled back, and reset silently did nothing while reporting
+    # failure. Deleting `citizen_reports` above already empties it, because there
+    # is nothing else for it to be computed from.
 )
+
+#: Relations `_RESET_ORDER` names that turned out not to be deletable tables.
+#: Resolved once, at the first reset, and remembered.
+#:
+#: This exists because the failure mode is so bad. Reset is one transaction on
+#: purpose — a half-reset world is worse than no reset — which means a single
+#: unusable name takes the whole thing down and leaves the operator with a 500
+#: and an unchanged world thirty seconds before a demo. Checking the catalogue
+#: first turns that into a logged line and a reset that still works.
+_UNDELETABLE: set[str] | None = None
+
+_BASE_TABLES_SQL = """
+select c.relname
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public'
+   and c.relkind in ('r', 'p')
+   and c.relname = any($1::text[])
+"""
 
 
 async def reset(*, city_id: str = "pune") -> dict[str, int]:
@@ -1599,12 +1631,26 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
     """
     await stop()
 
+    global _UNDELETABLE
+    if _UNDELETABLE is None:
+        rows = await db.fetch(_BASE_TABLES_SQL, list(_RESET_ORDER))
+        real = {r["relname"] for r in rows}
+        _UNDELETABLE = set(_RESET_ORDER) - real
+        if _UNDELETABLE:
+            log.warning(
+                "reset_skipping_non_tables",
+                names=sorted(_UNDELETABLE),
+                why="not a base table in this schema — a view, or renamed away",
+            )
+
     cleared: dict[str, int] = {}
     # One transaction on one connection: `db.execute` would take a different
     # connection from the pool each time and none of this would be atomic.
     async with _world:
         async with db.transaction() as conn:
             for table in _RESET_ORDER:
+                if table in _UNDELETABLE:
+                    continue
                 sql = f"delete from {table}"
                 # Only the tables that record which run they belong to can be
                 # scoped; the join tables hang off rows that are going anyway.

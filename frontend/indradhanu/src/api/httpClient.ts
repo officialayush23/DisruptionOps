@@ -1,3 +1,5 @@
+import { toast } from "sonner"
+
 import { accessToken } from "@/lib/supabase"
 
 /** The real HTTP client.
@@ -52,6 +54,18 @@ export class ApiError extends Error {
  *  had just arrived. */
 export type ResponseMeta = { stale: boolean; status: number }
 
+/** What to say while a request is in flight, and after.
+ *
+ *  `false` means say nothing, for the calls that fire on their own rather than
+ *  because somebody pressed something. */
+export type ToastSpec =
+  | false
+  | {
+      loading?: string
+      success?: string | ((data: unknown) => string | undefined)
+      error?: string | ((error: ApiError) => string)
+    }
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE"
   body?: unknown
@@ -60,6 +74,118 @@ type RequestOptions = {
   /** Called before the body is returned, for callers that need to know whether
    *  they are looking at live data or the last copy on the phone. */
   onMeta?: (meta: ResponseMeta) => void
+  /** Override the announcement. Omit to get the default for this endpoint. */
+  toast?: ToastSpec
+}
+
+/* ----------------------------------------------------------------- toasts -- */
+
+/** Endpoints that fire without anybody asking, and so must stay quiet.
+ *
+ *  The citizen route re-solves every time the phone drifts more than 150 m or a
+ *  hazard changes — roughly every few seconds while somebody is walking. An
+ *  announcement per solve would bury the one toast that matters under a hundred
+ *  that do not, and the Copilot renders its own answer in the transcript, so a
+ *  toast for it is a second copy of something already on screen. */
+const SILENT = [
+  /^\/citizen\/guide$/,
+  /^\/copilot\//,
+  /^\/citizen\/vision\/analyse$/,
+]
+
+/** True when the service worker answered from the outbox rather than the
+ *  network. Offline, "the city has re-planned around it" is false — the report
+ *  is on the phone and nothing in the control room has seen it yet, and a crew
+ *  who is told otherwise will act on a coordination that has not happened. */
+const queued = (data: unknown) =>
+  !!data && typeof data === "object" && (data as { queued?: boolean }).queued === true
+
+const OUTBOX = "Saved on this phone. It goes the moment there is signal."
+
+/** The response carries a report id, so a report actually exists. */
+const filed = (data: unknown) =>
+  !!data && typeof data === "object" && !!(data as { reportId?: string }).reportId
+
+/** What each endpoint should say. First match wins.
+ *
+ *  Written out rather than derived from the path because "Done" is not feedback.
+ *  An officer who presses Approve wants to be told the decision issued, and a
+ *  resident who presses Send wants to be told a human will see it — those are
+ *  different promises and a generic success toast makes neither. */
+const SAYS: [RegExp, Exclude<ToastSpec, false>][] = [
+  [/^\/demo\/start$/,    { loading: "Starting the world…",     success: "The world is running." }],
+  [/^\/demo\/stop$/,     { loading: "Stopping…",               success: "Stopped. Nothing further will happen on its own." }],
+  [/^\/demo\/reset$/,    { loading: "Resetting the world…",    success: "Back to the opening position. Units are home and available." }],
+  [/^\/demo\/replan$/,   { loading: "Re-solving…",             success: "Re-planned against the current picture." }],
+  [/\/decisions\/[^/]+\/approve$/,  { loading: "Approving…",   success: "Approved. The decision is issued and the log has your name on it." }],
+  [/\/decisions\/[^/]+\/reject$/,   { loading: "Rejecting…",   success: "Rejected. Nothing was dispatched." }],
+  [/\/decisions\/[^/]+\/override$/, { loading: "Overriding…",  success: "Overridden — recorded as an override, not as an approval." }],
+  [/^\/agency-requests$/,           { loading: "Sending the request…", success: "Sent. The other agency sees it now." }],
+  [/\/agency-requests\/[^/]+\/acknowledge$/, { loading: "Acknowledging…", success: "Acknowledged. They know you have it." }],
+  [/\/agency-requests\/[^/]+\/fulfil$/,      { loading: "Confirming…",    success: "Marked fulfilled, and recorded on both sides." }],
+  [/\/agency-requests\/[^/]+\/decline$/,     { loading: "Declining…",     success: "Declined, with the reason recorded." }],
+  [/^\/runs$/,           { loading: "Scoring the hazard…",     success: "Run complete. The board is current." }],
+  [/^\/forecast\/preposition$/, { loading: "Reading the forecast…", success: "The forecast has been asked. Any proposals are in the gate." }],
+  [/^\/citizen\/report\/voice$/, {
+    loading: "Sending what you said…",
+    // The same endpoint does two different things. With `fileIt: false` it only
+    // transcribes, so that the person can read what was heard before it becomes
+    // a report — and telling them it reached the control room at that point
+    // would be false, and the kind of false somebody stops reporting over.
+    success: (d) =>
+      queued(d)
+        ? OUTBOX
+        : filed(d)
+          ? "Sent. Someone in the control room can see it."
+          : "Heard you. Check the words below, then send.",
+  }],
+  [/^\/citizen\/report$/, {
+    loading: "Sending your report…",
+    success: (d) => (queued(d) ? OUTBOX : "Sent. Someone in the control room can see it."),
+  }],
+  [/^\/citizen\/arrived$/,{ loading: "Letting them know…",     success: "Recorded. The shelter count is updated." }],
+  [/^\/reports$/,        { loading: "Filing the report…",      success: "Report filed." }],
+  [/\/reports\/[^/]+\/verdict$/, { loading: "Recording your verdict…", success: "Recorded. The reporter's history moves with it." }],
+  [/^\/field\/status$/, {
+    loading: "Updating…",
+    success: (d) =>
+      queued(d) ? OUTBOX : "Status updated, and the city has re-planned around it.",
+  }],
+  [/^\/tasks\//,         { loading: "Updating the task…",      success: "Task updated." }],
+  [/^\/config\//,        { loading: "Saving…",                 success: "Saved." }],
+]
+
+function announce(method: string, path: string, override?: ToastSpec): ToastSpec {
+  if (override !== undefined) return override
+  if (method === "GET") return false           // polling must never speak
+  if (SILENT.some((re) => re.test(path))) return false
+  const hit = SAYS.find(([re]) => re.test(path))
+  if (hit) return hit[1]
+  // Anything mutating that is not listed still announces itself. A new button
+  // added tomorrow gets feedback without anybody remembering to add it here,
+  // which is the whole reason this lives at the HTTP layer rather than in the
+  // fifteen components that press it.
+  return method === "DELETE"
+    ? { loading: "Deleting…", success: "Deleted." }
+    : { loading: "Working…", success: "Done." }
+}
+
+/** Sonner needs a stable id to replace the spinner with the result rather than
+ *  stacking a second toast beside it. Per endpoint, not per call, so hammering
+ *  one button collapses into one line instead of a column of them. */
+const toastId = (method: string, path: string) => `${method} ${path}`
+
+function errorText(error: unknown, spec: Exclude<ToastSpec, false>): string {
+  if (typeof spec.error === "string") return spec.error
+  if (error instanceof ApiError) {
+    if (typeof spec.error === "function") return spec.error(error)
+    if (error.isUnauthorised) return "Your session has expired. Sign in again."
+    if (error.isForbidden) return "Your role is not permitted to do that."
+    if (error.status >= 500) return "The server could not complete that."
+    return error.message
+  }
+  // fetch itself failed: no network, DNS, CORS, the server not listening.
+  return "Could not reach the server. Check your connection."
 }
 
 function buildUrl(path: string, query?: RequestOptions["query"]): string {
@@ -76,6 +202,41 @@ function buildUrl(path: string, query?: RequestOptions["query"]): string {
 }
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const method = opts.method ?? "GET"
+  const spec = announce(method, path, opts.toast)
+  if (spec === false) return send<T>(path, opts)
+
+  const id = toastId(method, path)
+  if (spec.loading) toast.loading(spec.loading, { id })
+  try {
+    const data = await send<T>(path, opts)
+    const done =
+      typeof spec.success === "function" ? spec.success(data) : spec.success
+    // A success message of undefined means "this one succeeded quietly" —
+    // the spinner still has to go, or it hangs there forever.
+    if (done) toast.success(done, { id })
+    else toast.dismiss(id)
+    return data
+  } catch (error) {
+    // An aborted request is not a failure, it is a component unmounting or a
+    // newer request superseding this one. Telling somebody their report failed
+    // because they navigated away would be a lie.
+    if (error instanceof DOMException && error.name === "AbortError") {
+      toast.dismiss(id)
+      throw error
+    }
+    toast.error(errorText(error, spec), {
+      id,
+      description:
+        error instanceof ApiError && error.status >= 500
+          ? "Nothing was changed. It is safe to try again."
+          : undefined,
+    })
+    throw error
+  }
+}
+
+async function send<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const token = await accessToken()
   const headers: Record<string, string> = { Accept: "application/json" }
   if (token) headers.Authorization = `Bearer ${token}`
@@ -240,17 +401,42 @@ export const fetchAlerts = (wardId?: string) =>
 export const fetchTasks = (operator?: string) =>
   request<unknown[]>("/tasks", { query: { operator } })
 
+const DECISION_SAID = {
+  approve:  "Approved. The decision is issued and the log has your name on it.",
+  reject:   "Rejected. Nothing was dispatched.",
+  override: "Overridden — recorded as an override, not as an approval.",
+} as const
+
 export const actOnDecision = (
   decisionId: string,
   action: "approve" | "reject" | "override",
   note?: string
-) => request<unknown>(`/decisions/${decisionId}`, { method: "POST", body: { action, note } })
+) =>
+  request<unknown>(`/decisions/${decisionId}`, {
+    method: "POST",
+    body: { action, note },
+    toast: { loading: "Recording your decision…", success: DECISION_SAID[action] },
+  })
+
+const TASK_SAID = {
+  queued:   "Put back in the queue.",
+  accepted: "Accepted. The control room can see you have it.",
+  on_site:  "Marked on site.",
+  complete: "Closed, with your proof attached.",
+} as const
 
 export const updateTask = (
   taskId: string,
   status: "queued" | "accepted" | "on_site" | "complete",
   proofNote?: string
-) => request<unknown>(`/tasks/${taskId}`, { method: "PATCH", body: { status, proofNote } })
+) =>
+  request<unknown>(`/tasks/${taskId}`, {
+    method: "PATCH",
+    body: { status, proofNote },
+    // The status is the whole message. "Task updated" tells a crew standing in
+    // water nothing they did not already know from pressing the button.
+    toast: { loading: "Updating…", success: TASK_SAID[status] },
+  })
 
 export const submitReport = (report: {
   wardId: string
