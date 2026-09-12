@@ -106,10 +106,24 @@ type Gps = {
   fix?: { lng: number; lat: number; accuracy: number; at: number }
 }
 
-/** Metres of accuracy beyond which a fix is not a place, it is a
- *  neighbourhood. A hazard report names a street; 120 m is about as coarse as
- *  that survives. A phone with a real GPS lock answers in 5 to 20. */
-const USABLE_FIX_M = 120
+/** Accuracy at or below which a fix names a street. A phone with a real GPS
+ *  lock answers in 5 to 20 m; 250 m still puts a report on the right block. */
+const PRECISE_FIX_M = 250
+/** Accuracy beyond which a fix is a neighbourhood rather than a place, and the
+ *  unit's recorded position is the better of two bad options.
+ *
+ *  This bound replaced a single 120 m gate that was **too strict and, worse, a
+ *  hard block**: a crew standing at a hazard with a ±200 m cell fix — which is
+ *  what a phone returns for the first few seconds before GPS refines, and
+ *  permanently if the person granted Android's "approximate location" — was
+ *  refused and sent to file at the depot instead. The depot can be kilometres
+ *  away and carries no accuracy figure at all, so trading a known ±200 m for an
+ *  unknown error was the wrong way round.
+ *
+ *  Three bands now: precise, approximate-but-used, and too coarse. The middle
+ *  one is the important one, because it is where a real phone actually sits and
+ *  the old code had no room for it. */
+const COARSE_FIX_M = 2000
 /** Seconds after which a fix is too old to file against. A crew in a truck
  *  covers a few hundred metres in a minute. */
 const STALE_FIX_S = 120
@@ -145,6 +159,10 @@ export default function FieldApp() {
    *  after the first refusal does not reach a watch that was already running. */
   const [gpsAttempt, setGpsAttempt] = useState(0)
   const [now, setNow] = useState(() => Date.now())
+  /** Whether the map rides with the crew. On by default; a drag releases it. */
+  const [follow, setFollow] = useState(true)
+  /** Bumped to force one re-centre even while `follow` is off. */
+  const [recentre, setRecentre] = useState(0)
   const [filed, setFiled] = useState<Filed | null>(null)
 
   /** `selected` as a ref, read inside `load` without `load` depending on it.
@@ -278,10 +296,13 @@ export default function FieldApp() {
 
   const fix = gps.fix ?? null
   const fixAgeS = fix ? Math.max(0, Math.round((now - fix.at) / 1000)) : null
-  /** Good enough to hang a report on. Anything coarser is a different street. */
-  const fixUsable = Boolean(
-    fix && fix.accuracy <= USABLE_FIX_M && (fixAgeS ?? 0) <= STALE_FIX_S
-  )
+  const fresh = (fixAgeS ?? Infinity) <= STALE_FIX_S
+  /** Good enough to file against — which is a lower bar than "good enough to
+   *  navigate by", and the two were conflated. The competition is not a perfect
+   *  fix, it is the truck's recorded position. */
+  const fixUsable = Boolean(fix && fix.accuracy <= COARSE_FIX_M && fresh)
+  /** Good enough that nothing needs to be said about it. */
+  const fixPrecise = Boolean(fix && fix.accuracy <= PRECISE_FIX_M && fresh)
   const myPos: [number, number] | null = fix ? [fix.lng, fix.lat] : null
 
   const unit = state?.units.find((u) => u.id === selected) ?? null
@@ -400,6 +421,39 @@ export default function FieldApp() {
 
       <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
+          {/* Where the crew is, above the map rather than buried under the
+              report card. This is the line a driver checks first — "does it
+              know where I am" — and it was three cards down. */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2.5">
+            <div className="text-muted-foreground min-w-0 text-xs">
+              <GpsLine
+                gps={gps}
+                fixAgeS={fixAgeS}
+                usable={fixUsable}
+                precise={fixPrecise}
+                source={reportSource}
+                unitLabel={unit?.label}
+                onRetry={() => setGpsAttempt((n) => n + 1)}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant={follow ? "secondary" : "outline"}
+              className="h-8 shrink-0 text-xs"
+              disabled={!myPos}
+              onClick={() => {
+                // Pressing it always re-centres, and turns following back on.
+                // Two behaviours in one button because they are the same
+                // intent: put me back on the map.
+                setRecentre((n) => n + 1)
+                setFollow(true)
+              }}
+            >
+              <MapPin className="size-3.5" />
+              {myPos ? (follow ? "Following you" : "Centre on me") : "No position"}
+            </Button>
+          </div>
+
           <MapStage
             panelTitle="My units"
             panel={
@@ -471,6 +525,20 @@ export default function FieldApp() {
                 // see their truck's last recorded position and every incident
                 // in the city, and not themselves.
                 me={myPos ? { lng: myPos[0], lat: myPos[1], label: "You" } : null}
+                // Locked to the crew by default. A driver does not pan a map
+                // one-handed: the one thing this view has to do is stay on them
+                // as they move, and it was doing the opposite — `LiveMap` has
+                // taken `followMe` since it was written and this screen passed
+                // neither it nor `recentreKey`, so the camera sat wherever the
+                // truck's *recorded* position put it at mount and never moved
+                // again. That is the "free flow".
+                //
+                // Turned off the moment they drag, because a crew checking what
+                // is two streets over should not be yanked back mid-look, and
+                // turned on again by the button below.
+                followMe={follow}
+                recentreKey={recentre}
+                onUserMove={() => setFollow(false)}
                 center={myPos ?? unit?.location ?? [73.88, 18.58]}
                 zoom={13.2}
               />
@@ -527,6 +595,7 @@ export default function FieldApp() {
                   gps={gps}
                   fixAgeS={fixAgeS}
                   usable={fixUsable}
+                  precise={fixPrecise}
                   source={reportSource}
                   unitLabel={unit?.label}
                   onRetry={() => setGpsAttempt((n) => n + 1)}
@@ -827,11 +896,12 @@ export default function FieldApp() {
  *  only fact on this card that changes what lands in the control room.
  */
 function GpsLine({
-  gps, fixAgeS, usable, source, unitLabel, onRetry,
+  gps, fixAgeS, usable, precise, source, unitLabel, onRetry,
 }: {
   gps: Gps
   fixAgeS: number | null
   usable: boolean
+  precise: boolean
   source: "gps" | "unit" | "none"
   unitLabel?: string
   onRetry: () => void
@@ -848,14 +918,14 @@ function GpsLine({
 
   const fallback =
     source === "unit" && unitLabel
-      ? ` This will be filed at ${unitLabel}'s recorded position instead.`
+      ? ` Reports will be filed at ${unitLabel}'s recorded position instead.`
       : source === "none"
         ? " Nothing will file until there is a position — allow location, or pick one of your units."
         : ""
 
   const retry = (
     <button type="button" onClick={onRetry} className="underline underline-offset-2">
-      Try again
+      Get a better fix
     </button>
   )
 
@@ -865,8 +935,8 @@ function GpsLine({
   if (gps.state === "denied") {
     return (
       <span>
-        Location is blocked for this site. Allow it in the address bar, then {retry}.
-        {fallback}
+        Location is blocked for this site. Allow it in the address bar, then{" "}
+        {retry}.{fallback}
       </span>
     )
   }
@@ -885,19 +955,39 @@ function GpsLine({
   const accuracy = `±${Math.round(fix.accuracy)} m`
   const coords = `${fix.lat.toFixed(5)}, ${fix.lng.toFixed(5)}`
 
-  if (usable) {
+  // Precise: say where, and nothing else. A line that explains a fix which is
+  // working is noise.
+  if (precise) {
     return (
       <span>
         Filed at where you are standing — {coords}, {accuracy}, {age}.
       </span>
     )
   }
-  // There is a fix and it is not good enough. Say which of the two reasons,
-  // because they have different fixes: go outside, or wait.
+
+  // Usable but coarse. **This is the band a real phone sits in**, and the old
+  // code had none: it refused the fix and sent the report to the depot. The
+  // fix is used, the figure is stated, and the offer to improve it is there
+  // without being a precondition.
+  if (usable) {
+    return (
+      <span>
+        Filed at where you are standing, to {accuracy} — {coords}, {age}. Good
+        enough for the block, not the doorway.{" "}
+        {fix.accuracy > PRECISE_FIX_M ? (
+          <>
+            {retry} for a GPS-grade fix, or step outside.
+          </>
+        ) : null}
+      </span>
+    )
+  }
+
+  // Genuinely useless, or stale.
   return (
     <span>
-      {fix.accuracy > USABLE_FIX_M
-        ? `Your device can only place you to ${accuracy}, which is wider than the street.`
+      {fix.accuracy > COARSE_FIX_M
+        ? `Your device can only place you to ${accuracy}, which is a neighbourhood rather than a place.`
         : `Your last fix is ${age} and too old to file against.`}{" "}
       {coords}. {retry}.{fallback}
     </span>

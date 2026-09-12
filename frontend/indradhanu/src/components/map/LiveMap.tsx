@@ -88,6 +88,12 @@ type Props = {
   onPickIncident?: (id: string) => void
   /** Recentre on `me` whenever it moves. On for the citizen, off for the console. */
   followMe?: boolean
+  /** Called once when the person moves the camera themselves.
+   *
+   *  A follow-me camera that cannot be let go of is worse than one that never
+   *  follows: a crew checking what is two streets over gets yanked back on the
+   *  next fix, mid-look. The caller turns following off when this fires. */
+  onUserMove?: () => void
   /** Bump to recentre on `me` again without `me` having moved. A caller used to
    *  do this by handing us a new object with the same coordinates in it, which
    *  worked only because the effect below compared object identity. */
@@ -321,7 +327,7 @@ export function LiveMap({
   wards = [], incidents = [], resources = [], facilities = [], blocks = [],
   needs = [], activity, routes = [],
   route, routeLabel, me, center = [73.88, 18.58], zoom = 11.6, className,
-  onPickIncident, followMe = false, recentreKey = 0,
+  onPickIncident, followMe = false, recentreKey = 0, onUserMove,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<mapboxgl.Map | null>(null)
@@ -913,6 +919,29 @@ export function LiveMap({
       map.current?.easeTo({ center: [meLng, meLat], duration: 400 })
     }
   }, [ready, meLng, meLat, meLabel, followMe, recentreKey])
+
+  /** A touch or a scroll on the canvas is the person taking the camera.
+   *
+   *  Read from the DOM rather than from Mapbox's `dragstart` / `zoomstart`.
+   *  Those fire for our own `easeTo` as well as for a human, so they need an
+   *  `originalEvent` check to tell the two apart — and `zoomstart`'s event type
+   *  does not declare that field, so the check does not typecheck. A
+   *  `pointerdown` on the canvas has no such ambiguity: nothing this component
+   *  does can produce one, so every one of them is a person.
+   */
+  const onUserMoveRef = useRef(onUserMove)
+  useEffect(() => { onUserMoveRef.current = onUserMove }, [onUserMove])
+  useEffect(() => {
+    const canvas = ready ? map.current?.getCanvasContainer() : null
+    if (!canvas) return
+    const release = () => onUserMoveRef.current?.()
+    canvas.addEventListener("pointerdown", release)
+    canvas.addEventListener("wheel", release, { passive: true })
+    return () => {
+      canvas.removeEventListener("pointerdown", release)
+      canvas.removeEventListener("wheel", release)
+    }
+  }, [ready])
 
   /** Keep the canvas the size of its box.
    *

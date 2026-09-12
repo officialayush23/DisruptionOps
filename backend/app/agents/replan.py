@@ -153,6 +153,10 @@ async def _fleet(
                a.incident_id::text as incident_id,
                a.eta_minutes,
                a.created_at,
+               -- The road this unit is already driving. Needed to answer the
+               -- question nothing was asking: is the path we gave it still
+               -- passable?
+               extensions.ST_AsGeoJSON(a.route)::json -> 'coordinates' as route,
                i.title             as incident_title
           from resources r
           left join lateral (
@@ -184,6 +188,7 @@ async def _fleet(
         )
         context[r["id"]] = {
             "assignment_id": r["assignment_id"],
+            "route": r["route"] or [],
             "incident_id": r["incident_id"],
             "incident_title": r["incident_title"] or "",
             "label": r["label"],
@@ -322,11 +327,33 @@ async def replan(
             to = now_alloc.demand.incident_id if now_alloc else None
 
             if was and to and was == to:
+                # Still the right unit — but not necessarily still the right
+                # road.
+                #
+                # This branch used to `continue` immediately, and that was the
+                # gap: the replanner re-solved *who goes where* every time the
+                # world changed and never redrew the path for the units that
+                # stayed. A crew committed at tick 20 kept the geometry it was
+                # given at tick 20, so a road reported impassable at tick 40 —
+                # by another crew, on the road this one is driving — changed the
+                # map, changed the citizen's route, and left the truck being
+                # sent into it. The one vehicle that could not see the block was
+                # the one being routed through it.
+                rerouted = await _reroute_if_blocked(
+                    conn, ctx, now_alloc, blocked, clock=clock, actor=actor,
+                    caused_by=plan_event.id, city_id=city_id,
+                )
                 diff.kept.append(Change(
                     kind="kept", resource_id=unit_id, resource_label=ctx["label"],
                     incident_id=to, incident_title=ctx["incident_title"],
-                    ward_id=now_alloc.demand.ward_id, eta_minutes=now_alloc.eta_minutes,
-                    reason="Already committed here and still the right unit for it.",
+                    ward_id=now_alloc.demand.ward_id,
+                    eta_minutes=rerouted or now_alloc.eta_minutes,
+                    reason=(
+                        "Already committed here, and the road it was given is "
+                        "now blocked, so it has a new one."
+                        if rerouted
+                        else "Already committed here and still the right unit for it."
+                    ),
                 ))
                 continue
 
@@ -452,6 +479,94 @@ async def replan(
         uncovered=len(diff.uncovered),
     )
     return diff
+
+
+async def _reroute_if_blocked(
+    conn: Any,
+    ctx: dict,
+    alloc: Any,
+    blocked: Sequence[tuple[float, float]],
+    *,
+    clock: Clock,
+    actor: str,
+    caused_by: int | None,
+    city_id: str,
+) -> int | None:
+    """Redraw a committed unit's road when the one it has crosses a new block.
+
+    Returns the new ETA when it re-routed, `None` when the existing road is
+    still clear — so the caller can say which happened rather than implying a
+    reroute every time.
+
+    Only the geometry changes. The unit, the incident and the assignment row are
+    the same: this is not a re-tasking and must not read as one, on the diff or
+    in the log. `assignment.rerouted` is its own event kind for exactly that
+    reason.
+    """
+    if not blocked:
+        return None
+    path = ctx.get("route") or []
+    if len(path) < 2:
+        # No stored geometry to judge. A straight-line fallback assignment has
+        # none, and re-routing on no evidence would redraw every unit on every
+        # plan.
+        return None
+
+    exposure = routing.exposure(
+        [[float(c[0]), float(c[1])] for c in path], blocked
+    )
+    if not exposure:
+        return None
+
+    line = await routing.route_line(alloc.unit.location, alloc.demand.location, blocked)
+    geometry = (
+        {"type": "LineString", "coordinates": line.coordinates}
+        if len(line.coordinates) > 1
+        else None
+    )
+    if geometry is None:
+        return None
+
+    await conn.execute(
+        """
+        update assignments
+           set route = extensions.ST_SetSRID(
+                         extensions.ST_GeomFromGeoJSON($2::text), 4326),
+               route_engine = $3,
+               eta_minutes = $4,
+               distance_km = $5,
+               steps = $6
+         where id = $1::uuid
+        """,
+        ctx["assignment_id"],
+        json.dumps(geometry),
+        line.engine,
+        line.minutes if line.is_real_road else alloc.eta_minutes,
+        round(line.km if line.is_real_road else alloc.distance_km, 2),
+        [
+            {"instruction": st.instruction, "street": st.street,
+             "distanceM": st.distance_m}
+            for st in line.steps
+        ],
+    )
+    await ev.append(
+        clock=clock, kind="assignment.rerouted", actor=actor,
+        subject_type="resource", subject_id=alloc.unit.id, city_id=city_id,
+        ward_id=alloc.demand.ward_id,
+        payload={
+            "to_incident": alloc.demand.incident_id,
+            "reason": (
+                f"The road {ctx['label']} was given crosses "
+                f"{exposure} newly blocked point(s). Redrawn around them; "
+                f"{line.minutes} min now."
+            ),
+            "blocked_points": exposure,
+            "eta_minutes": line.minutes,
+            "engine": line.engine,
+        },
+        caused_by=caused_by, conn=conn,
+    )
+    return line.minutes if line.is_real_road else None
 
 
 async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str | None,

@@ -262,6 +262,19 @@ def _exposure(coords: list[list[float]], blocked: Sequence[tuple[float, float]])
     )
 
 
+def exposure(
+    coords: list[list[float]], blocked: Sequence[tuple[float, float]]
+) -> int:
+    """How many blocked points a path still passes close to.
+
+    Public because the replanner asks it of a road a unit is *already* driving,
+    not only of a candidate. Same question, same answer, one implementation —
+    a second copy of this would be a second opinion about whether a street is
+    passable.
+    """
+    return _exposure(coords, blocked)
+
+
 def _mapbox_steps(route: dict) -> list[Step]:
     out: list[Step] = []
     for leg in route.get("legs") or []:
@@ -378,6 +391,13 @@ async def route_line(
                 steps=_mapbox_steps(best),
                 considered=len(routes),
             )
+        # A token is set and Mapbox still gave us nothing. `get_json` never
+        # raises, so this used to fall through to OSRM in complete silence and
+        # the only visible symptom was directions that named no streets. A bad
+        # scope, a URL restriction on the token, or a 422 all land here.
+        log.warning("mapbox_route_empty", origin=o, destination=d,
+                    note="falling back to OSRM; check the token's scopes and "
+                         "URL restrictions")
 
     payload = _data(
         await get_json(

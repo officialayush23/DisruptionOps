@@ -263,6 +263,16 @@ export default function AgentTrace() {
               (name(p.from_incident) ? `from ${name(p.from_incident)}` : ""),
           }
           break
+        case "assignment.rerouted":
+          row = {
+            left: name(e.subjectId) ?? "A unit",
+            // Not a re-tasking, and it must not read as one: the unit, the
+            // incident and the assignment are unchanged. Only the road is.
+            verb: "given a new road to",
+            right: name(p.to_incident) ?? "its task",
+            detail: str("reason"),
+          }
+          break
         case "assignment.cancelled":
           row = {
             left: name(e.subjectId) ?? "A unit",
@@ -413,7 +423,8 @@ export default function AgentTrace() {
     ])
     const allocation = new Set([
       "plan.generated", "assignment.created", "assignment.changed",
-      "assignment.cancelled", "demand.uncovered", "incident.resolved",
+      "assignment.rerouted", "assignment.cancelled", "demand.uncovered",
+      "incident.resolved",
     ])
     if (only === "ingest") return joined.filter((j) => ingest.has(j.kind))
     if (only === "allocation") return joined.filter((j) => allocation.has(j.kind))

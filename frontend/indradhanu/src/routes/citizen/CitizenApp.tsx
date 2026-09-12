@@ -1091,6 +1091,243 @@ export default function CitizenApp() {
         </Alert>
       )}
 
+      {/* The report box, above the map.
+       *
+       *  It was in the right-hand column, and on a phone that column stacks
+       *  *after* the map — so a resident had to scroll past a full-height map
+       *  they cannot read one-handed to reach a text box and a Send button.
+       *  Moving the three action buttons up fixed reaching the microphone and
+       *  not this; typing is what most people do, and it was still below the
+       *  fold. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Tell us what you can see</CardTitle>
+          <CardDescription>
+            Say it or type it, in English, Hindi or Marathi. No account needed.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {/* Hold to talk. One hand, no form, no dropdown. The transcript
+              lands in the box below so the person can read it before it
+              becomes a report. */}
+          <Button
+            type="button"
+            variant={recording ? "destructive" : "secondary"}
+            className="w-full"
+            disabled={busy === "voice" || voiceOff}
+            onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
+            onPointerUp={() => { if (recording) stopRecording() }}
+            onPointerLeave={() => { if (recording) stopRecording() }}
+          >
+            {busy === "voice" ? (
+              <><Loader2 className="size-4 animate-spin" /> Listening back…</>
+            ) : recording ? (
+              <><Square className="size-4" /> Release to stop</>
+            ) : (
+              <><Mic className="size-4" /> Hold to speak</>
+            )}
+          </Button>
+          {voiceOff && (
+            <p className="text-muted-foreground text-xs">
+              Speaking a report is not switched on for this deployment, so
+              type it instead. Everything after the words is identical —
+              spoken reports go through the same parser and the same
+              scoring.
+            </p>
+          )}
+
+          {heard && (
+            <div className="space-y-1 rounded border p-2 text-xs">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline">{heard.languageName}</Badge>
+                {heard.translated && (
+                  <Badge variant="secondary">translated to English</Badge>
+                )}
+                <span className="text-muted-foreground tabular-nums">
+                  {heard.latencyMs} ms
+                </span>
+              </div>
+              <div className="text-muted-foreground">
+                Read as <span className="text-foreground">{heard.readAsLabel}</span>.
+                Correct the text below if that is wrong, then send.
+              </div>
+              {heard.notes.map((n, i) => (
+                <div key={i} className="text-muted-foreground italic">{n}</div>
+              ))}
+            </div>
+          )}
+
+          <Textarea
+            value={text}
+            onChange={(e) => { setText(e.target.value); setHeard(null) }}
+            placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
+            rows={3}
+            className="text-base"
+          />
+
+          {/* A photo, if there is one to take.
+              `capture="environment"` opens the rear camera straight away on
+              a phone and is ignored on a laptop, where it falls back to a
+              file picker — which is the right behaviour in both places
+              without asking which one you are on. */}
+          <input
+            ref={photoInput}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) void attachPhoto(f)
+            }}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            className="w-full"
+            disabled={busy === "photo"}
+            onClick={() => photoInput.current?.click()}
+            title={
+              state?.capabilities?.vision === false
+                ? "Your photo will be attached, but no model will look at it here."
+                : undefined
+            }
+          >
+            {busy === "photo" ? (
+              <><Loader2 className="size-4 animate-spin" /> Looking at the photo…</>
+            ) : (
+              <><Camera className="size-4" /> {photo ? "Change photo" : "Add a photo"}</>
+            )}
+          </Button>
+
+          {photoPreview && (
+            <div className="space-y-2 rounded border p-2">
+              <div className="flex items-start gap-2">
+                <img
+                  src={photoPreview}
+                  alt="The photo attached to this report"
+                  className="size-20 shrink-0 rounded object-cover"
+                />
+                <div className="min-w-0 flex-1 space-y-1 text-xs">
+                  {photo?.unanalysed ? (
+                    <p className="text-muted-foreground">
+                      Attached. Nobody has looked at it — photo analysis is
+                      not switched on here — so it counts for a little and
+                      not for much.
+                    </p>
+                  ) : photo ? (
+                    <>
+                      {/* What the model saw, said plainly, before the
+                          report goes. The agreement number is the whole
+                          point: a photo that backs the text raises how much
+                          this report is trusted, one that contradicts it
+                          lowers it, and either way the person gets to see
+                          that and fix their wording first. */}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge
+                          variant={
+                            (photo.agreement ?? 0) > 0.15
+                              ? "default"
+                              : (photo.agreement ?? 0) < -0.15
+                                ? "destructive"
+                                : "outline"
+                          }
+                        >
+                          {(photo.agreement ?? 0) > 0.15
+                            ? "Backs up what you wrote"
+                            : (photo.agreement ?? 0) < -0.15
+                              ? "Does not match what you wrote"
+                              : "Adds little either way"}
+                        </Badge>
+                        {photo.lifeSafetySignal && (
+                          <Badge variant="destructive">People visible</Badge>
+                        )}
+                        {photo.water?.depthBand && (
+                          <Badge variant="outline">
+                            water {photo.water.depthBand}
+                          </Badge>
+                        )}
+                      </div>
+                      {photo.hazards?.length ? (
+                        <p className="text-muted-foreground">
+                          Seen in the photo: {photo.hazards.join(", ")}.
+                        </p>
+                      ) : (
+                        <p className="text-muted-foreground">
+                          Nothing it recognises as a hazard.
+                        </p>
+                      )}
+                      {photo.imageQuality && photo.imageQuality !== "good" && (
+                        <p className="text-muted-foreground">
+                          The image is {photo.imageQuality}, so this counts
+                          for less.
+                        </p>
+                      )}
+                      <p className="text-muted-foreground">
+                        A photo can only raise or lower how much your report
+                        is believed. It never decides what happens next.
+                      </p>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-muted-foreground text-xs underline"
+                onClick={clearPhoto}
+              >
+                Remove photo
+              </button>
+            </div>
+          )}
+          <Button className="w-full" onClick={fileReport}
+                  disabled={busy !== null || !text.trim()}>
+            {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+            Send report
+          </Button>
+          {state && !state.inside && (
+            <p className="text-muted-foreground text-xs">
+              You are outside the covered area, so this will be refused
+              until you move inside it. Pressing send will say so.
+            </p>
+          )}
+          {filed?.queued ? (
+            <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+              <div className="font-medium">Saved on this phone.</div>
+              <div className="text-muted-foreground">
+                {String(
+                  filed.message ??
+                    "There is no signal right now. It sends itself the moment there is."
+                )}
+              </div>
+              <div className="text-muted-foreground">
+                It will be timed from now, not from when it finally sends, so
+                nothing is lost by the wait.
+              </div>
+            </div>
+          ) : filed ? (
+            <div className="space-y-1 rounded border p-2 text-xs">
+              <div className="font-medium">{String(filed.readHow ?? "")}</div>
+              <div className="text-muted-foreground">{String(filed.summary ?? "")}</div>
+              {Boolean(filed.linked) && (
+                <Badge variant="outline">
+                  Merged with an existing report at{" "}
+                  {((filed.linkScore as number) * 100).toFixed(0)}%
+                </Badge>
+              )}
+              {Number(filed.urgencyBoost ?? 0) > 0 && (
+                <Badge variant="destructive">Flagged urgent</Badge>
+              )}
+              {filed.photo != null && (
+                <div className="text-muted-foreground">
+                  Your photo was taken into account when scoring this report.
+                </div>
+              )}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
       <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
         <div className="space-y-3">
           <MapStage
@@ -1411,234 +1648,6 @@ export default function CitizenApp() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Tell us what you can see</CardTitle>
-              <CardDescription>
-                Say it or type it, in English, Hindi or Marathi. No account needed.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {/* Hold to talk. One hand, no form, no dropdown. The transcript
-                  lands in the box below so the person can read it before it
-                  becomes a report. */}
-              <Button
-                type="button"
-                variant={recording ? "destructive" : "secondary"}
-                className="w-full"
-                disabled={busy === "voice" || voiceOff}
-                onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
-                onPointerUp={() => { if (recording) stopRecording() }}
-                onPointerLeave={() => { if (recording) stopRecording() }}
-              >
-                {busy === "voice" ? (
-                  <><Loader2 className="size-4 animate-spin" /> Listening back…</>
-                ) : recording ? (
-                  <><Square className="size-4" /> Release to stop</>
-                ) : (
-                  <><Mic className="size-4" /> Hold to speak</>
-                )}
-              </Button>
-              {voiceOff && (
-                <p className="text-muted-foreground text-xs">
-                  Speaking a report is not switched on for this deployment, so
-                  type it instead. Everything after the words is identical —
-                  spoken reports go through the same parser and the same
-                  scoring.
-                </p>
-              )}
-
-              {heard && (
-                <div className="space-y-1 rounded border p-2 text-xs">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Badge variant="outline">{heard.languageName}</Badge>
-                    {heard.translated && (
-                      <Badge variant="secondary">translated to English</Badge>
-                    )}
-                    <span className="text-muted-foreground tabular-nums">
-                      {heard.latencyMs} ms
-                    </span>
-                  </div>
-                  <div className="text-muted-foreground">
-                    Read as <span className="text-foreground">{heard.readAsLabel}</span>.
-                    Correct the text below if that is wrong, then send.
-                  </div>
-                  {heard.notes.map((n, i) => (
-                    <div key={i} className="text-muted-foreground italic">{n}</div>
-                  ))}
-                </div>
-              )}
-
-              <Textarea
-                value={text}
-                onChange={(e) => { setText(e.target.value); setHeard(null) }}
-                placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
-                rows={3}
-                className="text-base"
-              />
-
-              {/* A photo, if there is one to take.
-                  `capture="environment"` opens the rear camera straight away on
-                  a phone and is ignored on a laptop, where it falls back to a
-                  file picker — which is the right behaviour in both places
-                  without asking which one you are on. */}
-              <input
-                ref={photoInput}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) void attachPhoto(f)
-                }}
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full"
-                disabled={busy === "photo"}
-                onClick={() => photoInput.current?.click()}
-                title={
-                  state?.capabilities?.vision === false
-                    ? "Your photo will be attached, but no model will look at it here."
-                    : undefined
-                }
-              >
-                {busy === "photo" ? (
-                  <><Loader2 className="size-4 animate-spin" /> Looking at the photo…</>
-                ) : (
-                  <><Camera className="size-4" /> {photo ? "Change photo" : "Add a photo"}</>
-                )}
-              </Button>
-
-              {photoPreview && (
-                <div className="space-y-2 rounded border p-2">
-                  <div className="flex items-start gap-2">
-                    <img
-                      src={photoPreview}
-                      alt="The photo attached to this report"
-                      className="size-20 shrink-0 rounded object-cover"
-                    />
-                    <div className="min-w-0 flex-1 space-y-1 text-xs">
-                      {photo?.unanalysed ? (
-                        <p className="text-muted-foreground">
-                          Attached. Nobody has looked at it — photo analysis is
-                          not switched on here — so it counts for a little and
-                          not for much.
-                        </p>
-                      ) : photo ? (
-                        <>
-                          {/* What the model saw, said plainly, before the
-                              report goes. The agreement number is the whole
-                              point: a photo that backs the text raises how much
-                              this report is trusted, one that contradicts it
-                              lowers it, and either way the person gets to see
-                              that and fix their wording first. */}
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge
-                              variant={
-                                (photo.agreement ?? 0) > 0.15
-                                  ? "default"
-                                  : (photo.agreement ?? 0) < -0.15
-                                    ? "destructive"
-                                    : "outline"
-                              }
-                            >
-                              {(photo.agreement ?? 0) > 0.15
-                                ? "Backs up what you wrote"
-                                : (photo.agreement ?? 0) < -0.15
-                                  ? "Does not match what you wrote"
-                                  : "Adds little either way"}
-                            </Badge>
-                            {photo.lifeSafetySignal && (
-                              <Badge variant="destructive">People visible</Badge>
-                            )}
-                            {photo.water?.depthBand && (
-                              <Badge variant="outline">
-                                water {photo.water.depthBand}
-                              </Badge>
-                            )}
-                          </div>
-                          {photo.hazards?.length ? (
-                            <p className="text-muted-foreground">
-                              Seen in the photo: {photo.hazards.join(", ")}.
-                            </p>
-                          ) : (
-                            <p className="text-muted-foreground">
-                              Nothing it recognises as a hazard.
-                            </p>
-                          )}
-                          {photo.imageQuality && photo.imageQuality !== "good" && (
-                            <p className="text-muted-foreground">
-                              The image is {photo.imageQuality}, so this counts
-                              for less.
-                            </p>
-                          )}
-                          <p className="text-muted-foreground">
-                            A photo can only raise or lower how much your report
-                            is believed. It never decides what happens next.
-                          </p>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="text-muted-foreground text-xs underline"
-                    onClick={clearPhoto}
-                  >
-                    Remove photo
-                  </button>
-                </div>
-              )}
-              <Button className="w-full" onClick={fileReport}
-                      disabled={busy !== null || !text.trim()}>
-                {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-                Send report
-              </Button>
-              {state && !state.inside && (
-                <p className="text-muted-foreground text-xs">
-                  You are outside the covered area, so this will be refused
-                  until you move inside it. Pressing send will say so.
-                </p>
-              )}
-              {filed?.queued ? (
-                <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
-                  <div className="font-medium">Saved on this phone.</div>
-                  <div className="text-muted-foreground">
-                    {String(
-                      filed.message ??
-                        "There is no signal right now. It sends itself the moment there is."
-                    )}
-                  </div>
-                  <div className="text-muted-foreground">
-                    It will be timed from now, not from when it finally sends, so
-                    nothing is lost by the wait.
-                  </div>
-                </div>
-              ) : filed ? (
-                <div className="space-y-1 rounded border p-2 text-xs">
-                  <div className="font-medium">{String(filed.readHow ?? "")}</div>
-                  <div className="text-muted-foreground">{String(filed.summary ?? "")}</div>
-                  {Boolean(filed.linked) && (
-                    <Badge variant="outline">
-                      Merged with an existing report at{" "}
-                      {((filed.linkScore as number) * 100).toFixed(0)}%
-                    </Badge>
-                  )}
-                  {Number(filed.urgencyBoost ?? 0) > 0 && (
-                    <Badge variant="destructive">Flagged urgent</Badge>
-                  )}
-                  {filed.photo != null && (
-                    <div className="text-muted-foreground">
-                      Your photo was taken into account when scoring this report.
-                    </div>
-                  )}
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
 
           {/* The resident account, on the resident's screen. Nothing here
               requires an account, so this is for the person being handed a

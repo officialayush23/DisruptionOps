@@ -52,6 +52,7 @@ const TONE: Record<string, string> = {
   "alert.issued": "text-violet-600 dark:text-violet-400",
   "assignment.created": "text-emerald-600 dark:text-emerald-400",
   "assignment.changed": "text-violet-600 dark:text-violet-400",
+  "assignment.rerouted": "text-amber-600 dark:text-amber-400",
   "assignment.cancelled": "text-muted-foreground",
   "demand.uncovered": "text-red-600 dark:text-red-400",
   "incident.resolved": "text-emerald-600 dark:text-emerald-400",
@@ -70,6 +71,7 @@ const HEADLINE = new Set([
   "incident.opened", "report.linked", "decision.proposed", "decision.acted",
   "alert.issued", "assignment.changed", "incident.resolved",
   "agency.requested", "agency.fulfilled", "demand.uncovered",
+  "assignment.rerouted",
 ])
 
 export default function AfterAction() {
