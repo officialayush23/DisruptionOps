@@ -14,6 +14,23 @@ from app.schemas.domain import FeedStatus, HazardType, LLMStatus, SystemStatus
 router = APIRouter(tags=["system"])
 
 
+@router.get("/status/llm")
+async def llm_status() -> dict:
+    """Which model is answering, and what the others are doing.
+
+    Separate from `/status` because it is the question asked in a hurry: when an
+    explanation reads oddly mid-demo, the first thing worth knowing is whether
+    the preferred provider answered it or whether the chain quietly failed over.
+    A silent failover is how a team discovers in March that the primary has been
+    dead since January.
+    """
+    return {
+        "engine": llm.current_engine(),
+        "note": llm.engine_note(),
+        "providers": llm.provider_status(),
+    }
+
+
 @router.get("/status", response_model=SystemStatus)
 async def status() -> SystemStatus:
     run = await q.latest_run(HazardType.FLOOD)

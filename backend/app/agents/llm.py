@@ -1,7 +1,17 @@
-"""Language model provider.
+"""Language model providers, as an ordered chain.
 
-Gemini in development, Bedrock in production, and a deterministic fallback
-whenever either is unavailable — quota exhausted, network gone, key missing.
+Gemini first, Bedrock second, and a deterministic fallback whenever neither can
+answer — quota exhausted, network gone, key missing.
+
+The chain matters because the most likely failure by far is not an outage, it is
+a free-tier quota running out halfway through a demo. When that happens Gemini
+returns 429 for hours, so a single-provider design degrades to deterministic
+rules for the rest of the session even though a perfectly good second provider
+is configured and idle. Each provider therefore carries its own circuit breaker,
+and a provider that is cooling down is skipped rather than waited on.
+
+Circuits reopen on a timer rather than staying latched, so a quota that resets at
+midnight is picked up on its own without anybody calling the health endpoint.
 
 The fallback is not a degraded imitation of the model. It is a set of rules
 over the same structured inputs, so the system keeps giving correct answers
@@ -13,6 +23,7 @@ absent?": the numbers come from the solver and the scorer, never from here.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -114,55 +125,113 @@ class BedrockProvider:
         return await asyncio.to_thread(_call)
 
 
-def _build_provider() -> Provider | None:
-    if settings.llm_provider == "gemini" and settings.gemini_api_key:
-        return GeminiProvider(settings.gemini_api_key, settings.gemini_model)
-    if settings.llm_provider == "bedrock" and settings.bedrock_model_id:
-        return BedrockProvider(
+#: Errors that mean "this provider is out for a while", as opposed to "that one
+#: request went wrong". Matched on the text because the three SDKs involved raise
+#: entirely different exception types for the same condition, and importing all
+#: of them to catch them properly would defeat the lazy imports that let this
+#: module load with neither installed.
+_EXHAUSTED = (
+    "429", "quota", "resource_exhausted", "resourceexhausted",
+    "throttling", "throttled", "too many requests", "rate limit",
+    "insufficient_quota", "serviceunavailable", "503",
+)
+
+
+def _is_exhausted(exc: Exception) -> bool:
+    return any(m in f"{type(exc).__name__} {exc}".lower() for m in _EXHAUSTED)
+
+
+def _build_chain() -> list[Provider]:
+    """Every provider that is configured, best first.
+
+    `llm_provider` chooses the head of the chain rather than the only member of
+    it. Anything else that has credentials follows, because a configured
+    provider sitting idle while the system degrades to rules is the worst of
+    both worlds — it is the outcome that made this a chain.
+    """
+    built: dict[Engine, Provider] = {}
+    if settings.gemini_api_key:
+        built["gemini"] = GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+    if settings.bedrock_model_id:
+        built["bedrock"] = BedrockProvider(
             settings.bedrock_model_id,
             settings.aws_region,
             settings.aws_api_key_bedrock_for_xai,
         )
-    return None
+
+    order: list[Engine] = ["gemini", "bedrock"]
+    if settings.llm_provider in order:
+        order.remove(settings.llm_provider)
+        order.insert(0, settings.llm_provider)
+    return [built[e] for e in order if e in built]
 
 
-_provider: Provider | None = None
-_provider_built = False
-#: Once the provider fails this many times in a row we stop trying for a while,
-#: so an exhausted quota does not add eight seconds to every request.
-_consecutive_failures = 0
+_chain: list[Provider] | None = None
+
+#: Consecutive failures per provider, and the monotonic time each one may be
+#: tried again. Per provider, not global: Gemini being out of quota says nothing
+#: whatever about whether Bedrock can answer.
+_failures: dict[Engine, int] = {}
+_cooldown_until: dict[Engine, float] = {}
+
 _FAILURE_THRESHOLD = 3
+#: A provider that merely erred is rested briefly. One that reported an
+#: exhausted quota is rested for long enough that we are not hammering a limit
+#: that resets on the hour, but not so long that a demo cannot recover.
+_COOLDOWN_S = 60.0
+_EXHAUSTED_COOLDOWN_S = 900.0
+
+
+def _available(provider: Provider) -> bool:
+    """Is this provider worth trying right now?
+
+    Half-open by design: once the cooldown passes the provider is tried again on
+    the next request, and one success clears its failure count. There is no
+    separate probe and nothing to call by hand.
+    """
+    until = _cooldown_until.get(provider.engine, 0.0)
+    return time.monotonic() >= until
+
+
+def _get_chain() -> list[Provider]:
+    global _chain
+    if _chain is None:
+        _chain = _build_chain()
+        log.info(
+            "llm_chain",
+            preferred=settings.llm_provider,
+            chain=[p.engine for p in _chain] or ["fallback"],
+        )
+    return _chain
 
 
 def current_engine() -> Engine:
-    if _consecutive_failures >= _FAILURE_THRESHOLD:
-        return "fallback"
-    provider = _get_provider()
-    return provider.engine if provider else "fallback"
+    """Which engine would answer right now."""
+    for provider in _get_chain():
+        if _available(provider):
+            return provider.engine
+    return "fallback"
 
 
 def engine_note() -> str:
-    if _consecutive_failures >= _FAILURE_THRESHOLD:
-        return "Provider unavailable; deterministic rules in use."
-    provider = _get_provider()
-    if provider is None:
+    chain = _get_chain()
+    if not chain:
         return "No model configured; deterministic rules in use."
-    if provider.engine == "gemini":
-        return f"{settings.gemini_model} responding"
-    return f"{settings.bedrock_model_id} responding"
 
+    live = [p for p in chain if _available(p)]
+    if not live:
+        return "Every provider is cooling down; deterministic rules in use."
 
-def _get_provider() -> Provider | None:
-    global _provider, _provider_built
-    if not _provider_built:
-        _provider = _build_provider()
-        _provider_built = True
-        log.info(
-            "llm_provider",
-            configured=settings.llm_provider,
-            active=_provider.engine if _provider else "fallback",
-        )
-    return _provider
+    name = {
+        "gemini": settings.gemini_model,
+        "bedrock": settings.bedrock_model_id,
+    }.get(live[0].engine, live[0].engine)
+
+    resting = [p.engine for p in chain if not _available(p)]
+    if resting:
+        return f"{name} responding — {', '.join(resting)} cooling down"
+    spare = [p.engine for p in chain[1:]]
+    return f"{name} responding" + (f", {', '.join(spare)} standing by" if spare else "")
 
 
 async def complete(
@@ -171,41 +240,91 @@ async def complete(
     *,
     fallback: str,
 ) -> Completion:
-    """Ask the model, and hand back `fallback` if it cannot answer.
+    """Ask each configured provider in turn; hand back `fallback` if none answer.
 
     Callers always supply a usable fallback string; there is no code path where
-    a missing model produces a missing answer.
+    a missing model produces a missing answer, and none where a model produces
+    an operational number — the figures come from the solver and the scorer.
     """
-    global _consecutive_failures
-
-    if _consecutive_failures >= _FAILURE_THRESHOLD:
-        return Completion(fallback, "fallback", "provider circuit open")
-
-    provider = _get_provider()
-    if provider is None:
+    chain = _get_chain()
+    if not chain:
         return Completion(fallback, "fallback", "no provider configured")
 
-    try:
-        text = await asyncio.wait_for(
-            provider.complete(system, prompt), timeout=LLM_TIMEOUT_S
-        )
-        if not text:
-            raise ValueError("empty completion")
-        _consecutive_failures = 0
-        return Completion(text, provider.engine)
-    except Exception as exc:  # noqa: BLE001 - degrade, never fail
-        _consecutive_failures += 1
-        reason = f"{type(exc).__name__}: {str(exc)[:120]}"
-        log.warning(
-            "llm_unavailable",
-            engine=provider.engine,
-            failures=_consecutive_failures,
-            error=reason,
-        )
-        return Completion(fallback, "fallback", reason)
+    tried: list[str] = []
+    first_reason: str | None = None
+
+    for provider in chain:
+        engine = provider.engine
+        if not _available(provider):
+            tried.append(f"{engine}:cooling")
+            continue
+
+        try:
+            text = await asyncio.wait_for(
+                provider.complete(system, prompt), timeout=LLM_TIMEOUT_S
+            )
+            if not text:
+                raise ValueError("empty completion")
+        except Exception as exc:  # noqa: BLE001 - degrade, never fail
+            exhausted = _is_exhausted(exc)
+            n = _failures.get(engine, 0) + 1
+            _failures[engine] = n
+            reason = f"{type(exc).__name__}: {str(exc)[:120]}"
+            first_reason = first_reason or f"{engine} {reason}"
+            tried.append(f"{engine}:{'exhausted' if exhausted else 'error'}")
+
+            # An exhausted quota is not a flaky request and there is no point
+            # spending two more attempts proving it. Rest this provider at once
+            # and move down the chain.
+            if exhausted or n >= _FAILURE_THRESHOLD:
+                rest = _EXHAUSTED_COOLDOWN_S if exhausted else _COOLDOWN_S
+                _cooldown_until[engine] = time.monotonic() + rest
+                log.warning("llm_provider_resting", engine=engine,
+                            seconds=rest, failures=n, error=reason)
+            else:
+                log.warning("llm_unavailable", engine=engine,
+                            failures=n, error=reason)
+            continue
+
+        # Success. Clear this provider's history, and say plainly when the
+        # answer came from somewhere other than the preferred provider — a
+        # silent failover is how you discover in March that the primary has
+        # been dead since January.
+        _failures[engine] = 0
+        _cooldown_until.pop(engine, None)
+        degraded = None
+        if engine != chain[0].engine or tried:
+            degraded = f"failed over to {engine} after {', '.join(tried)}"
+            log.info("llm_failover", engine=engine, after=tried)
+        return Completion(text, engine, degraded)
+
+    return Completion(
+        fallback, "fallback",
+        first_reason or f"all providers cooling down ({', '.join(tried)})",
+    )
 
 
 def reset_circuit() -> None:
-    """Called by the health endpoint so a recovered quota is picked up."""
-    global _consecutive_failures
-    _consecutive_failures = 0
+    """Forget every cooldown. Called by the health endpoint, and safe to call
+    at any time — the timers would expire on their own regardless."""
+    _failures.clear()
+    _cooldown_until.clear()
+
+
+def provider_status() -> list[dict]:
+    """What each provider is doing, for the health endpoint and the console.
+
+    Worth exposing rather than keeping internal: "which model answered, and did
+    anything fail over" is the first question when an explanation reads oddly.
+    """
+    now = time.monotonic()
+    return [
+        {
+            "engine": p.engine,
+            "preferred": i == 0,
+            "available": _available(p),
+            "consecutiveFailures": _failures.get(p.engine, 0),
+            "restingForSeconds": max(0, round(_cooldown_until.get(p.engine, 0.0) - now)),
+        }
+        for i, p in enumerate(_get_chain())
+    ]
