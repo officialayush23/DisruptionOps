@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react"
-import { Gauge, TriangleAlert } from "lucide-react"
+import { ArrowRight, Gauge, TriangleAlert } from "lucide-react"
+import { Link } from "react-router-dom"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { LiveMap } from "@/components/map/LiveMap"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 
@@ -61,6 +63,13 @@ export default function RiskBoard() {
   }, [state.wards, state.incidents, state.needs, query])
 
   const scored = rows.filter((r) => r.severity !== null).length
+  /** The wards the sidebar sends an officer here for. Severity 4 is the line
+   *  above which an advisory is warranted, and the advisory is issued through
+   *  the gate rather than from this screen — a board that could broadcast to a
+   *  ward directly would be a second path around the delegation check, which is
+   *  the one thing in this system that must have no second path. So this names
+   *  them and points at the gate. */
+  const severe = rows.filter((r) => (r.severity ?? 0) >= 4)
   const atRisk = rows.reduce((n, r) => n + (r.populationAtRisk ?? 0), 0)
 
   return (
@@ -104,6 +113,29 @@ export default function RiskBoard() {
           </CardContent>
         </Card>
       </div>
+
+      {severe.length > 0 && (
+        <Card className="border-amber-500/40">
+          <CardContent className="flex flex-wrap items-center justify-between gap-2 p-3">
+            <div className="min-w-0">
+              <p className="flex items-center gap-1.5 text-sm font-medium">
+                <TriangleAlert className="size-4" />
+                {severe.length} ward{severe.length === 1 ? "" : "s"} at severity 4
+                or above
+              </p>
+              <p className="text-muted-foreground mt-0.5 truncate text-xs">
+                {severe.slice(0, 4).map((w) => w.name).join(", ")}
+                {severe.length > 4 ? `, and ${severe.length - 4} more` : ""}
+              </p>
+            </div>
+            <Button asChild size="sm" variant="outline" className="h-7 shrink-0 text-xs">
+              <Link to="/admin/decisions">
+                Advisories for these <ArrowRight className="size-3" />
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-3 lg:grid-cols-[420px_1fr]">
         <Card className="min-w-0">

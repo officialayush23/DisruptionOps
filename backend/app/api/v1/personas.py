@@ -869,6 +869,29 @@ async def field_status(body: FieldStatusIn, principal: CurrentPrincipal) -> dict
                 effects.append(f"{body.subject_id} is out of service: {kind['label'].lower()}.")
                 if released:
                     effects.append("Its task was released and will be re-planned.")
+            elif body.status_kind == "back_in_service":
+                # The verb that did not exist. `makes_offline` took a vehicle
+                # out and nothing put it back, so a puncture removed a truck
+                # from the fleet for the rest of the event and the console could
+                # count the loss without offering anything to do about it.
+                #
+                # No assignment is touched. Its task was released when it went
+                # offline and belongs to whoever the next plan gives it to;
+                # re-attaching it here would hand a crew a job the solver has
+                # already placed somewhere else.
+                await conn.execute(
+                    """
+                    update resources
+                       set status = 'available', unavailable_reason = null,
+                           status_note = $2, last_reported_at = now()
+                     where id = $1
+                    """,
+                    body.subject_id, body.note,
+                )
+                effects.append(
+                    f"{body.subject_id} is back in the fleet and will be "
+                    "considered by the next plan."
+                )
             elif body.status_kind == "task_complete":
                 await conn.execute(
                     """
@@ -878,7 +901,14 @@ async def field_status(body: FieldStatusIn, principal: CurrentPrincipal) -> dict
                     body.subject_id,
                 )
                 await conn.execute(
-                    "update resources set status = 'available', status_note = $2, "
+                    # `unavailable_reason` is cleared here too. It used to
+                    # survive: a unit that had been offline and then closed a
+                    # task came back as available still carrying "Puncture",
+                    # and every screen reading that column showed a reason for
+                    # an unavailability that had ended. Wrong data rather than
+                    # stale, and read by somebody deciding who to send.
+                    "update resources set status = 'available', "
+                    "unavailable_reason = null, status_note = $2, "
                     "last_reported_at = now() where id = $1",
                     body.subject_id, body.note,
                 )

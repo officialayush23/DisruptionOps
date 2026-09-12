@@ -188,7 +188,7 @@ function useCounts(): Counts {
     offline: state.resources.filter(
       (r) => r.status !== "available" && !r.assignedTo
     ).length,
-    shortfalls: (state.forecast?.demand ?? []).filter((d) => d.shortfall > 0).length,
+    shortfalls: (state.forecast?.demand ?? []).filter((d) => d.shortfall > 0.5).length,
     severeWards: state.wards.filter((w) => (w.severity ?? 0) >= 4).length,
   }
 }
@@ -295,7 +295,16 @@ function Chrome({ children }: { children: React.ReactNode }) {
                             : item.label
                         }
                       >
-                        <NavLink to={item.to}>
+                        <NavLink
+                          // A badge is a destination, not a notice: where a
+                          // screen can open straight onto the queue that is
+                          // being counted, the link says so.
+                          to={
+                            count && item.to === "/admin/intake"
+                              ? `${item.to}?filter=held`
+                              : item.to
+                          }
+                        >
                           <item.icon />
                           <span>{item.label}</span>
                           {count && <NavBadge count={count} />}

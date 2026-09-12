@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { Boxes, Truck, Warehouse } from "lucide-react"
+import { Boxes, Loader2, Truck, Warehouse, Wrench } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -42,7 +42,7 @@ const unitOf = (item: string) =>
   item.includes("litre") ? "L" : ""
 
 export default function ResourcesPage() {
-  const { state } = useDemo()
+  const { state, busy, run } = useDemo()
   const [kind, setKind] = useState<string | null>(null)
 
   const wardName = useMemo(() => {
@@ -66,6 +66,23 @@ export default function ResourcesPage() {
 
   const available = state.resources.filter((r) => r.status === "available").length
   const operators = new Set(state.resources.map((r) => r.operator)).size
+
+  /** Units that are neither working nor available.
+   *
+   *  This is the number the sidebar counts, and until now it was a number and
+   *  nothing else: the fleet table showed `offline` in a status column, buried
+   *  among everything else, with the reason in a truncated cell — and there was
+   *  no action anywhere, for any role, that put a vehicle back. A crew could
+   *  take a truck out with a puncture and it stayed out for the rest of the
+   *  event, because the verb did not exist (migration 017 adds it).
+   *
+   *  Deliberately not "not available": a crew working an incident is not a
+   *  problem, and counting them would make this list longest exactly when the
+   *  city is busiest and the list least useful. */
+  const out = useMemo(
+    () => state.resources.filter((r) => r.status !== "available" && !r.assignedTo),
+    [state.resources]
+  )
 
   /** Shelter pressure, over everything that actually shelters people rather
    *  than over the two kinds this page used to know the names of. */
@@ -150,6 +167,70 @@ export default function ResourcesPage() {
           </CardContent>
         </Card>
       </div>
+
+      {out.length > 0 && (
+        <Card className="border-amber-500/40">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Wrench className="size-4" />
+              Out of the fleet
+              <span className="text-muted-foreground font-normal tabular-nums">
+                {out.length}
+              </span>
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Each of these is capacity the allocator cannot use, with the reason
+              the crew gave. Returning one puts it back in the pool for the next
+              plan; its old task is not restored, because that task was released
+              when it went out and belongs to whoever the solver has given it to
+              since.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {out.map((r) => (
+              <div
+                key={r.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5 text-sm">
+                    <span className="font-medium">{r.label}</span>
+                    <Badge variant="outline" className="font-normal">
+                      {pretty(r.kind)}
+                    </Badge>
+                    <span className="text-muted-foreground text-xs">{r.operator}</span>
+                  </div>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    {r.unavailableReason ?? pretty(r.status)}
+                    {r.statusNote ? ` — ${r.statusNote}` : ""}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 shrink-0 text-xs"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    void run(`back-${r.id}`, "/field/status", {
+                      subjectType: "resource",
+                      subjectId: r.id,
+                      statusKind: "back_in_service",
+                      note: "Returned to service from the console.",
+                    })
+                  }
+                >
+                  {busy === `back-${r.id}` ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Wrench className="size-3" />
+                  )}
+                  Back in service
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {stock.length > 0 && (
         <Card>
@@ -245,7 +326,12 @@ export default function ResourcesPage() {
                       <TableCell className="text-muted-foreground max-w-[16rem] truncate text-xs">
                         {incident
                           ? `${incident.title}${r.etaMinutes != null ? ` · ETA ${r.etaMinutes}m` : ""}`
-                          : r.statusNote || "—"}
+                          /* The reason first when there is one. A unit out of
+                             the fleet has a cause, and the note beside it was
+                             winning a column that should have been showing it. */
+                          : r.unavailableReason
+                            ? `${r.unavailableReason}${r.statusNote ? ` — ${r.statusNote}` : ""}`
+                            : r.statusNote || "—"}
                       </TableCell>
                     </TableRow>
                   )

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { Hospital, TrendingUp, TriangleAlert, Truck } from "lucide-react"
+import { Hospital, Loader2, PackagePlus, TrendingUp, TriangleAlert, Truck } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -51,9 +51,12 @@ function EvidenceBar({ value }: { value: number }) {
 }
 
 export default function Forecast() {
-  const { state } = useDemo()
+  const { state, busy, run } = useDemo()
   const f = state.forecast
   const [tab, setTab] = useState<"facilities" | "wards" | "demand">("facilities")
+  /** The same test the sidebar badge counts on, so the number an officer was
+   *  sent here by is the number they find. */
+  const short = (state.forecast?.demand ?? []).filter((d) => d.shortfall > 0.5).length
 
   const topWards = useMemo(() => {
     if (!f) return []
@@ -245,6 +248,36 @@ export default function Forecast() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-1">
+            {/* A projected shortage with nothing to press was a weather report.
+                `POST /forecast/preposition` has existed the whole time and was
+                reachable only by somebody who knew the URL, so the forecast half
+                of this system could see a shortage coming and do nothing about
+                it. It moves no vehicle: it reads the projection and writes
+                proposals into the decision gate, each one carrying the clause
+                that delegates it — which is why the button says "propose" and
+                sends the officer to the gate rather than reporting a result. */}
+            {short > 0 && (
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 p-2">
+                <p className="text-xs">
+                  {short} capabilit{short === 1 ? "y is" : "ies are"} projected
+                  short over the next {f.horizonHours} hours.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 shrink-0 text-xs"
+                  disabled={busy !== null}
+                  onClick={() => void run("preposition", "/forecast/preposition")}
+                >
+                  {busy === "preposition" ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <PackagePlus className="size-3" />
+                  )}
+                  Propose prepositioning
+                </Button>
+              </div>
+            )}
             {f.demand.map((d) => (
               <div
                 key={d.capability}

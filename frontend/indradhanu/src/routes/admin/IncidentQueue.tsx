@@ -39,6 +39,26 @@ export default function IncidentQueue() {
     [state.wards]
   )
 
+  /** The solver's own sentence about why an incident got nobody.
+   *
+   *  "Nothing committed yet" was true and useless — it restated the empty list
+   *  above it. The reason exists: the allocator writes one per uncovered demand
+   *  and it names the actual constraint ("no unit able to provide water rescue
+   *  could reach this ward within 45 minutes without pulling a unit off a
+   *  higher-severity ward"). It was on one screen only, keyed by an id nothing
+   *  else joined on. Keyed here, an officer finds out whether this is a queue
+   *  that is about to clear or a hole somebody has to fill. */
+  const whyUncovered = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const u of state.plan?.uncovered ?? []) {
+      if (!u.incident_id || !u.reason) continue
+      const list = m.get(u.incident_id)
+      if (list) list.push(u.reason)
+      else m.set(u.incident_id, [u.reason])
+    }
+    return m
+  }, [state.plan])
+
   const rows = useMemo(() => {
     const needsBy = new Map<string, typeof state.needs>()
     for (const n of state.needs) {
@@ -195,11 +215,24 @@ export default function IncidentQueue() {
                         Units on it
                       </div>
                       {i.units.length === 0 ? (
-                        <p className="text-muted-foreground text-xs">
-                          {i.shortfall > 0
-                            ? "Nothing committed yet."
-                            : "Nothing committed; nothing needed."}
-                        </p>
+                        <div className="space-y-1">
+                          <p className="text-muted-foreground text-xs">
+                            {i.shortfall > 0
+                              ? "Nothing committed yet."
+                              : "Nothing committed; nothing needed."}
+                          </p>
+                          {(whyUncovered.get(i.id) ?? []).map((reason, n) => (
+                            <p key={n} className="text-destructive text-xs">
+                              {reason}
+                            </p>
+                          ))}
+                          {i.shortfall > 0 && !whyUncovered.has(i.id) && (
+                            <p className="text-muted-foreground text-xs">
+                              The last plan did not rule this out — it has not
+                              been solved since this appeared. Re-plan below.
+                            </p>
+                          )}
+                        </div>
                       ) : (
                         i.units.map((r) => (
                           <div key={r.id} className="flex items-center gap-2 text-xs">

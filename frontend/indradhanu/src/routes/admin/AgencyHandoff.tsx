@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowRight, Building2, Check, Handshake, Loader2, Send, TriangleAlert, X,
 } from "lucide-react"
+import { useSearchParams } from "react-router-dom"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -93,6 +94,47 @@ export default function AgencyHandoff() {
       .filter((x): x is NonNullable<typeof x> => x !== null)
       .sort((a, b) => b.incident.severity - a.incident.severity || b.gap - a.gap)
   }, [state.needs, state.incidents, state.agencies, state.agencyRequests])
+
+  /** Arriving here from the shortfall itself.
+   *
+   *  The allocation planner is where an officer finds out that a demand could
+   *  not be covered, and this is the screen that does something about it — and
+   *  there was no path between them. They had to read a capability off one
+   *  screen, navigate here, and find the matching row by eye, which is exactly
+   *  the kind of re-entry that gets skipped when a room is busy.
+   *
+   *  `?capability=` and `?incident=` open the draft already filled in. The
+   *  parameters are a hint, never a command: the draft is only opened for a
+   *  shortfall that is genuinely in the live list, so a stale or hand-edited
+   *  link cannot invent a request for a need that does not exist.
+   */
+  const [params, setParams] = useSearchParams()
+  const consumed = useRef(false)
+  useEffect(() => {
+    if (consumed.current) return
+    const capability = params.get("capability")
+    if (!capability) return
+    const incident = params.get("incident")
+    const match = shortfalls.find(
+      (s) => s.capability === capability && (!incident || s.incidentId === incident)
+    )
+    // Wait for the first poll rather than giving up: this screen mounts before
+    // the world has arrived, and a link that silently did nothing would be
+    // worse than one that takes a second.
+    if (!shortfalls.length) return
+    consumed.current = true
+    if (match) {
+      setDraft({
+        incidentId: match.incidentId,
+        wardId: match.incident.wardId,
+        capability: match.capability,
+        quantity: match.gap,
+      })
+    }
+    // Cleared either way, so a refresh does not re-open a draft the officer
+    // has already dealt with.
+    setParams({}, { replace: true })
+  }, [params, setParams, shortfalls])
 
   const open = state.agencyRequests.filter((r) => r.status === "requested")
   const wardName = useMemo(

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react"
+import { useSearchParams } from "react-router-dom"
 import {
   CheckCircle2, Inbox, Link2, Loader2, ShieldX, Sparkles, XCircle,
 } from "lucide-react"
@@ -99,7 +100,16 @@ function TrustBars({ breakdown }: { breakdown: Record<string, unknown> }) {
 
 export default function IntakeInbox() {
   const { state, setSelected } = useDemo()
-  const [filter, setFilter] = useState<Outcome | "all">("all")
+  /** Opened straight onto the held pile when the sidebar sent them here.
+   *
+   *  The badge counts reports the system refused to act on; landing on
+   *  "Everything" and asking an officer to find them among four hundred rows is
+   *  the number pointing at a haystack. Read once, at mount, so the filter stays
+   *  the officer's to change afterwards. */
+  const [params] = useSearchParams()
+  const [filter, setFilter] = useState<Outcome | "all">(() =>
+    params.get("filter") === "held" ? "held" : "all"
+  )
   const [query, setQuery] = useState("")
   const [open, setOpen] = useState<string | null>(null)
   /** Which report is mid-ruling, and what went wrong on the last attempt. */

@@ -1,5 +1,6 @@
 import { useMemo } from "react"
-import { ArrowRight, Loader2, Route, Zap } from "lucide-react"
+import { ArrowRight, Handshake, Loader2, Route, Zap } from "lucide-react"
+import { Link } from "react-router-dom"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -66,6 +67,28 @@ export default function AllocationPlanner() {
     return byStatus
   }, [state.resources])
 
+  const wardName = useMemo(
+    () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
+    [state.wards]
+  )
+  const byIncident = useMemo(
+    () => new Map(state.incidents.map((i) => [i.id, i] as const)),
+    [state.incidents]
+  )
+  /** Shortfalls somebody has already sent out. Offering "ask another agency"
+   *  for a request that is sitting unanswered is how the same gap gets asked
+   *  for twice, which is the duplicate-dispatch problem wearing a different
+   *  hat. */
+  const alreadyAsked = useMemo(
+    () =>
+      new Set(
+        state.agencyRequests
+          .filter((r) => r.status === "requested" || r.status === "acknowledged")
+          .map((r) => `${r.incidentId}:${r.capability}`)
+      ),
+    [state.agencyRequests]
+  )
+
   const unmet = state.needs.filter((n) => n.met < n.required)
   const shortBy = unmet.reduce((n, x) => n + (x.required - x.met), 0)
 
@@ -122,16 +145,75 @@ export default function AllocationPlanner() {
               </CardDescription>
             </CardHeader>
             {plan.uncovered.length > 0 && (
-              <CardContent className="space-y-1">
+              <CardContent className="space-y-1.5">
                 <div className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
                   Could not be covered
                 </div>
-                {plan.uncovered.map((u, i) => (
-                  <div key={i} className="text-destructive text-xs">
-                    {u.ward_id ? `${u.ward_id}: ` : ""}
-                    {u.reason}
-                  </div>
-                ))}
+                {/* This list used to be the raw payload: a ward UUID, a colon,
+                    and the solver's sentence. Three things were missing and all
+                    three are what an officer needs — which ward in words, what
+                    capability is short, and something to do about it. A gap the
+                    municipal fleet cannot close is closed by asking somebody
+                    else, and the screen that does that already exists; it just
+                    had no route from the place the shortfall is discovered. */}
+                {plan.uncovered.map((u, i) => {
+                  const incident = u.incident_id
+                    ? byIncident.get(u.incident_id)
+                    : undefined
+                  const ward = u.ward_id
+                    ? wardName.get(u.ward_id)
+                    : incident
+                      ? wardName.get(incident.wardId)
+                      : undefined
+                  const asked = u.incident_id && u.capability
+                    ? alreadyAsked.has(`${u.incident_id}:${u.capability}`)
+                    : false
+                  return (
+                    <div
+                      key={i}
+                      className="flex flex-wrap items-start justify-between gap-2 rounded border border-destructive/30 p-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                          {u.capability && (
+                            <Badge variant="outline" className="font-normal">
+                              {u.capability.replace(/_/g, " ")}
+                            </Badge>
+                          )}
+                          <span className="font-medium">
+                            {incident?.title ?? "Unmatched demand"}
+                          </span>
+                          {ward && (
+                            <span className="text-muted-foreground">{ward}</span>
+                          )}
+                        </div>
+                        <p className="text-muted-foreground mt-0.5 text-xs">
+                          {u.reason}
+                        </p>
+                      </div>
+                      {u.capability && (
+                        asked ? (
+                          <Badge variant="secondary" className="shrink-0 font-normal">
+                            Already asked
+                          </Badge>
+                        ) : (
+                          <Button asChild size="sm" variant="outline"
+                                  className="h-7 shrink-0 text-xs">
+                            <Link
+                              to={`/admin/handoff?capability=${encodeURIComponent(u.capability)}${
+                                u.incident_id
+                                  ? `&incident=${encodeURIComponent(u.incident_id)}`
+                                  : ""
+                              }`}
+                            >
+                              <Handshake className="size-3" /> Ask another agency
+                            </Link>
+                          </Button>
+                        )
+                      )}
+                    </div>
+                  )
+                })}
               </CardContent>
             )}
           </Card>
