@@ -3,14 +3,16 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 pydantic>=2.9
 pydantic-settings>=2.6
+orjson>=3.10
 python-multipart>=0.0.12
 
 # --- database ---
 asyncpg>=0.30
 supabase>=2.9            # storage + auth admin only; queries go through asyncpg
 
-# --- http ---
+# --- http / resilience ---
 httpx>=0.27
+tenacity>=9.0            # retry policy in app/ingest/client.py
 
 # --- auth ---
 pyjwt[crypto]>=2.9
@@ -18,31 +20,41 @@ cryptography>=43.0
 
 # --- observability ---
 structlog>=24.4
+prometheus-fastapi-instrumentator>=7.0
 
-# --- optimisation ---
-ortools>=9.11            # CP-SAT, the allocator
+# --- rate limiting ---
+slowapi>=0.1.9
+
+# --- optimisation & geometry ---
+ortools>=9.11
+shapely>=2.0
+pyproj>=3.7
+
+# --- agents / llm ---
+# Both of these are imported *lazily*, inside the provider branches of
+# app/agents/llm.py, so that the app boots when neither is configured. That also
+# means a grep for top-level imports does not find them — which is exactly how
+# they were mistakenly removed once. They are required whenever the Gemini or
+# Bedrock path is actually taken.
+google-genai>=0.3        # `from google import genai`  — llm.py:54
+boto3>=1.35              # `import boto3`              — llm.py:93
 
 # --- config ---
 python-dotenv>=1.0
 
-# Removed, and worth recording why rather than quietly dropping:
+# Removed: langchain, langchain-core, langgraph, langchain-google-genai,
+# langchain-aws.
 #
-#   langchain, langchain-core, langgraph, langchain-google-genai, langchain-aws
-#       Imported nowhere. The orchestrator is deterministic on purpose — a fixed
-#       order, one transaction, every step writing an event that names its cause
-#       — so there was never a graph runtime to install. Leaving them declared
-#       invited a fair question about what this project actually is, and the
-#       honest answer is better than the dependency.
+# Verified against all 66 Python files in app/: zero occurrences of any kind,
+# imports or otherwise. The orchestrator is deterministic on purpose — a fixed
+# order, one transaction, every step writing an event that names its cause — so
+# there was never a graph runtime to install. Declaring them invited a fair
+# question about what this project actually is, and the honest answer is better
+# than the dependency.
 #
-#   google-genai, boto3
-#       Provider SDKs for models reached over plain HTTP through `httpx`.
-#
-#   shapely, pyproj
-#       Geometry is done in PostGIS, in the database, where the data already is.
-#
-#   slowapi, prometheus-fastapi-instrumentator, tenacity, orjson
-#       Rate limiting is `app/core/ratelimit.py`, retries are in the feed
-#       clients, and FastAPI's own JSON encoder was never replaced.
-#
-# Every line above is imported by code that runs. Re-add anything the moment it
-# is actually used, not in anticipation.
+# Nothing else has been removed. Several packages here are genuinely unimported
+# today (slowapi is superseded by app/core/ratelimit.py; shapely and pyproj are
+# unused because geometry is done in PostGIS). They are being left in place
+# deliberately: trimming them buys nothing before the demo, and getting it wrong
+# costs a failed deploy — which is precisely what happened when tenacity was
+# removed on the strength of an incomplete search.
