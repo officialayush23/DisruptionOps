@@ -281,6 +281,55 @@ def _mapbox_steps(route: dict) -> list[Step]:
     return out[:12]
 
 
+#: OSRM answers with a maneuver type and a modifier and leaves the sentence to
+#: the client. Mapbox writes the sentence for you, which is why this did not
+#: exist until now — and why, with no Mapbox token set, `route_steps` came back
+#: empty on every guidance call, the phone found no steps to follow, and
+#: turn-by-turn simply never appeared. The line was drawn on the map and nobody
+#: was ever told to turn anywhere.
+_TURNS = {
+    "left": "Turn left", "right": "Turn right",
+    "sharp left": "Take a sharp left", "sharp right": "Take a sharp right",
+    "slight left": "Bear left", "slight right": "Bear right",
+    "straight": "Carry straight on",
+    "uturn": "Turn around",
+}
+
+
+def _osrm_steps(route: dict) -> list[Step]:
+    """Turn OSRM's maneuvers into sentences somebody can follow while walking."""
+    out: list[Step] = []
+    for leg in route.get("legs") or []:
+        for s in leg.get("steps") or []:
+            man = s.get("maneuver") or {}
+            kind = str(man.get("type") or "")
+            modifier = str(man.get("modifier") or "")
+            name = str(s.get("name") or "")
+            distance = int(round(float(s.get("distance") or 0.0)))
+
+            if kind == "depart":
+                text = "Set off" + (f" along {name}" if name else "")
+            elif kind == "arrive":
+                text = "You have arrived"
+            elif kind == "roundabout" or kind == "rotary":
+                exit_no = man.get("exit")
+                text = (
+                    f"At the roundabout, take exit {exit_no}"
+                    if exit_no else "Go around the roundabout"
+                )
+            elif kind in ("merge", "on ramp", "off ramp", "fork"):
+                text = _TURNS.get(modifier, "Keep going")
+                if kind == "fork":
+                    text = text.replace("Turn", "Fork")
+            else:
+                text = _TURNS.get(modifier, "Continue")
+            if name and kind not in ("depart", "arrive"):
+                text = f"{text} onto {name}"
+
+            out.append(Step(instruction=text, street=name, distance_m=distance))
+    return out[:12]
+
+
 def _pick(routes: list[dict], blocked: Sequence[tuple[float, float]]) -> tuple[dict, int]:
     """Least exposed first, then fastest. Exposure outranks speed on purpose."""
     scored: list[tuple[int, float, int, dict]] = []
@@ -333,7 +382,11 @@ async def route_line(
     payload = _data(
         await get_json(
             f"{settings.osrm_url}/route/v1/driving/{o};{d}",
-            {"overview": "full", "geometries": "geojson", "alternatives": "true"},
+            {"overview": "full", "geometries": "geojson", "alternatives": "true",
+             # Asked for now. Without it OSRM returns geometry and no
+             # instructions, and the citizen app has nothing to say after
+             # "here is a line".
+             "steps": "true"},
             cache_key=f"osrm:route:{o}:{d}",
         )
     )
@@ -348,6 +401,7 @@ async def route_line(
             + (BLOCKED_DETOUR_MINUTES if exposure else 0),
             engine="osrm",
             passes_near_blocks=exposure,
+            steps=_osrm_steps(best),
             considered=len(routes),
         )
 
@@ -360,7 +414,33 @@ async def route_line(
         minutes=max(1, round(km * 1.35 / EVENT_SPEED_KMH * 60 + detour)),
         engine="straight-line-fallback",
         passes_near_blocks=1 if detour else 0,
+        # One honest step rather than none. With no steps at all the phone shows
+        # no navigation whatsoever, which is a worse answer than a bearing and a
+        # distance — and the instruction says plainly that no street was
+        # consulted, so nobody mistakes it for a route.
+        steps=[
+            Step(
+                instruction=(
+                    f"Head {_bearing_word(origin, destination)} towards the "
+                    "destination. No street router was reachable, so this is a "
+                    "direction and a distance, not a route."
+                ),
+                street="",
+                distance_m=int(round(km * 1.35 * 1000)),
+            )
+        ],
     )
+
+
+def _bearing_word(a: tuple[float, float], b: tuple[float, float]) -> str:
+    """Eight-point compass. Enough to start walking the right way."""
+    import math
+
+    dx = (b[0] - a[0]) * math.cos(math.radians((a[1] + b[1]) / 2))
+    dy = b[1] - a[1]
+    deg = (math.degrees(math.atan2(dx, dy)) + 360) % 360
+    return ["north", "north-east", "east", "south-east",
+            "south", "south-west", "west", "north-west"][int((deg + 22.5) % 360 // 45)]
 
 
 # ---------------------------------------------------------------- snapping ---

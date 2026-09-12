@@ -94,10 +94,23 @@ def _candidates() -> list[tuple[str, str]]:
     model was up, reachable and perfectly willing; nothing ever asked it
     anything it recognised.
 
-    So rather than demand the exact path, derive the ones that matter. Every
-    serving stack anyone runs Qwen2.5-VL on — vLLM, llama.cpp's server, Ollama,
-    LM Studio, SGLang, TGI — exposes the OpenAI chat-completions route, which is
-    why that is tried first and the project's own shape second.
+    So rather than demand the exact path, derive the ones that matter.
+
+    Order matters, and it changed. The first version tried the OpenAI
+    chat-completions route first on the reasoning that every serving stack
+    exposes one. The service we are actually pointed at is not a raw serving
+    stack: it is a small FastAPI in front of one, implementing the contract in
+    `docs/VLM_CONTRACT.md`, and it serves `/analyse`. So a bare host produced
+    exactly this, on every photo, and nothing else:
+
+        POST /v1/chat/completions -> 404
+        POST /api/chat            -> 404
+        POST /                    -> 405
+
+    Three misses and a report scored as if no photo were attached, with a GPU
+    sitting idle on the other end answering health probes. The contract paths go
+    first now; the OpenAI ones stay behind them so pointing `VLM_URL` straight
+    at vLLM or Ollama still works.
     """
     raw = settings.vlm_url.rstrip("/")
     tail = raw.rsplit("/", 1)[-1] if "/" in raw.split("://", 1)[-1] else ""
@@ -106,13 +119,18 @@ def _candidates() -> list[tuple[str, str]]:
     if raw.endswith("/chat/completions"):
         return [(raw, "openai")]
     if raw.endswith("/v1"):
-        return [(f"{raw}/chat/completions", "openai"), (raw, "simple")]
+        return [(f"{raw}/analyse", "simple"), (f"{raw}/chat/completions", "openai"),
+                (raw, "simple")]
     # A path that is clearly somebody's own endpoint — try it as given first,
     # then fall back, because a custom server is likelier to want our shape.
     if tail and tail not in ("v1", "api"):
         return [(raw, "simple"), (raw, "openai"),
                 (f"{raw}/v1/chat/completions", "openai")]
-    return [(f"{raw}/v1/chat/completions", "openai"),
+    # A bare host. The contract endpoint and its documented aliases first.
+    return [(f"{raw}/analyse", "simple"),
+            (f"{raw}/v1/analyse", "simple"),
+            (f"{raw}/analyze", "simple"),
+            (f"{raw}/v1/chat/completions", "openai"),
             (f"{raw}/api/chat", "openai"),
             (raw, "simple")]
 
@@ -204,6 +222,19 @@ async def analyse(
                 log.info("vlm_wrong_endpoint", url=url, shape=shape,
                          status=response.status_code)
                 continue
+            if response.status_code in (502, 503):
+                # Right door, wrong moment: the model is still reading weights
+                # off disk, or answered with something that failed the service's
+                # own validation. Knocking on every other door after this would
+                # collect three 404s and then report "unreachable", which is the
+                # wrong diagnosis and throws away the one endpoint that works.
+                _LEARNED = (url, shape)
+                log.info("vlm_not_ready", url=url, status=response.status_code,
+                         body=response.text[:200])
+                return VisionCall(
+                    ok=False, evidence=None, latency_ms=latency,
+                    error=f"The vision service is not ready ({response.status_code}).",
+                )
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:  # noqa: BLE001 - a model outage is not a failure

@@ -96,7 +96,12 @@ class Settings(BaseSettings):
     vlm_url: str = ""
     vlm_api_key: str = ""
     vlm_model: str = ""
-    vlm_timeout_seconds: float = 25.0
+    #: 120s, not 25. A 3B answers a 1024 px image in about six seconds, but the
+    #: first call after the model server starts spends up to a minute reading
+    #: weights off disk, and the GPU serves one request at a time so a second
+    #: photo queues behind the first. A 25s ceiling turned both of those normal
+    #: states into "vision unavailable".
+    vlm_timeout_seconds: float = 120.0
 
     #: Google Flood Hub, if a key is present. Without one the flood forecast
     #: comes from GloFAS through Open-Meteo, which needs no key.

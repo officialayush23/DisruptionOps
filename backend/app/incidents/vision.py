@@ -274,7 +274,20 @@ def assess(evidence: PhotoEvidence, *, category: str) -> PhotoEvidence:
             + ", ".join(h.replace("_", " ") for h in sorted(overlap))
             + f", which is consistent with a {category.replace('_', ' ')} report."
         )
-    elif evidence.shows_hazard is False and evidence.confidence >= 0.7:
+    elif (
+        evidence.shows_hazard is False
+        and evidence.confidence >= 0.7
+        # Cross-checked, not taken at its word. `shows_hazard` is the least
+        # reliable field the 3B returns — it answers `false` on a plainly
+        # flooded street often enough that the people running it asked us not
+        # to let a bare `false` cost a report anything. A model that says "no
+        # hazard" while also listing hazards, or while saying there is water in
+        # the picture, has contradicted itself, and the summary field is the
+        # one to disbelieve. Only a photo that is empty by every measure counts
+        # as evidence against the report.
+        and not evidence.hazards
+        and not evidence.water_present
+    ):
         # A confident, legible "nothing is wrong here" against a report that
         # something is.
         evidence.agreement = round(-0.6 * evidence.confidence, 3)

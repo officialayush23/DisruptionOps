@@ -767,9 +767,30 @@ export default function CitizenApp() {
   /** Recomputed on every position change, which is what makes it navigation
    *  rather than a printed list of directions. */
   const nav = (() => {
-    if (!navOn || !guide?.route?.length || !guide.routeSteps?.length) return null
+    if (!navOn || !guide?.route?.length) return null
     const { travelled, offBy, total } = progressAlong(guide.route, [pos.lng, pos.lat])
-    const cur = currentStep(guide.routeSteps, travelled)
+    /** No steps is not a reason to show no navigation.
+     *
+     *  It used to be. A router that returns geometry without instructions —
+     *  OSRM answered that way until it was asked for steps, and the
+     *  straight-line fallback has none by nature — made `routeSteps` empty, and
+     *  an empty list took this whole block to null. The result on a phone was a
+     *  line on a map, a distance, and nothing that told anybody to move: the
+     *  progress along it, the distance left, the off-route warning and the
+     *  arrival check-in were all switched off together, because one field was
+     *  missing.
+     *
+     *  So: fall back to a single step covering the whole line. Distance
+     *  remaining, straying and arrival all keep working off the geometry, which
+     *  is what they were actually measuring all along. */
+    const steps = guide.routeSteps?.length
+      ? guide.routeSteps
+      : [{
+          instruction: `Follow the line to ${guide.destination?.name ?? "the destination"}.`,
+          street: "",
+          distanceM: Math.round(total),
+        }]
+    const cur = currentStep(steps, travelled)
     if (!cur) return null
     return {
       ...cur,
