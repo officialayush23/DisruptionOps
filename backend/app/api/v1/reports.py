@@ -604,7 +604,8 @@ async def record_verdict(
     stop being believed.
     """
     row = await db.fetchrow(
-        "select id::text, incident_id::text incident_id, reporter_id::text reporter_id "
+        "select id::text, incident_id::text incident_id, reporter_id::text reporter_id, "
+        "reporter_key "
         "from citizen_reports where id = $1::uuid",
         report_id,
     )
@@ -642,11 +643,11 @@ async def record_verdict(
     )
 
     reliability = None
-    if row["reporter_id"]:
+    if row["reporter_key"]:
         reliability = await db.fetchrow(
             "select total, confirmed, rejected, human_verdicts, reliability "
-            "from reporter_reliability where reporter_id = $1::uuid",
-            row["reporter_id"],
+            "from reporter_reliability where reporter_key = $1",
+            row["reporter_key"],
         )
     return {
         "reportId": report_id,
@@ -670,7 +671,8 @@ async def reporter_reliability(_: StaffPrincipal, limit: int = Query(default=25,
     """
     rows = await db.fetch(
         """
-        select r.reporter_id::text reporter_id, r.total, r.confirmed, r.rejected,
+        select r.reporter_key, r.reporter_id::text reporter_id,
+               r.total, r.confirmed, r.rejected,
                r.human_verdicts, r.reliability, p.full_name
           from reporter_reliability r
           left join profiles p on p.id = r.reporter_id
@@ -679,7 +681,17 @@ async def reporter_reliability(_: StaffPrincipal, limit: int = Query(default=25,
         int(limit),
     )
     return [
-        {"reporterId": r["reporter_id"], "name": r["full_name"] or "—",
+        {"reporterId": r["reporter_id"],
+         "reporterKey": r["reporter_key"],
+         # A device has no name, and inventing one would be worse than the dash.
+         # "Device \u00b7 a41c" is enough for an officer to recognise the same
+         # phone across two rows without pretending to know who is holding it.
+         "name": (
+             r["full_name"]
+             or ("Device \u00b7 " + r["reporter_key"].split(":", 1)[1][:4]
+                 if r["reporter_key"] and r["reporter_key"].startswith("device:")
+                 else "\u2014")
+         ),
          "total": r["total"], "confirmed": r["confirmed"], "rejected": r["rejected"],
          "humanVerdicts": r["human_verdicts"],
          "reliability": float(r["reliability"]) if r["reliability"] is not None else None}

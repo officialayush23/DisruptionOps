@@ -399,7 +399,7 @@ select r.id::text, r.note, r.category, r.classified_as,
   left join incidents i on i.id = r.incident_id
   left join report_links l on l.report_id = r.id
   left join wards w on w.id = r.ward_id
-  left join reporter_reliability rr on rr.reporter_id = r.reporter_id
+  left join reporter_reliability rr on rr.reporter_key = r.reporter_key
  where r.city_id = $1 and r.sim_run_id is null
  order by r.created_at desc
  limit 80

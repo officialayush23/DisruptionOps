@@ -116,6 +116,7 @@ async def _trust_inputs(
     conn: Any,
     source: str,
     reporter_id: str | None,
+    reporter_key: str | None,
     device_id: str | None,
     ward_id: str,
     category: str,
@@ -127,11 +128,15 @@ async def _trust_inputs(
     corroborations: int,
     photo_agreement: float | None = None,
 ) -> trust.TrustInputs:
+    # Keyed on `reporter_key`, not on the account id. Almost nobody reporting a
+    # flood is signed in, so keying on `reporter_id` meant the lookup returned
+    # nothing on every real report and every reporter scored a flat 0.5 forever
+    # — a learning component that could not learn.
     reliability = None
-    if reporter_id:
+    if reporter_key:
         reliability = await conn.fetchval(
-            "select reliability from reporter_reliability where reporter_id = $1::uuid",
-            reporter_id,
+            "select reliability from reporter_reliability where reporter_key = $1",
+            reporter_key,
         )
 
     risk = await conn.fetchval(
@@ -326,6 +331,12 @@ async def receive(
     photo_agreement: float | None = None,
     source: str = "app",
     reporter_id: str | None = None,
+    #: Who to credit this report to for reliability purposes. 'user:<uuid>' for
+    #: somebody signed in, 'device:<uuid>' for a phone that has reported before,
+    #: None when there is genuinely nothing to attribute it to. Deliberately not
+    #: `reporter_id`, which is a foreign key to auth.users and therefore can only
+    #: ever describe an account — which is exactly why reliability never learned.
+    reporter_key: str | None = None,
     reporter_name: str = "Anonymous",
     device_id: str | None = None,
     occurred_at: datetime | None = None,
@@ -341,6 +352,18 @@ async def receive(
     lng, lat = location
     now = clock.now()
     occurred = occurred_at or now
+
+    # Derived here rather than at each of the eight call sites, so there is one
+    # rule and it cannot drift: an account when there is one, otherwise the
+    # device. Doing it per-caller is how you end up with 'device:abc' in the
+    # citizen route and 'device:device-abc' in the simulator, two keys for one
+    # phone, and a reliability history that silently splits in half.
+    if reporter_key is None:
+        reporter_key = (
+            f"user:{reporter_id}" if reporter_id
+            else f"device:{device_id}" if device_id
+            else None
+        )
 
     if category not in taxonomy.categories:
         from app.taxonomy import UnknownTaxonomyValue
@@ -379,7 +402,8 @@ async def receive(
             ) or 0
 
         t_inputs = await _trust_inputs(
-            conn=conn, source=source, reporter_id=reporter_id, device_id=device_id,
+            conn=conn, source=source, reporter_id=reporter_id,
+            reporter_key=reporter_key, device_id=device_id,
             ward_id=ward_id, category=category, lng=lng, lat=lat, note=note,
             has_photo=bool(photo_url), now=occurred, corroborations=int(corroborations),
             photo_agreement=photo_agreement,
@@ -401,16 +425,16 @@ async def receive(
               (ward_id, city_id, category, location, note, photo_path, classified_as,
                reporter_id, reporter_name, source, device_id, occurred_at,
                trust_score, trust_breakdown, verification_status, classification_confidence,
-               sim_run_id, created_at)
+               sim_run_id, created_at, reporter_key)
             values ($1,$2,$3,
                     extensions.ST_SetSRID(extensions.ST_MakePoint($4,$5),4326)::extensions.geography,
-                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18)
+                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18,$19)
             returning id::text, created_at
             """,
             ward_id, city_id, category, lng, lat, note, photo_url,
             reporter_id, reporter_name, source, device_id, occurred,
             t.score, {"components": t.components, "reasons": t.reasons},
-            t.status, t.score, clock.sim_run_id, now,
+            t.status, t.score, clock.sim_run_id, now, reporter_key,
         )
         report_id = report_row["id"]
 
