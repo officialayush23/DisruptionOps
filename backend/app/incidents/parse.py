@@ -35,6 +35,22 @@ log = get_logger(__name__)
 #: Below this, ask the model.
 CONFIDENT = 0.55
 
+#: Where a report goes when none of the three tiers recognised it.
+#:
+#: This used to be `flooded_road`, and that was the bug behind "the LLM
+#: fallback is not working". It was working: the chat model is told to reply
+#: UNKNOWN when nothing fits, and it can. `parse_with_model` then threw that
+#: answer away and kept the deterministic guess — a *specific* category, which
+#: carries a specific need, which dispatches a specific vehicle. A confident
+#: wrong answer, not a conservative default.
+#:
+#: `unknown_report` (migration 018) has no needs. It opens an incident, puts it
+#: on the queue where an officer reads the words the person actually wrote, and
+#: requests nothing. Three classifiers failing is a real result and this is what
+#: it looks like.
+UNKNOWN = "unknown_report"
+
+
 #: category -> phrases. Deliberately includes misspellings and Devanagari,
 #: because that is what arrives.
 VOCAB: dict[str, list[str]] = {
@@ -82,6 +98,21 @@ VOCAB: dict[str, list[str]] = {
     "heat_casualty": [
         "heat", "sunstroke", "heatstroke", "fainted", "dehydrat", "उष्ण", "गर्मी",
     ],
+    # There were no fire words here at all, and no fire category to put them in
+    # (migration 018 adds it). A report of a fire therefore matched nothing,
+    # fell through to the module fallback, and was filed as a flooded road —
+    # which asks for dewatering. Six fire engines in the fleet hold
+    # `fire_suppression` and nothing could ever request it.
+    #
+    # "burning" and "smoke" are here without qualification on purpose: in a
+    # civic report they are not ambiguous, and the cost of reading a burning
+    # smell as a fire is one engine turned around, while the cost of the
+    # reverse is the thing this system exists to prevent.
+    "fire": [
+        "fire", "burning", "burnt", "smoke", "smouldering", "smoldering",
+        "flames", "blaze", "gas leak", "cylinder burst", "short circuit",
+        "आग", "जळत", "धूर", "धुर", "आगीत", "जल रहा", "धुआं", "आग लग",
+    ],
 }
 
 #: A life-safety category only outranks a near tie when the text actually says
@@ -92,6 +123,11 @@ PERSON_AT_RISK = (
     "stuck", "trapped", "stranded", "rescue", "help", "child", "baby",
     "elderly", "old man", "old woman", "father", "mother", "people",
     "breathing", "unconscious", "bleeding", "drown", "injur",
+    # A death is the strongest statement a report can make about people being
+    # at risk, and none of these words were here. "people have died" carried
+    # no more weight than "people".
+    "died", "dead", "death", "casualt", "bodies", "killed", "burnt alive",
+    "मृत", "मेले", "मौत", "जखमी", "घायल",
     "अडकले", "फसले", "मदत", "मदद", "बचाव", "मूल", "बाळ", "आजोबा", "आजी",
 )
 
@@ -100,6 +136,12 @@ URGENCY = {
     "child": 2, "baby": 2, "elderly": 2, "old man": 2, "old woman": 2,
     "pregnant": 2, "बाळ": 2, "मूल": 2, "बच्चा": 2, "आजोबा": 2, "आजी": 2,
     "unconscious": 3, "not breathing": 3, "bleeding": 3, "drowning": 3,
+    # Nothing outranks a reported death. Weighted above every other signal
+    # because there is nothing in a civic report that should be treated as more
+    # urgent, and it was weighted at zero.
+    "died": 4, "dead": 4, "death": 4, "killed": 4, "bodies": 4,
+    "मृत": 4, "मेले": 4, "मौत": 4,
+    "trapped inside": 3, "spreading": 2,
     "rising": 1, "fast": 1, "many people": 2, "हॉस्पिटल": 1,
 }
 
@@ -137,23 +179,53 @@ class Parsed:
         return f"Could not tell what this is, so it was filed as {label} for a human to look at."
 
 
+def _vocabulary() -> dict[str, dict[str, float]]:
+    """The phrases that identify each category, and where they come from.
+
+    The taxonomy first. `VOCAB` below is a **fallback for a deployment that has
+    not seeded `incident_category_keywords`** (migration 019), not the source of
+    truth — and it matters which is which, because the claim this project makes
+    is that a second hazard is rows rather than a release. It was not true of
+    the classifier: `hazard_types` carried five hazards while the parser knew
+    the words of three, and the two it did not know had no category either.
+    That is the same hole that filed a reported fire as a flooded road.
+
+    Seeded categories win outright rather than merging with the dict. A
+    deployment that has decided its own vocabulary should not silently inherit
+    ours on top of it.
+    """
+    seeded = {
+        cid: cat.keywords
+        for cid, cat in taxonomy.categories.items()
+        if getattr(cat, "keywords", None)
+    }
+    if seeded:
+        return seeded
+    return {c: {p: 1.0 for p in phrases} for c, phrases in VOCAB.items()}
+
+
 def _keyword_scores(text: str) -> dict[str, tuple[float, list[str]]]:
     low = " " + text.lower() + " "
     out: dict[str, tuple[float, list[str]]] = {}
-    for category, phrases in VOCAB.items():
+    for category, phrases in _vocabulary().items():
         if category not in taxonomy.categories:
             continue
-        hits = [p for p in phrases if p in low]
+        hits = [p for p in phrases if p.lower() in low]
         if not hits:
             continue
         # Longer phrases are stronger evidence than a bare noun: "cannot cross"
-        # says more than "road".
-        strength = sum(1.0 + 0.25 * len(p.split()) for p in hits)
+        # says more than "road". `weight` is a per-phrase multiplier a
+        # deployment can tune from the database without inventing synonyms —
+        # lowering "drain" in a city where it is too eager, say.
+        strength = sum(
+            (1.0 + 0.25 * len(p.split())) * float(phrases.get(p, 1.0) or 1.0)
+            for p in hits
+        )
         out[category] = (strength, hits)
     return out
 
 
-def parse(text: str, *, fallback: str = "flooded_road") -> Parsed:
+def parse(text: str, *, fallback: str = UNKNOWN) -> Parsed:
     """Deterministic first pass. Never raises, always returns something usable."""
     text = (text or "").strip()
     if not text:
@@ -208,7 +280,8 @@ _SYSTEM = (
 ZERO_SHOT_FLOOR = 0.45
 
 
-async def parse_with_model(text: str, *, fallback: str = "flooded_road") -> Parsed:
+
+async def parse_with_model(text: str, *, fallback: str = UNKNOWN) -> Parsed:
     """Keyword first; a model only for the genuinely ambiguous remainder.
 
     Three tiers, cheapest and most explainable first:
@@ -273,6 +346,23 @@ async def parse_with_model(text: str, *, fallback: str = "flooded_road") -> Pars
             alternatives=guess.alternatives,
             note=text,
         )
-    # The model said something that is not a category, or was unavailable. The
-    # deterministic guess stands rather than the text being dropped.
+
+    # The model was asked to say UNKNOWN when nothing fits, and it did. That is
+    # an answer and it used to be discarded in favour of the keyword guess,
+    # which for an unrecognised report is the module fallback wearing a
+    # specific category's clothes. Recorded as what it is.
+    if answer.startswith("unknown") and UNKNOWN in taxonomy.categories:
+        return Parsed(
+            category=UNKNOWN,
+            confidence=0.3,
+            method="model-unknown",
+            urgency_boost=guess.urgency_boost,
+            matched=guess.matched,
+            note=text,
+        )
+
+    # The model said something that is neither a category nor UNKNOWN, or was
+    # unavailable. The deterministic guess stands rather than the text being
+    # dropped — and when that guess is itself the fallback, it is now the
+    # holding category rather than a flooded road.
     return guess

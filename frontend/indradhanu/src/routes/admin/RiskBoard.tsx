@@ -73,10 +73,10 @@ export default function RiskBoard() {
   const atRisk = rows.reduce((n, r) => n + (r.populationAtRisk ?? 0), 0)
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-3">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Wards scored</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {scored}
@@ -91,7 +91,7 @@ export default function RiskBoard() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Estimated people exposed</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {atRisk.toLocaleString()}
@@ -102,7 +102,7 @@ export default function RiskBoard() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Wards with an open incident</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {rows.filter((r) => r.openIncidents > 0).length}
@@ -137,9 +137,9 @@ export default function RiskBoard() {
         </Card>
       )}
 
-      <div className="grid gap-3 lg:grid-cols-[420px_1fr]">
+      <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
         <Card className="min-w-0">
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Gauge className="size-4" /> Wards by risk
             </CardTitle>

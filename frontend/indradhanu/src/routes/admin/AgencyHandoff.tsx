@@ -158,10 +158,10 @@ export default function AgencyHandoff() {
   }
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-3">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card className={shortfalls.length ? "border-destructive/50" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Needs nobody is covering</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {shortfalls.reduce((n, s) => n + s.gap, 0)}
@@ -173,13 +173,13 @@ export default function AgencyHandoff() {
           </CardContent>
         </Card>
         <Card className={open.length ? "border-amber-500/40" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Requests awaiting a reply</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{open.length}</CardTitle>
           </CardHeader>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Agencies reachable</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {state.agencies.length}
@@ -192,13 +192,13 @@ export default function AgencyHandoff() {
         </Card>
       </div>
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <TriangleAlert className="size-4" /> Gaps you could ask about
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Straight from the allocator's unmet demand. Nothing is typed twice.
             </CardDescription>
           </CardHeader>
@@ -309,11 +309,11 @@ export default function AgencyHandoff() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Building2 className="size-4" /> Requests
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Every transition is an event. The log answers who was asked, when,
               and what they said.
             </CardDescription>

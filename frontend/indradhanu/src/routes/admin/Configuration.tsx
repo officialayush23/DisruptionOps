@@ -162,7 +162,7 @@ export default function Configuration() {
 
   if (!data) {
     return (
-      <div className="p-4">
+      <div className="p-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
@@ -176,7 +176,7 @@ export default function Configuration() {
   }
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-1">
           {TABS.map(([k, label, Icon]) => (
@@ -220,11 +220,11 @@ export default function Configuration() {
 
       {/* ------------------------------------------------------------ city */}
       {tab === "city" && (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-4 lg:grid-cols-2">
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="text-sm">Deployments</CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 Every one of these runs the same code. Nothing about Pune is
                 compiled in; it is rows, like the rest.
               </CardDescription>
@@ -244,11 +244,11 @@ export default function Configuration() {
           </Card>
 
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Plus className="size-4" /> Add a city
               </CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 The subdivision words are used throughout the interface, so a
                 deployment that calls them zones or circles says zones or circles.
               </CardDescription>
@@ -298,13 +298,13 @@ export default function Configuration() {
 
       {/* ----------------------------------------------------------- wards */}
       {tab === "wards" && (
-        <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+        <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
           <Card className="min-w-0">
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="text-sm">
                 {data.wards.length} subdivisions
               </CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 A ward with no real boundary gets a square around its centre,
                 sized from its area. Reports still locate correctly; the shape is
                 wrong until the municipal geometry replaces it, and the badge
@@ -339,7 +339,7 @@ export default function Configuration() {
           </Card>
 
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Plus className="size-4" /> Add a subdivision
               </CardTitle>
@@ -387,8 +387,8 @@ export default function Configuration() {
           <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
             {kinds.map((k) => (
               <Card key={k.id}>
-                <CardHeader className="pb-2">
-                  <CardDescription className="text-xs">{k.label}</CardDescription>
+                <CardHeader className="pb-3">
+                  <CardDescription>{k.label}</CardDescription>
                   <CardTitle className="text-xl tabular-nums">
                     {fleetByKind.get(k.id) ?? 0}
                   </CardTitle>
@@ -400,11 +400,11 @@ export default function Configuration() {
             ))}
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+          <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
             <Card className="min-w-0">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">{data.resources.length} units</CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   Capability comes from the kind, not from anything typed here.
                   Registering a boat makes it eligible for water rescue and for
                   nothing else.
@@ -433,7 +433,7 @@ export default function Configuration() {
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-sm">
                   <Plus className="size-4" /> Register a unit
                 </CardTitle>
@@ -502,8 +502,8 @@ export default function Configuration() {
           <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
             {placeKinds.map((k) => (
               <Card key={k.id}>
-                <CardHeader className="pb-2">
-                  <CardDescription className="text-xs">{k.label}</CardDescription>
+                <CardHeader className="pb-3">
+                  <CardDescription>{k.label}</CardDescription>
                   <CardTitle className="text-xl tabular-nums">
                     {placesByKind.get(k.id) ?? 0}
                   </CardTitle>
@@ -512,11 +512,11 @@ export default function Configuration() {
             ))}
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+          <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
             <Card className="min-w-0">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">{data.lifelines.length} facilities</CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   Opening stock is what "low" is measured against later, so a
                   centre that opens with 200 packets raises a shortage at 50 and
                   one that opens with 2,000 does not.
@@ -550,7 +550,7 @@ export default function Configuration() {
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-sm">
                   <Plus className="size-4" /> Add a facility
                 </CardTitle>
@@ -623,11 +623,11 @@ export default function Configuration() {
 
       {/* ---------------------------------------------------------- people */}
       {tab === "people" && (
-        <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+        <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
           <Card className="min-w-0">
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="text-sm">{data.people.length} accounts</CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 The role lives in the profile, never in the signup. That is the
                 whole reason this screen exists rather than letting people
                 register themselves with a role: the database policies authorise
@@ -650,11 +650,11 @@ export default function Configuration() {
           </Card>
 
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <UserPlus className="size-4" /> Create a login
               </CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 Commissioner only. The account is created confirmed, so they can
                 sign in straight away.
               </CardDescription>

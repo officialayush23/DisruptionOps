@@ -572,7 +572,7 @@ select n.incident_id::text incident_id, n.capability_id, n.required, n.met
 
 _DECISIONS_SQL = """
 select id::text, action, target, ward_id, rationale, confidence,
-       status::text status, authority, created_at
+       status::text status, authority, created_at, action_key, params
   from decisions
  where sim_run_id is null
  order by (status = 'awaiting_approval') desc, created_at desc
@@ -882,7 +882,14 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          "clause": (r["authority"] or {}).get("clause"),
          "delegatedTo": (r["authority"] or {}).get("delegated_to"),
          "withinDelegation": (r["authority"] or {}).get("within_delegation"),
-         "createdAt": r["created_at"].isoformat()}
+         "createdAt": r["created_at"].isoformat(),
+         # What the decision would actually *do*, and to what. It was stored
+         # from the start — `gate.propose` keeps it so a decision approved
+         # twenty minutes later moves the unit it named — and never left the
+         # database, so the console could show "Move a pump to Kothrud" and not
+         # which pump. Sent now, so the audit can name both ends.
+         "actionKey": r["action_key"],
+         "params": dict(r["params"] or {})}
         for r in decision_rows
     ]
     events = [

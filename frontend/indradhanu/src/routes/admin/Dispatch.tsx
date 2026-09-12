@@ -3,6 +3,7 @@ import { Inbox, Siren, Truck } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
@@ -83,18 +84,48 @@ export default function Dispatch() {
    *  it — the solver, the replanner, an officer's approval. "Assigned by" is
    *  the column that turns a status board into an account of a decision. */
   const attachedBy = useMemo(() => {
-    const m = new Map<string, { actor: string; at: string; text: string }>()
+    const m = new Map<string, { actor: string; at: string; text: string; why: string }>()
     for (const e of state.events) {
       if (!e.kind.startsWith("assignment")) continue
-      const rid = (e.payload as Record<string, unknown>)?.resource_id
+      const p = (e.payload ?? {}) as Record<string, unknown>
+      // A fresh assignment names the unit in the payload; a re-tasking names
+      // the *assignment* there and the unit as its own subject. Both shapes,
+      // because the column is about the unit either way.
+      const rid = typeof p.resource_id === "string" ? p.resource_id : e.subjectId
       if (typeof rid !== "string") continue
       const prev = m.get(rid)
       if (!prev || prev.at < e.occurredAt) {
-        m.set(rid, { actor: e.actor, at: e.occurredAt, text: e.text })
+        m.set(rid, {
+          actor: e.actor,
+          at: e.occurredAt,
+          text: e.text,
+          // The planner writes its whole argument here — what it gave up, how
+          // far along that unit already was, and which severity outranked it.
+          // It was in the database and on no screen.
+          why: typeof p.reason === "string" ? p.reason : "",
+        })
       }
     }
     return m
   }, [state.events])
+
+  /** The decision behind a committed unit, when one exists.
+   *
+   *  Not every assignment has one — the solver's own output does not go through
+   *  the gate — but a prepositioning, a mutual-aid request or anything an
+   *  officer approved does, and that decision carries the clause it was
+   *  authorised under and the rationale in words. Keyed by the unit the
+   *  decision names in its params, which is why those had to be sent. */
+  const decisionFor = useMemo(() => {
+    const m = new Map<string, (typeof state.decisions)[number]>()
+    for (const d of state.decisions) {
+      const rid = d.params?.resource_id
+      if (typeof rid !== "string") continue
+      const prev = m.get(rid)
+      if (!prev || prev.createdAt < d.createdAt) m.set(rid, d)
+    }
+    return m
+  }, [state.decisions])
 
   const reportsPerIncident = useMemo(() => {
     const m = new Map<string, number>()
@@ -163,10 +194,10 @@ export default function Dispatch() {
   const free = spare.filter((r) => r.status === "available").length
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       {/* Four numbers, and the only two that change a decision are the last
           two. Red is reserved for the one that means somebody is not coming. */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Units committed" value={`${assigned.length}/${state.resources.length}`} />
         <Stat label="Spare and ready" value={free} />
         <Stat
@@ -178,15 +209,16 @@ export default function Dispatch() {
 
       {/* ------------------------------------------------------- assigned -- */}
       <Card>
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <Truck className="size-4" /> Assigned right now
           </CardTitle>
-          <CardDescription className="text-xs">
-            One row per committed unit, live. The solver decided every one of
-            these; the last column says which actor wrote it and when, so a
-            re-tasking is visible as a re-tasking rather than as a line moving on
-            a map.
+          <CardDescription>
+            One row per committed unit, live. Every one of these was decided by
+            the solver — the last two columns say which actor wrote it, when,
+            and the argument it gave. The number beside an incident is its
+            severity on a 1&ndash;5 scale, where 5 is life at risk; red is 4 or
+            above.
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0">
@@ -198,15 +230,20 @@ export default function Dispatch() {
                   <TableHead>Attached to</TableHead>
                   <TableHead>Hazard</TableHead>
                   <TableHead>Ward</TableHead>
-                  <TableHead className="text-right">Reports</TableHead>
-                  <TableHead>State</TableHead>
+                  <TableHead className="text-right" title="How many separate reports were clustered into this incident">
+                    Reports behind it
+                  </TableHead>
+                  <TableHead>Doing what</TableHead>
                   <TableHead className="text-right">ETA</TableHead>
-                  <TableHead>On the way</TableHead>
+                  <TableHead>Journey done</TableHead>
                   <TableHead>Attached by</TableHead>
+                  <TableHead className="min-w-[20rem]">Why this unit</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {assigned.map(({ unit, incident, by, progress }) => (
+                {assigned.map(({ unit, incident, by, progress }) => {
+                  const decision = decisionFor.get(unit.id)
+                  return (
                   <TableRow
                     key={unit.id}
                     className={`cursor-pointer ${
@@ -268,11 +305,37 @@ export default function Dispatch() {
                         "—"
                       )}
                     </TableCell>
+                    {/* The argument, in the words whoever made the decision
+                        wrote. Not a summary and not a template: the planner
+                        already says what it gave up and why, and the gate
+                        already says which clause let it. Both were in the
+                        database and on no screen. */}
+                    <TableCell className="max-w-[26rem] py-3 align-top text-xs leading-relaxed">
+                      {by?.why || decision?.rationale ? (
+                        <>
+                          <p>{by?.why || decision?.rationale}</p>
+                          {decision?.clause && (
+                            <p className="text-muted-foreground mt-1">
+                              Authorised under {decision.clause}
+                              {decision.withinDelegation === false
+                                ? ` — reserved to the ${decision.delegatedTo ?? "Commissioner"}, so an officer approved it`
+                                : ""}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          Nearest capable unit in the last solve. No re-tasking,
+                          so nothing was given up.
+                        </span>
+                      )}
+                    </TableCell>
                   </TableRow>
-                ))}
+                  )
+                })}
                 {assigned.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-muted-foreground text-xs">
+                    <TableCell colSpan={10} className="text-muted-foreground text-xs">
                       Nothing committed. Either nothing is open, or the planner
                       has not run since it opened.
                     </TableCell>
@@ -284,14 +347,14 @@ export default function Dispatch() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         {/* --------------------------------------------------------- left -- */}
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Inbox className="size-4" /> What is left
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Not committed to anything. A map cannot show this — an idle unit
               looks exactly like a busy one from above — and it is half of every
               question about whether the city is covered.
@@ -304,7 +367,7 @@ export default function Dispatch() {
                   <TableRow>
                     <TableHead>Unit</TableHead>
                     <TableHead>Can do</TableHead>
-                    <TableHead>State</TableHead>
+                    <TableHead>Doing what</TableHead>
                     <TableHead>Why not available</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -361,11 +424,11 @@ export default function Dispatch() {
 
         {/* -------------------------------------------------------- unmet -- */}
         <Card className={unmet.length ? "border-destructive/40" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Siren className="size-4" /> Demand nobody has
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Recorded rather than quietly under-served. Each row is a capability
               an open incident needs and no unit is meeting — the case for asking
               another agency, on the handoff screen.
@@ -448,7 +511,7 @@ function Stat({
 }) {
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-3">
         <CardDescription>{label}</CardDescription>
         <CardTitle
           className={`text-2xl tabular-nums ${

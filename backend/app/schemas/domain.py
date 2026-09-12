@@ -440,6 +440,12 @@ class IncidentCategoryRef(Camel):
     base_severity: Severity = 3
     life_safety: bool = False
     needs: dict[CapabilityId, int] = Field(default_factory=dict)
+    #: Phrases that identify this category in free text, with a tuning
+    #: multiplier each. Data rather than code, so a second hazard — or a second
+    #: city with its own words for the same thing — is rows and not a release.
+    #: Empty means this deployment has not seeded any and the parser falls back
+    #: to its built-in dictionary.
+    keywords: dict[str, float] = Field(default_factory=dict)
 
 
 class Agency(Camel):

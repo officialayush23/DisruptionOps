@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { DemoCredentials } from "@/auth/DemoCredentials"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
+import { REPORT_STATUS, trustWords } from "@/lib/plain"
 
 /** The crew's interface.
  *
@@ -55,6 +56,8 @@ type FieldState = {
   facilities: Facility[]
   recent: { subjectId: string; statusKind: string; note: string
             reportedBy: string; at: string }[]
+  /** Undefined on an older backend; the card below simply does not render. */
+  myReports?: MyReport[]
   /** Every open incident in the city, so a crew sees what they just reported
    *  land on their own map instead of taking it on faith. */
   incidents?: {
@@ -66,6 +69,31 @@ type FieldState = {
 }
 
 type Category = { id: string; displayName: string }
+
+/** A hazard this crew filed, and what became of it.
+ *
+ *  The crew had exactly one chance to learn the fate of a report: the card that
+ *  appeared for a few seconds after pressing send. Reload, or drive to the next
+ *  street, and "did anyone act on that?" was answered by faith. These rows
+ *  carry the consequence rather than the status — which incident it landed on,
+ *  how many other reports are on that incident, whether a unit is coming and
+ *  how far out. */
+type MyReport = {
+  id: string
+  text: string
+  readAs: string
+  trust: number | null
+  status: string
+  outcome: string | null
+  at: string
+  incidentId: string | null
+  incidentTitle: string | null
+  incidentStatus: string | null
+  incidentSeverity: number | null
+  reportCount: number
+  unitsOnIt: number
+  etaMinutes: number | null
+}
 
 /** The live fix, and why there isn't one.
  *
@@ -370,7 +398,7 @@ export default function FieldApp() {
 
       <OfflineBar manifest="/field.webmanifest" />
 
-      <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+      <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
           <MapStage
             panelTitle="My units"
@@ -455,7 +483,7 @@ export default function FieldApp() {
                 <CardTitle className="text-sm">
                   {unit.label} to {unit.assignedTo}
                 </CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
                   {unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
                   {typeof unit.progress === "number"
@@ -510,7 +538,7 @@ export default function FieldApp() {
                 value={hazardText}
                 onChange={(e) => setHazardText(e.target.value)}
                 placeholder="Wall collapsed across the lane, nobody trapped"
-                className="min-h-16 text-xs"
+                className="min-h-20 text-base"
               />
               <div className="flex flex-wrap gap-1">
                 {cats.slice(0, 10).map((c) => (
@@ -519,7 +547,7 @@ export default function FieldApp() {
                     type="button"
                     onClick={() => setHazardCat(hazardCat === c.id ? "" : c.id)}
                     className={
-                      "rounded border px-2 py-1 text-[11px] " +
+                      "rounded-md border px-3 py-2 text-sm " +
                       (hazardCat === c.id
                         ? "border-primary bg-primary/10 font-medium"
                         : "border-muted-foreground/25")
@@ -606,7 +634,7 @@ export default function FieldApp() {
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Radio className="size-4" /> Report status
               </CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 {unit ? `${unit.label} — ${unit.status.replace(/_/g, " ")}` : "Pick a unit"}
                 {unit?.unavailableReason && ` (${unit.unavailableReason})`}
               </CardDescription>
@@ -633,7 +661,7 @@ export default function FieldApp() {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">Facilities</CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 Declaring one full stops the citizen agent sending anyone there.
               </CardDescription>
             </CardHeader>
@@ -665,9 +693,112 @@ export default function FieldApp() {
             </CardContent>
           </Card>
 
+          {/* What became of what this crew filed.
+              The one thing a crew asks after reporting a hazard, and the one
+              thing the screen could not answer once the confirmation card
+              faded. Every row carries the consequence, not the status: which
+              incident it landed on, how many others are on that incident, and
+              whether anyone is coming. */}
+          {(state?.myReports?.length ?? 0) > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Send className="size-4" /> What you reported
+                </CardTitle>
+                <CardDescription>
+                  Live. A report is worth filing only if you can see what it did.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2.5">
+                {state!.myReports!.map((r) => {
+                  const held = r.status === "quarantined" || r.status === "rejected"
+                  const closed = r.incidentStatus === "resolved"
+                  return (
+                    <div
+                      key={r.id}
+                      className={
+                        "space-y-1.5 rounded-md border p-2.5 " +
+                        (closed
+                          ? "border-emerald-500/40 bg-emerald-500/5"
+                          : held
+                            ? "border-amber-500/40 bg-amber-500/5"
+                            : "")
+                      }
+                    >
+                      <p className="line-clamp-2 text-xs">{r.text}</p>
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                        <Badge variant="outline" className="font-normal">
+                          {r.readAs.replace(/_/g, " ")}
+                        </Badge>
+                        {/* "trust 0.62" tells a driver nothing: nobody said the
+                            scale, or which end is good. The word does both, and
+                            the number stays for anyone who wants it. */}
+                        {r.trust !== null && (
+                          <span className="text-muted-foreground">
+                            trust {trustWords(r.trust)}
+                            <span className="tabular-nums"> ({r.trust.toFixed(2)})</span>
+                          </span>
+                        )}
+                        <span className="text-muted-foreground">
+                          {new Date(r.at).toLocaleTimeString(undefined, {
+                            hour: "2-digit", minute: "2-digit", hour12: false,
+                          })}
+                        </span>
+                      </div>
+
+                      {/* The chain, in one sentence each. Three outcomes, and
+                          the middle one is the one a crew most needs said out
+                          loud — filed, believed, and nobody free to send. */}
+                      {held ? (
+                        <p className="text-xs">
+                          <span className="font-medium">
+                            {REPORT_STATUS[r.status]?.label ?? "Held"}.
+                          </span>{" "}
+                          {REPORT_STATUS[r.status]?.hint ??
+                            "Nothing has been dispatched for it."}{" "}
+                          It has not opened an incident, so treat it as not yet
+                          acted on.
+                        </p>
+                      ) : r.incidentTitle ? (
+                        <div className="space-y-0.5 text-xs">
+                          <p>
+                            {closed ? "Closed: " : "On "}
+                            <span className="font-medium">{r.incidentTitle}</span>
+                            {r.incidentSeverity != null && (
+                              <span className="text-muted-foreground">
+                                {" "}· severity {r.incidentSeverity}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-muted-foreground">
+                            {r.reportCount > 1
+                              ? `${r.reportCount} reports on it`
+                              : "the only report on it"}
+                            {" · "}
+                            {closed
+                              ? "worked and closed"
+                              : r.unitsOnIt > 0
+                                ? `${r.unitsOnIt} unit${r.unitsOnIt === 1 ? "" : "s"} on the way` +
+                                  (r.etaMinutes != null ? `, ${r.etaMinutes} min out` : "")
+                                : "nobody assigned yet"}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-muted-foreground text-xs">
+                          Filed, not yet on an incident. The next plan will look
+                          at it.
+                        </p>
+                      )}
+                    </div>
+                  )
+                })}
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Recently reported</CardTitle>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Unit status changes</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1">
               {state?.recent.slice(0, 10).map((r, i) => (

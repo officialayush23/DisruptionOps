@@ -72,13 +72,13 @@ export default function Forecast() {
 
   if (!f || (!f.facilities.length && !f.recurrence.length)) {
     return (
-      <div className="p-4">
+      <div className="p-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
               <TrendingUp className="size-4" /> Nothing to forecast from yet
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               {f?.error
                 ? `The forecast could not be built: ${f.error}`
                 : "Rates are learned from incidents this system has actually seen. Start live ingest and the first estimates appear within a minute, marked as resting almost entirely on the city-wide prior until the wards separate."}
@@ -94,13 +94,13 @@ export default function Forecast() {
   )
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <Card>
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-3">
           <CardTitle className="text-sm">
             Next {f.horizonHours} hours
           </CardTitle>
-          <CardDescription className="text-xs">{f.confidenceNote}</CardDescription>
+          <CardDescription>{f.confidenceNote}</CardDescription>
         </CardHeader>
         <CardContent className="text-muted-foreground text-xs">
           Rates are a Gamma-Poisson posterior: each ward starts on the city-wide
@@ -113,13 +113,13 @@ export default function Forecast() {
 
       {saturating.length > 0 && (
         <Card className="border-destructive/50">
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <TriangleAlert className="size-4" />
               {saturating.length} facilit{saturating.length === 1 ? "y" : "ies"} will
               not take who is coming
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               The citizen agent already stops routing people to these. They are
               here so somebody can open capacity before it matters.
             </CardDescription>
@@ -153,7 +153,7 @@ export default function Forecast() {
             const p = PRESSURE[x.pressure] ?? PRESSURE.steady
             return (
               <Card key={x.id}>
-                <CardHeader className="pb-2">
+                <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="flex items-center gap-1.5 text-sm">
                       <Hospital className="size-3.5 shrink-0" />
@@ -163,7 +163,7 @@ export default function Forecast() {
                       {p.label}
                     </Badge>
                   </div>
-                  <CardDescription className="text-xs">
+                  <CardDescription>
                     {x.kind} ·{" "}
                     {x.capacity !== null
                       ? `${x.spare} of ${x.capacity} free`
@@ -199,9 +199,9 @@ export default function Forecast() {
 
       {tab === "wards" && (
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="text-sm">Most likely next, by ward</CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               The bar is how much of the estimate is this ward's own history
               rather than the city prior.
             </CardDescription>
@@ -238,11 +238,11 @@ export default function Forecast() {
 
       {tab === "demand" && (
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Truck className="size-4" /> Capability wanted over the horizon
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Expected incidents multiplied by what each category needs. Compared
               against what is free right now, not against the whole fleet.
             </CardDescription>

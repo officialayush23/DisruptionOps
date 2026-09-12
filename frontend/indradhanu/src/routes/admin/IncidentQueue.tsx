@@ -107,7 +107,7 @@ export default function IncidentQueue() {
   const merged = rows.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-center gap-2">
         <Input
           value={query}
@@ -148,7 +148,7 @@ export default function IncidentQueue() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <Siren className="size-4" /> Nothing open
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               {state.running
                 ? "Reports are arriving; the first incident will appear here within a few seconds."
                 : "Start live ingest on the command console and reports will land here."}

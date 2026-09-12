@@ -112,6 +112,18 @@ const BOX = g(
   `<path d="M4.8 8.8 11 11.6v6.9l-6.2-2.8V8.8Zm14.4 0v7.9L13 19.5v-6.9l6.2-2.8Z" opacity=".8"/>`
 )
 
+/** A report nothing recognised.
+ *
+ *  Needed because `hz-default` was the flame, which was harmless while no fire
+ *  category existed and is actively misleading now that one does: an
+ *  unclassified report and a burning building would have drawn the same marker.
+ *  A question mark says the one true thing about this pin — somebody reported
+ *  something here and the system has not worked out what. */
+const QUERY = g(
+  `<path d="M12 4.4c-2.5 0-4.3 1.5-4.6 3.8h2.7c.2-1 .9-1.6 1.9-1.6 1.1 0 1.8.6 1.8 1.5 0 .8-.4 1.2-1.4 1.9-1.2.8-1.7 1.6-1.6 3h2.5c0-.8.3-1.2 1.3-1.9 1.3-.9 2-1.8 2-3.2 0-2.1-1.8-3.5-4.6-3.5Z"/>` +
+  `<circle cx="12" cy="16.6" r="1.5"/>`
+)
+
 // -------------------------------------------------------------- vehicles ---
 
 const AMBULANCE = g(
@@ -245,7 +257,11 @@ export const ICONS: Record<string, [Svg, string]> = {
   "hz-heat_casualty": [HEAT, "#f97316"],
   "hz-supply_shortage": [BOX, "#8b5cf6"],
   "hz-fire": [FIRE, "#ef4444"],
-  "hz-default": [FIRE, "#f97316"],
+  "hz-unknown_report": [QUERY, "#64748b"],
+  // Slate, not orange. The default is for a category this build has never
+  // heard of, and painting it a warning colour claims a severity nothing has
+  // established.
+  "hz-default": [QUERY, "#64748b"],
 
   // vehicles, by resource kind
   "rk-ambulance": [AMBULANCE, "#64748b"],

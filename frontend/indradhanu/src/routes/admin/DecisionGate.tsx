@@ -4,6 +4,7 @@ import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { DECISION_STATUS } from "@/lib/plain"
 
 /** What the system proposed, and what it was not allowed to do on its own.
  *
@@ -67,18 +68,22 @@ export default function DecisionGate() {
   }, [state.decisions])
 
   const rows = state.decisions.filter((d) => d.status === tab)
+  const wardName = useMemo(
+    () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
+    [state.wards]
+  )
   const waiting = counts.get("awaiting_approval") ?? 0
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       {waiting > 0 && (
         <Card className="border-destructive/50">
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <ShieldAlert className="size-4" />
               {waiting} action{waiting === 1 ? "" : "s"} will not issue without you
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               These are held by the delegation matrix, not by a confidence
               threshold. Until somebody with the delegation acts, nothing moves.
             </CardDescription>
@@ -109,7 +114,7 @@ export default function DecisionGate() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <ClipboardCheck className="size-4" /> Nothing in this state
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               {state.running
                 ? "Decisions appear as the policy agent proposes them."
                 : "Start live ingest on the command console; the policy agent proposes as incidents open."}
@@ -120,17 +125,37 @@ export default function DecisionGate() {
         <div className="grid gap-2 xl:grid-cols-2">
           {rows.map((d) => (
             <Card key={d.id} className={TONE[d.status] ?? ""}>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-2">
                   <CardTitle className="text-sm">{d.action}</CardTitle>
                   <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
                     {time(d.createdAt)}
                   </span>
                 </div>
-                <CardDescription className="text-xs">
-                  {d.target}
-                  {d.wardId ? ` · ${d.wardId}` : ""} · confidence{" "}
-                  {(d.confidence * 100).toFixed(0)}%
+                <CardDescription className="space-y-1">
+                  <span className="block">
+                    {/* A raw ward uuid in the one place a commissioner reads
+                        hardest. The name was always available on `state.wards`
+                        and this line never looked at it. */}
+                    {d.target}
+                    {d.wardId ? ` · ${wardName.get(d.wardId) ?? d.wardId}` : ""}
+                  </span>
+                  <span className="block">
+                    {/* Status in words. "auto_issued" reads to a stranger as
+                        "a person waved it through"; it means the opposite —
+                        the clause allowed it without one. */}
+                    <span className="font-medium">
+                      {DECISION_STATUS[d.status]?.label ?? d.status.replace(/_/g, " ")}
+                    </span>
+                    {DECISION_STATUS[d.status]?.hint
+                      ? ` — ${DECISION_STATUS[d.status].hint}`
+                      : ""}
+                  </span>
+                  <span className="block">
+                    The model was {(d.confidence * 100).toFixed(0)}% confident.
+                    Confidence alone never issues anything: the clause below
+                    decides.
+                  </span>
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2">

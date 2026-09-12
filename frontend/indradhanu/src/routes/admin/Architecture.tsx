@@ -170,7 +170,7 @@ export default function Architecture() {
   }, [state])
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 className="text-lg font-semibold">How this works</h1>
@@ -416,9 +416,9 @@ export default function Architecture() {
 
       {/* The claims the diagram makes, each with the thing that backs it, so a
           judge can check one rather than take six on trust. */}
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Audit spine</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {counts.events.toLocaleString()}
@@ -431,7 +431,7 @@ export default function Architecture() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Cleared the gate on their own</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {counts.autoIssued.toLocaleString()}
@@ -446,7 +446,7 @@ export default function Architecture() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Fleet committed</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {counts.committed.toLocaleString()}
@@ -464,9 +464,9 @@ export default function Architecture() {
       </div>
 
       <Card>
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-3">
           <CardTitle className="text-sm">The foundation</CardTitle>
-          <CardDescription className="text-xs">
+          <CardDescription>
             Taxonomy is rows, not enums. Hazards, categories, capabilities and
             resource kinds are all reference data, so a new hazard or a new city
             is configuration rather than a deployment.

@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import type { RawChange } from "@/routes/demo/useDemo"
+import { ENGINE } from "@/lib/plain"
 
 /** What the last solve decided, and what it cost to decide it.
  *
@@ -93,7 +94,7 @@ export default function AllocationPlanner() {
   const shortBy = unmet.reduce((n, x) => n + (x.required - x.met), 0)
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-center gap-2">
         <Button
           onClick={() => run("replan", "/demo/replan")}
@@ -126,7 +127,7 @@ export default function AllocationPlanner() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <Route className="size-4" /> No plan yet
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               The planner runs when new reports have changed the picture, at most
               once every six ticks, and on demand from the button above. Until it
               has run there is nothing to check, so nothing is shown.
@@ -136,10 +137,16 @@ export default function AllocationPlanner() {
       ) : (
         <>
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="text-sm">{plan.headline}</CardTitle>
-              <CardDescription className="text-xs">
-                Solved by {plan.engine}. Coverage {(plan.coverage * 100).toFixed(0)}%.
+              <CardDescription>
+                {/* "cp-sat" is the name of an algorithm. A commissioner needs
+                    to know a solver decided this and not a person, which is
+                    what the words say and the acronym does not. */}
+                Solved by the {ENGINE[plan.engine] ?? plan.engine}
+                {plan.engine === "cp-sat" ? " (CP-SAT)" : ""}.{" "}
+                {(plan.coverage * 100).toFixed(0)}% of recorded demand has a
+                unit against it.
                 A unit already on its way costs something to move, and more the
                 closer it is, which is why most of them stay put.
               </CardDescription>
@@ -218,12 +225,12 @@ export default function AllocationPlanner() {
             )}
           </Card>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {GROUPS.map(({ key, tone }) => {
               const list = plan[key] ?? []
               return (
                 <Card key={key} className={list.length ? tone : undefined}>
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-3">
                     <CardTitle className="text-sm">
                       {LABELS[key]}{" "}
                       <span className="text-muted-foreground tabular-nums font-normal">

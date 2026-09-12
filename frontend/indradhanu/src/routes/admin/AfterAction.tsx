@@ -32,23 +32,44 @@ const time = (iso: string | null) =>
       })
     : "—"
 
+/** Tone, keyed on the real event kinds.
+ *
+ *  These were underscored — `incident_opened`, `assignment_created` — and the
+ *  kinds in the table are dotted: `incident.opened`, `assignment.created`. So
+ *  every key here missed, and the `HEADLINE` set below missed too, which meant
+ *  the "key events only" view of this screen has been **empty since it was
+ *  written**. A filter that silently matches nothing looks exactly like a quiet
+ *  run.
+ */
 const TONE: Record<string, string> = {
-  incident_opened: "text-orange-600 dark:text-orange-400",
-  report_received: "text-muted-foreground",
-  reports_merged: "text-sky-600 dark:text-sky-400",
-  decision_proposed: "text-blue-600 dark:text-blue-400",
-  decision_acted: "text-blue-600 dark:text-blue-400",
-  alert_issued: "text-violet-600 dark:text-violet-400",
-  assignment_created: "text-emerald-600 dark:text-emerald-400",
-  assignment_changed: "text-violet-600 dark:text-violet-400",
-  incident_resolved: "text-emerald-600 dark:text-emerald-400",
+  "incident.opened": "text-orange-600 dark:text-orange-400",
+  "report.received": "text-muted-foreground",
+  "report.linked": "text-sky-600 dark:text-sky-400",
+  "report.rejected": "text-red-600 dark:text-red-400",
+  "decision.proposed": "text-blue-600 dark:text-blue-400",
+  "decision.gated": "text-blue-600 dark:text-blue-400",
+  "decision.acted": "text-blue-600 dark:text-blue-400",
+  "alert.issued": "text-violet-600 dark:text-violet-400",
+  "assignment.created": "text-emerald-600 dark:text-emerald-400",
+  "assignment.changed": "text-violet-600 dark:text-violet-400",
+  "assignment.cancelled": "text-muted-foreground",
+  "demand.uncovered": "text-red-600 dark:text-red-400",
+  "incident.resolved": "text-emerald-600 dark:text-emerald-400",
+  "plan.generated": "text-blue-600 dark:text-blue-400",
+  "agency.requested": "text-teal-600 dark:text-teal-400",
+  "agency.fulfilled": "text-teal-600 dark:text-teal-400",
+  "shelter.arrival": "text-emerald-600 dark:text-emerald-400",
+  "road.blocked": "text-red-600 dark:text-red-400",
+  "risk.updated": "text-amber-600 dark:text-amber-400",
+  "feed.degraded": "text-amber-600 dark:text-amber-400",
 }
 
 /** The event kinds worth showing when somebody asks for the short version.
  *  Everything else stays available behind "everything". */
 const HEADLINE = new Set([
-  "incident_opened", "reports_merged", "decision_proposed", "decision_acted",
-  "alert_issued", "assignment_changed", "incident_resolved",
+  "incident.opened", "report.linked", "decision.proposed", "decision.acted",
+  "alert.issued", "assignment.changed", "incident.resolved",
+  "agency.requested", "agency.fulfilled", "demand.uncovered",
 ])
 
 export default function AfterAction() {
@@ -96,7 +117,7 @@ export default function AfterAction() {
   // question that gets asked before the demo starts at least as often as after.
   if (!state.events.length) {
     return (
-      <div className="space-y-3 p-4">
+      <div className="space-y-6 p-6">
         <Empty
           icon={<History className="text-muted-foreground size-8" />}
           title="Nothing to review yet"
@@ -108,10 +129,10 @@ export default function AfterAction() {
   }
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-4">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-4">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Decisions</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{state.decisions.length}</CardTitle>
           </CardHeader>
@@ -120,7 +141,7 @@ export default function AfterAction() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Advisories</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{state.alerts.length}</CardTitle>
           </CardHeader>
@@ -129,7 +150,7 @@ export default function AfterAction() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Incidents</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{state.incidents.length}</CardTitle>
           </CardHeader>
@@ -138,7 +159,7 @@ export default function AfterAction() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Unmet demand</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {state.plan?.uncovered.length ?? 0}
@@ -154,7 +175,7 @@ export default function AfterAction() {
 
       {state.plan?.headline && (
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardTitle className="text-sm">Last plan</CardTitle>
           </CardHeader>
           <CardContent className="text-sm">
@@ -173,7 +194,7 @@ export default function AfterAction() {
               <ShieldAlert className="size-4" />
               Where a person departed from the recommendation
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               The most valuable rows in the system: each one is a labelled
               example of the model being wrong in a way an officer could name.
             </CardDescription>
@@ -207,7 +228,7 @@ export default function AfterAction() {
               {all ? "Key events only" : `Everything (${state.events.length})`}
             </Button>
           </div>
-          <CardDescription className="text-xs">
+          <CardDescription>
             Straight from the append-only log, oldest first. An indented line is
             the event that caused the one above it.
           </CardDescription>
@@ -218,7 +239,7 @@ export default function AfterAction() {
               <div key={e.id} className="flex gap-3 py-2">
                 <div className="flex flex-col items-center">
                   <span className="bg-muted flex size-6 shrink-0 items-center justify-center rounded-full">
-                    {e.kind === "alert_issued" ? (
+                    {e.kind === "alert.issued" ? (
                       <Radio className="size-3.5" />
                     ) : (
                       <FileText className="size-3.5" />

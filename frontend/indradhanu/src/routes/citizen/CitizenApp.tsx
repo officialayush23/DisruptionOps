@@ -1173,11 +1173,11 @@ export default function CitizenApp() {
 
         <div className="space-y-3">
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <Compass className="size-4" /> Where should I go?
               </CardTitle>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 Decided from what has room, what is near an open incident, and
                 which roads crews have reported blocked.
               </CardDescription>
@@ -1412,9 +1412,9 @@ export default function CitizenApp() {
           </Card>
 
           <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Tell us what you can see</CardTitle>
-              <CardDescription className="text-xs">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Tell us what you can see</CardTitle>
+              <CardDescription>
                 Say it or type it, in English, Hindi or Marathi. No account needed.
               </CardDescription>
             </CardHeader>
@@ -1474,6 +1474,7 @@ export default function CitizenApp() {
                 onChange={(e) => { setText(e.target.value); setHeard(null) }}
                 placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
                 rows={3}
+                className="text-base"
               />
 
               {/* A photo, if there is one to take.
@@ -1649,8 +1650,8 @@ export default function CitizenApp() {
 
           {state?.risk && (
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">Why this area is rated as it is</CardTitle>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Why this area is rated as it is</CardTitle>
               </CardHeader>
               <CardContent className="space-y-1">
                 {state.risk.drivers.slice(0, 4).map((d, i) => (

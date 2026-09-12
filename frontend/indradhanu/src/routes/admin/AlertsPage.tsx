@@ -52,16 +52,16 @@ export default function AlertsPage() {
   }
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-3">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Alerts issued</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{alerts.length}</CardTitle>
           </CardHeader>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>People reached</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {reach.toLocaleString()}
@@ -72,7 +72,7 @@ export default function AlertsPage() {
           </CardContent>
         </Card>
         <Card className={waiting ? "border-destructive/50" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Held, so not sent</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{waiting}</CardTitle>
           </CardHeader>
@@ -85,14 +85,14 @@ export default function AlertsPage() {
       <div className="grid gap-2 xl:grid-cols-2">
         {alerts.map((a) => (
           <Card key={a.id}>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <div className="flex items-start justify-between gap-2">
                 <CardTitle className="text-sm">{a.headline}</CardTitle>
                 <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
                   {time(a.issuedAt)}
                 </span>
               </div>
-              <CardDescription className="text-xs">
+              <CardDescription>
                 {a.wardName ?? a.wardId} · severity {a.severity} · {a.language}
               </CardDescription>
             </CardHeader>

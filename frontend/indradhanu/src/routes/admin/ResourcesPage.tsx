@@ -126,10 +126,10 @@ export default function ResourcesPage() {
   }
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-4">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-4">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Units in fleet</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{state.resources.length}</CardTitle>
           </CardHeader>
@@ -138,7 +138,7 @@ export default function ResourcesPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Available</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{available}</CardTitle>
           </CardHeader>
@@ -147,7 +147,7 @@ export default function ResourcesPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Shelter occupancy</CardDescription>
             <CardTitle className="text-2xl tabular-nums">
               {shelter.occupancy}/{shelter.capacity}
@@ -158,7 +158,7 @@ export default function ResourcesPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Distribution points</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{supplyPoints.length}</CardTitle>
           </CardHeader>
@@ -178,7 +178,7 @@ export default function ResourcesPage() {
                 {out.length}
               </span>
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Each of these is capacity the allocator cannot use, with the reason
               the crew gave. Returning one puts it back in the pool for the next
               plan; its old task is not restored, because that task was released
@@ -238,13 +238,13 @@ export default function ResourcesPage() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <Boxes className="size-4" /> Relief stock across the city
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               What is on the shelves right now. It drains as people are served
               and goes back up when a supply run arrives — both are ordinary
               assignments, not a separate logistics system.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {stock.map(([item, qty]) => (
               <div key={item} className="rounded-md border p-2">
                 <div className="text-muted-foreground text-xs">{pretty(item)}</div>
@@ -348,7 +348,7 @@ export default function ResourcesPage() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <Warehouse className="size-4" /> Places with beds
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Ordered by how full they are, because the one at the top is the one
               the citizen agent will stop sending people to next.
             </CardDescription>

@@ -1180,6 +1180,66 @@ async def field_state(
         )
     ]
 
+    # What this crew reported, and what happened to it.
+    #
+    # A crew could file a hazard and then had exactly one chance to learn its
+    # fate: the card that appeared for a few seconds after pressing send. Reload
+    # the page, or drive to the next street, and "did anyone act on that?" was
+    # answered by faith. `recent` above is the *status* feed — punctures,
+    # shelters full — and carries none of this.
+    #
+    # Scoped by `device_id`, which `/field/report` sets to
+    # `field-<user or operator>`, rather than by name: two crews from the same
+    # operator should not read each other's reports as their own, and a name is
+    # not an identity.
+    #
+    # The join carries the consequence, not just the status: which incident it
+    # landed on, how many other reports are on that incident, how many units are
+    # on the way, and whether it has been closed. That chain is the answer to the
+    # question actually being asked.
+    my_reports = [
+        {"id": r["id"], "text": r["note"], "readAs": r["classified_as"] or r["category"],
+         "trust": float(r["trust_score"]) if r["trust_score"] is not None else None,
+         "status": r["verification_status"], "outcome": r["outcome"],
+         "at": r["created_at"].isoformat(),
+         "incidentId": r["incident_id"], "incidentTitle": r["incident_title"],
+         "incidentStatus": r["incident_status"], "incidentSeverity": r["incident_severity"],
+         "reportCount": r["report_count"], "unitsOnIt": r["units_on_it"],
+         "etaMinutes": r["eta_minutes"]}
+        for r in await db.fetch(
+            """
+            select c.id::text, c.note, c.category, c.classified_as, c.trust_score,
+                   c.verification_status, c.outcome, c.created_at,
+                   c.incident_id::text incident_id,
+                   i.title incident_title, i.status::text incident_status,
+                   i.severity incident_severity,
+                   coalesce(rc.n, 0)::int report_count,
+                   coalesce(ac.n, 0)::int units_on_it,
+                   ac.eta_minutes
+              from citizen_reports c
+              left join incidents i on i.id = c.incident_id
+              left join lateral (
+                select count(*) n from citizen_reports x
+                 where x.incident_id = c.incident_id) rc on true
+              left join lateral (
+                select count(*) n, min(a.eta_minutes) eta_minutes
+                  from assignments a
+                 where a.incident_id = c.incident_id
+                   and a.status in ('proposed','approved','en_route','on_site')
+                   and a.sim_run_id is null) ac on true
+             where c.source = 'field'
+               and ($2::text is null or c.device_id = $2)
+               and c.city_id = $1
+             order by c.created_at desc
+             limit 20
+            """,
+            city_id,
+            f"field-{principal.user_id or principal.operator or 'unknown'}"
+            if not principal.is_staff or not operator
+            else None,
+        )
+    ]
+
     # Every open incident in the city, not only the ones this crew is assigned
     # to. A crew that has just reported a collapsed wall needs to see it land on
     # their own map — otherwise "did that go through?" is answered by faith —
@@ -1233,4 +1293,5 @@ async def field_state(
     return {"operator": scope, "units": units,
             "tasks": [t.model_dump(by_alias=True) for t in tasks],
             "facilities": facilities, "recent": recent,
+            "myReports": my_reports,
             "incidents": incidents}

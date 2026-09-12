@@ -193,7 +193,7 @@ export default function Replay() {
   }, [data, frame])
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <h1 className="flex items-center gap-2 text-lg font-semibold">
@@ -329,11 +329,11 @@ export default function Replay() {
             }
           />
 
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-3">
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">At {clock(frame.at)}</CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   Folded from {frame.eventId ? `event ${frame.eventId}` : "no events yet"}.
                 </CardDescription>
               </CardHeader>
@@ -354,9 +354,9 @@ export default function Replay() {
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">The plan in force</CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   The last solve before this moment.
                 </CardDescription>
               </CardHeader>
@@ -392,9 +392,9 @@ export default function Replay() {
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">What it could not cover</CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription>
                   Recorded rather than hidden. A plan that never admits a gap is
                   not a plan.
                 </CardDescription>
@@ -422,7 +422,7 @@ export default function Replay() {
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">Nothing recorded yet</CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Replay reads the event log. Run live ingest on the command console
               for a few minutes and a session will appear here.
             </CardDescription>

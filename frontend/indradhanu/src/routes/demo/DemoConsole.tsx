@@ -84,7 +84,7 @@ export default function DemoConsole() {
   const merged = state.incidents.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
 
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-center gap-2">
         {!state.running ? (
           <Button onClick={() => run("start", "/demo/start", { cityId: "pune", reportEveryTicks: 4 })}
@@ -159,7 +159,7 @@ export default function DemoConsole() {
         </Alert>
       )}
 
-      <div className="grid gap-3 lg:grid-cols-[1fr_380px]">
+      <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
           <MapStage
             panelTitle="What is happening"
@@ -202,7 +202,7 @@ export default function DemoConsole() {
 
           {selectedIncident && (
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">{selectedIncident.title}</CardTitle>
                 <CardDescription>
                   Severity {selectedIncident.severity} · {selectedIncident.reportCount} report
@@ -259,7 +259,7 @@ export default function DemoConsole() {
         <div className="space-y-3">
           {pending.length > 0 && (
             <Card className="border-destructive/50">
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-sm">
                   <Gavel className="size-4" /> Awaiting an officer
                 </CardTitle>
@@ -321,9 +321,9 @@ export default function DemoConsole() {
             <div className="space-y-3 border-t p-3">
           {state.plan && (
             <Card>
-              <CardHeader className="pb-2">
+              <CardHeader className="pb-3">
                 <CardTitle className="text-sm">Last re-plan</CardTitle>
-                <CardDescription className="text-xs">{state.plan.headline}</CardDescription>
+                <CardDescription>{state.plan.headline}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-1">
                 {[...state.plan.reassigned, ...state.plan.assigned, ...state.plan.released]
@@ -343,7 +343,7 @@ export default function DemoConsole() {
           )}
 
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <CardTitle className="text-sm">What is happening</CardTitle>
             </CardHeader>
             <CardContent>

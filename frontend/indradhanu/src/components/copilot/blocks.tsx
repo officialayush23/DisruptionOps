@@ -434,11 +434,31 @@ export function BlockView({
                   <span className="font-medium">{p.action}</span>
                   <Badge variant="outline">
                     {p.status === "auto_issued"
-                      ? (p.executed ? "authorised and done" : "authorised")
-                      : "waiting for an officer"}
+                      ? p.executed
+                        ? "done"
+                        // Authorised and not carried out is a third state, and
+                        // showing it as "authorised" let it read as finished.
+                        // `note` says why; the badge should not disagree with it.
+                        : "authorised, not carried out"
+                      : "needs an officer"}
                   </Badge>
                 </div>
                 <p className="text-muted-foreground mt-1">{p.reason}</p>
+                {/* Which clause decided, and — when it was held — who it is
+                    reserved to. "Waiting for an officer" without naming the
+                    clause or the officer is the system asserting authority it
+                    will not show its working for, which is the opposite of the
+                    argument this product makes. */}
+                {p.clause && (
+                  <p className="text-muted-foreground mt-1">
+                    {p.status === "auto_issued"
+                      ? `Authorised under ${p.clause}.`
+                      : `Held under ${p.clause}` +
+                        (p.delegatedTo
+                          ? ` — reserved to the ${String(p.delegatedTo).replace(/_/g, " ")}.`
+                          : ".")}
+                  </p>
+                )}
                 {p.note && <p className="mt-1 text-amber-700 dark:text-amber-400">{p.note}</p>}
                 {p.result?.etaMinutes != null && (
                   <p className="mt-1">

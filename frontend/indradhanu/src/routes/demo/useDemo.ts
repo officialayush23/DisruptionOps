@@ -78,6 +78,13 @@ export type Decision = {
   rationale: string; confidence: number; status: string
   clause: string | null; delegatedTo: string | null
   withinDelegation: boolean | null; createdAt: string
+  /** What the decision would carry out, and to what: `resource_id`,
+   *  `incident_id`, `ward_id`, depending on the action. Stored by the gate from
+   *  the start so a decision approved twenty minutes later moves the unit it
+   *  named — and it never left the database, so the console could say "move a
+   *  pump to Kothrud" and not which pump. */
+  actionKey?: string | null
+  params?: Record<string, unknown>
 }
 export type DemoEvent = {
   id: number; kind: string; actor: string

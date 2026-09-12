@@ -137,6 +137,21 @@ cache = TaxonomyCache()
 _EFFECTIVENESS: dict[tuple[str, str], float] = {}
 
 
+async def _optional(sql: str) -> list:
+    """A reference query whose table may not exist yet.
+
+    For rows that are additive — a deployment without them behaves as it did
+    before the migration that adds them. Anything load-bearing must *not* use
+    this: a missing `incident_categories` should fail loudly at startup, and
+    does.
+    """
+    try:
+        return await db.fetch(sql)
+    except Exception as exc:  # noqa: BLE001 - an absent table is not an outage
+        log.warning("taxonomy_optional_table_missing", sql=sql[:60], error=str(exc)[:120])
+        return []
+
+
 async def load(*, force: bool = False) -> TaxonomyCache:
     """Read every reference table into memory. Idempotent.
 
@@ -158,6 +173,7 @@ async def load(*, force: bool = False) -> TaxonomyCache:
         kinds,
         lifeline_kinds,
         needs_rows,
+        keyword_rows,
         cats,
         agency_caps,
         agencies,
@@ -175,6 +191,17 @@ async def load(*, force: bool = False) -> TaxonomyCache:
         db.fetch("select id, display_name, shelters_people from lifeline_kinds"),
         db.fetch(
             "select category_id, capability_id, qty_per_incident from incident_category_needs"
+        ),
+        # The words that recognise a report, beside the categories they
+        # recognise.
+        #
+        # Through `_optional` because a deployment that has not run migration
+        # 019 has no such table, and this gather has no `return_exceptions`: an
+        # undefined-table error here would take `load()` down, and `load()`
+        # runs at startup. A missing keyword table has to degrade to the
+        # parser's built-in dictionary, not to a backend that will not boot.
+        _optional(
+            "select category_id, phrase, weight from incident_category_keywords"
         ),
         db.fetch(
             """select id, display_name, hazard_id, dedup_radius_m, dedup_window_min,
@@ -244,6 +271,10 @@ async def load(*, force: bool = False) -> TaxonomyCache:
     for r in needs_rows:
         needs.setdefault(r["category_id"], {})[r["capability_id"]] = r["qty_per_incident"]
 
+    keywords: dict[str, dict[str, float]] = {}
+    for r in keyword_rows:
+        keywords.setdefault(r["category_id"], {})[r["phrase"]] = float(r["weight"])
+
     cache.categories = {
         r["id"]: IncidentCategoryRef(
             id=r["id"],
@@ -254,6 +285,7 @@ async def load(*, force: bool = False) -> TaxonomyCache:
             base_severity=r["base_severity"],
             life_safety=r["life_safety"],
             needs=needs.get(r["id"], {}),
+            keywords=keywords.get(r["id"], {}),
         )
         for r in cats
     }

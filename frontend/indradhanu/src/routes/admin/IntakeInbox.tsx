@@ -173,22 +173,22 @@ export default function IntakeInbox() {
   const merged = counts.merged ?? 0
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="grid gap-3 md:grid-cols-4">
+    <div className="space-y-6 p-6">
+      <div className="grid gap-4 md:grid-cols-4">
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Reports received</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{counts.all}</CardTitle>
           </CardHeader>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Became an incident</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{counts.opened ?? 0}</CardTitle>
           </CardHeader>
         </Card>
         <Card className={merged ? "border-sky-500/40" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Merged into one</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{merged}</CardTitle>
           </CardHeader>
@@ -198,7 +198,7 @@ export default function IntakeInbox() {
           </CardContent>
         </Card>
         <Card className={counts.held ? "border-destructive/50" : undefined}>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-3">
             <CardDescription>Held below the trust floor</CardDescription>
             <CardTitle className="text-2xl tabular-nums">{counts.held ?? 0}</CardTitle>
           </CardHeader>
@@ -237,7 +237,7 @@ export default function IntakeInbox() {
             <CardTitle className="flex items-center gap-2 text-sm">
               <Inbox className="size-4" /> Nothing has come in
             </CardTitle>
-            <CardDescription className="text-xs">
+            <CardDescription>
               Every report lands here first, whatever channel it arrived on, and
               before anything is decided about it. Start live ingest on the
               command console, or file one from the citizen portal.

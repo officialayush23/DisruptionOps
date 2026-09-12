@@ -79,7 +79,7 @@ export default function BenchmarkCard() {
             {table ? "Chart" : `Every seed (${data.perSeed.length})`}
           </Button>
         </div>
-        <CardDescription className="text-xs">
+        <CardDescription>
           {data.conditions.seeds.length} seeds, one third of the fleet,{" "}
           {data.conditions.demands} demands over {data.conditions.simMinutes} sim
           minutes each. The same incident stream is replayed into every arm, so
@@ -90,7 +90,7 @@ export default function BenchmarkCard() {
       <CardContent className="space-y-4">
         {/* The headline and its price, together. One without the other is a
             sales figure rather than a measurement. */}
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2">
           <div className="rounded-md border p-3">
             <div className="text-2xl font-semibold tabular-nums">
               {(((base.unmet - ours.unmet) / base.unmet) * 100).toFixed(0)}% fewer
