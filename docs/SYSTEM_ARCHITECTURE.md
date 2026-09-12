@@ -11,20 +11,19 @@ each. Every band is a row of boxes.
 
 ## BAND 1 — INTAKE  ·  "reports arrive, from anywhere"
 
-Six boxes in a row, all feeding one box below them:
+Five boxes in a row, all feeding one box below them:
 
 | Box | Label |
 |---|---|
-| 1 | Citizen app — text or voice, EN / HI / MR |
+| 1 | Citizen app — text, voice or photo, EN / HI / MR |
 | 2 | Field crew app |
 | 3 | Partner agency API |
-| 4 | Mesh / store-and-forward (no signal) |
-| 5 | Sensor & gauge feed |
-| 6 | Simulation / replay |
+| 4 | Sensor & gauge feed |
+| 5 | Simulation / replay |
 
 All six arrow into a single wide box: **`intake.receive()` — one ingest path**
 
-> Caption to put under it: *Six channels, one door. Every report is normalised
+> Caption to put under it: *Five channels, one door. Every report is normalised
 > here, so nothing downstream needs to know where it came from.*
 
 ---

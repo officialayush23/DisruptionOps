@@ -183,6 +183,8 @@ export default function CitizenApp() {
    *  once, not a fresh solve on every four-second poll. */
   const routedFor = useRef<string | null>(null)
   const [newAlert, setNewAlert] = useState<string | null>(null)
+  /** When the map we are showing stopped being live, if it has. */
+  const [staleSince, setStaleSince] = useState<number | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
   /** A photo, and what the model made of it.
@@ -251,13 +253,20 @@ export default function CitizenApp() {
     const ctl = new AbortController()
     active.current = ctl
     try {
+      let fromCache = false
       const next = await request<State>("/citizen/state", {
         query: { lng: p.lng, lat: p.lat, cityId: "pune" },
         signal: ctl.signal,
+        onMeta: (m) => { fromCache = m.stale },
       })
       setState(next)
       setUnreachable(false)
       setError(null)
+      // The network failed and the service worker answered from its copy. Worth
+      // saying: this screen's whole job is telling somebody which road to
+      // avoid, and roads close. A map from ten minutes ago is worth having and
+      // is not worth trusting the way a live one is.
+      setStaleSince((prev) => (fromCache ? prev ?? Date.now() : null))
 
       // Anything new since the last poll announces itself. A resident is not
       // watching this screen; the whole reason an alert exists is that
@@ -610,7 +619,13 @@ export default function CitizenApp() {
       setFiled(r)
       setText("")
       clearPhoto()
-      await load(pos)
+      // A queued report is a 202 from the service worker, not a 200 from the
+      // API. It carries none of the fields a filed report does — no category it
+      // was read as, no trust score, no summary — so the receipt below used to
+      // render as an empty success box: the worst possible answer, because it
+      // looks exactly like it worked. Reloading the world would be wrong too;
+      // there is no world to reload.
+      if (!(r as { queued?: boolean }).queued) await load(pos)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally { setBusy(null) }
@@ -921,6 +936,19 @@ export default function CitizenApp() {
       )}
 
       <OfflineBar manifest="/manifest.webmanifest" />
+
+      {staleSince !== null && (
+        <Alert className="border-amber-500/40 bg-amber-500/10 py-2">
+          <AlertDescription className="text-xs">
+            This is the last map this phone managed to fetch
+            {Date.now() - staleSince > 60_000
+              ? `, about ${Math.round((Date.now() - staleSince) / 60_000)} minute(s) ago`
+              : ""}
+            . Roads close faster than that, so treat closures as the minimum
+            rather than the whole picture.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
         <div className="space-y-3">
@@ -1421,7 +1449,21 @@ export default function CitizenApp() {
                   until you move inside it. Pressing send will say so.
                 </p>
               )}
-              {filed && (
+              {filed?.queued ? (
+                <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+                  <div className="font-medium">Saved on this phone.</div>
+                  <div className="text-muted-foreground">
+                    {String(
+                      filed.message ??
+                        "There is no signal right now. It sends itself the moment there is."
+                    )}
+                  </div>
+                  <div className="text-muted-foreground">
+                    It will be timed from now, not from when it finally sends, so
+                    nothing is lost by the wait.
+                  </div>
+                </div>
+              ) : filed ? (
                 <div className="space-y-1 rounded border p-2 text-xs">
                   <div className="font-medium">{String(filed.readHow ?? "")}</div>
                   <div className="text-muted-foreground">{String(filed.summary ?? "")}</div>
@@ -1440,7 +1482,7 @@ export default function CitizenApp() {
                     </div>
                   )}
                 </div>
-              )}
+              ) : null}
             </CardContent>
           </Card>
 

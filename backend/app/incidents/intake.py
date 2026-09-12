@@ -2,7 +2,7 @@
 
 One door. Everything that claims something is happening comes through here: a
 resident on the citizen portal, a field operator on a phone, an agency feed, a
-batch relayed over a mesh link when connectivity came back, and the simulator.
+sensor or gauge, and the simulator.
 They differ in one field, `source`, which feeds the trust score. Nothing else
 downstream can tell them apart, and that is the property the whole simulation
 design rests on: a report a human types during a running simulation is processed
@@ -123,10 +123,8 @@ async def _trust_inputs(
     lat: float,
     note: str,
     has_photo: bool,
-    photo_agreement: float | None,
     now: datetime,
     corroborations: int,
-    mesh_hops: int | None,
 ) -> trust.TrustInputs:
     reliability = None
     if reporter_id:
@@ -216,11 +214,9 @@ async def _trust_inputs(
         category_plausible=plausible,
         corroborations=corroborations,
         has_photo=has_photo,
-        photo_agreement=photo_agreement,
         recent_from_source=int(recent),
         near_duplicate_text=int(near_dupe),
         implied_speed_kmh=speed,
-        mesh_hops=mesh_hops,
     )
 
 
@@ -312,17 +308,10 @@ async def receive(
     location: tuple[float, float],
     note: str = "",
     photo_url: str | None = None,
-    #: How well an attached photo matched what was typed, -1..1, from
-    #: `vision.assess`. Threaded in here rather than written over the report
-    #: afterwards on purpose: a photo that contradicts the claim has to be able
-    #: to *lower* the trust score, and a score already computed and stored
-    #: cannot be lowered by a later update to a JSON column nothing re-reads.
-    photo_agreement: float | None = None,
     source: str = "app",
     reporter_id: str | None = None,
     reporter_name: str = "Anonymous",
     device_id: str | None = None,
-    mesh_hops: int | None = None,
     occurred_at: datetime | None = None,
     city_id: str = "pune",
     clock: Clock = WALL,
@@ -376,9 +365,7 @@ async def receive(
         t_inputs = await _trust_inputs(
             conn=conn, source=source, reporter_id=reporter_id, device_id=device_id,
             ward_id=ward_id, category=category, lng=lng, lat=lat, note=note,
-            has_photo=bool(photo_url), photo_agreement=photo_agreement,
-            now=occurred, corroborations=int(corroborations),
-            mesh_hops=mesh_hops,
+            has_photo=bool(photo_url), now=occurred, corroborations=int(corroborations),
         )
         if ev_obj.injection_suspected:
             t_inputs.near_duplicate_text += 1  # feeds the anomaly component
@@ -395,16 +382,16 @@ async def receive(
             """
             insert into citizen_reports
               (ward_id, city_id, category, location, note, photo_path, classified_as,
-               reporter_id, reporter_name, source, device_id, occurred_at, mesh_hops,
+               reporter_id, reporter_name, source, device_id, occurred_at,
                trust_score, trust_breakdown, verification_status, classification_confidence,
                sim_run_id, created_at)
             values ($1,$2,$3,
                     extensions.ST_SetSRID(extensions.ST_MakePoint($4,$5),4326)::extensions.geography,
-                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::uuid,$19)
+                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18)
             returning id::text, created_at
             """,
             ward_id, city_id, category, lng, lat, note, photo_url,
-            reporter_id, reporter_name, source, device_id, occurred, mesh_hops,
+            reporter_id, reporter_name, source, device_id, occurred,
             t.score, {"components": t.components, "reasons": t.reasons},
             t.status, t.score, clock.sim_run_id, now,
         )
@@ -415,7 +402,7 @@ async def receive(
             subject_type="report", subject_id=report_id, city_id=city_id, ward_id=ward_id,
             payload={
                 "source": source, "category": category, "trust": t.score,
-                "verification": t.status, "mesh_hops": mesh_hops,
+                "verification": t.status,
                 "injection_suspected": ev_obj.injection_suspected,
                 "occurred_at": occurred.isoformat(),
             },

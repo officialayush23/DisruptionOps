@@ -11,6 +11,27 @@
  */
 
 import { useCallback, useEffect, useState } from "react"
+import { accessToken } from "@/lib/supabase"
+
+/** Ask the worker to empty the outbox, handing it a current access token.
+ *
+ *  The token matters more than it looks. A queued request carries the
+ *  `Authorization` header it was written with, and those expire in about an
+ *  hour — so without this, a report made at the start of a blackout is replayed
+ *  with a dead token, refused, and (before the worker was fixed) thrown away.
+ *  The page is the only side that can get a fresh one, so the page sends it.
+ */
+export async function drainOutbox(): Promise<void> {
+  const worker = navigator.serviceWorker?.controller
+  if (!worker) return
+  let token: string | null = null
+  try {
+    token = await accessToken()
+  } catch {
+    /* Signed out, or Supabase unreachable. The worker replays what it has. */
+  }
+  worker.postMessage({ type: "drain-outbox", token })
+}
 
 type InstallPrompt = Event & {
   prompt: () => Promise<void>
@@ -44,6 +65,9 @@ export async function registerWorker(): Promise<void> {
 /** How many reports are sitting on this phone waiting for signal. */
 export function useOutbox() {
   const [queued, setQueued] = useState(0)
+  /** Queued items the server refused, or that aged out. Shown once, then
+   *  dismissed: it is news, not a state to sit in. */
+  const [dropped, setDropped] = useState<{ reason: string; url: string }[]>([])
   const [online, setOnline] = useState(
     typeof navigator === "undefined" ? true : navigator.onLine
   )
@@ -78,12 +102,18 @@ export function useOutbox() {
     void count()
     const onOnline = () => {
       setOnline(true)
-      navigator.serviceWorker?.controller?.postMessage({ type: "drain-outbox" })
-      void count()
+      void drainOutbox().then(count)
     }
     const onOffline = () => setOnline(false)
     const onMessage = (e: MessageEvent) => {
-      if (e.data?.type === "outbox-sent") void count()
+      if (e.data?.type !== "outbox-sent") return
+      // A report the server refused outright is gone, and the person who wrote
+      // it is owed that sentence. Silently emptying somebody's outbox is the
+      // one failure worse than not sending.
+      if (Array.isArray(e.data.dropped) && e.data.dropped.length) {
+        setDropped((d) => [...d, ...e.data.dropped])
+      }
+      void count()
     }
     window.addEventListener("online", onOnline)
     window.addEventListener("offline", onOffline)
@@ -97,7 +127,11 @@ export function useOutbox() {
     }
   }, [count])
 
-  return { queued, online, refresh: count }
+  return {
+    queued, online, dropped,
+    refresh: count,
+    clearDropped: useCallback(() => setDropped([]), []),
+  }
 }
 
 /** The "add to home screen" affordance, when the browser has offered one. */

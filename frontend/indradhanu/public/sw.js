@@ -12,7 +12,7 @@
  *      it does not. The report carries its own `occurredAt`, and the intake
  *      pipeline already accepts one, so a report that syncs an hour late is
  *      still scored against the moment it was made rather than the moment it
- *      arrived. That is the same store-and-forward the mesh path assumes.
+ *      arrived.
  *   2. **The last known world is readable offline.** Guidance and surroundings
  *      are cached as they are fetched, and served stale with a header saying so
  *      when the network fails. Stale information clearly marked as stale beats a
@@ -89,6 +89,45 @@ self.addEventListener("activate", (event) => {
   )
 })
 
+// -------------------------------------------------------------------- auth --
+/* The freshest access token a page has handed us.
+ *
+ *  This is what makes the queue survive a long outage rather than quietly
+ *  emptying itself into the bin. A queued request carries the `Authorization`
+ *  header it was made with, and Supabase access tokens last about an hour — so
+ *  a report written at the start of a blackout and replayed ninety minutes
+ *  later goes out with a token the API correctly refuses. The old `drain` read
+ *  that 401 as "the server has seen it and refused it" and deleted the report.
+ *
+ *  A report lost because a token expired while the phone had no signal is the
+ *  precise failure this whole file exists to prevent, so: the page sends its
+ *  current token whenever it asks for a drain, and the replay uses that instead
+ *  of the stale one. The worker never stores it anywhere; it lives in this
+ *  variable for as long as the worker is alive and is gone when it is not. */
+let freshToken = null
+
+/* How a replay response is treated.
+ *
+ *  The old rule was "2xx or any 4xx means done". That is right for the refusals
+ *  that are about the *report* — a malformed body or a ward that does not exist
+ *  will be just as wrong on the tenth attempt — and wrong for the ones that are
+ *  about the *moment*: an expired token, a timeout, a rate limit. Those say
+ *  nothing about whether the report is worth keeping.
+ */
+function verdictFor(status) {
+  if (status >= 200 && status < 300) return "sent"
+  // 401 expired credentials, 408 timeout, 429 slow down, 5xx server trouble.
+  if (status === 401 || status === 408 || status === 429 || status >= 500) return "retry"
+  return "refused"
+}
+
+/* A queued request is given up on eventually, but on its own terms rather than
+ * on the first refusal: enough attempts to outlast a bad hour, and an age cap
+ * so a phone that was off for three days does not replay a flood that is over.
+ */
+const MAX_ATTEMPTS = 12
+const MAX_AGE_MS = 24 * 60 * 60 * 1000
+
 // ------------------------------------------------------------------- queue --
 /* A tiny IndexedDB queue. No library: this file must work before anything else
  * on the page has loaded, and a dependency here is a dependency that can fail
@@ -130,32 +169,78 @@ async function drain() {
   })
 
   let sent = 0
+  const dropped = []
+
   for (const entry of all) {
+    // Too old to be worth sending. A report about water on a road three days
+    // ago helps nobody and would be scored against a flood that has ended.
+    const age = Date.now() - Date.parse(entry.queuedAt || 0)
+    if (Number.isFinite(age) && age > MAX_AGE_MS) {
+      await remove(db, entry.id)
+      dropped.push({ reason: "too old", url: entry.url })
+      continue
+    }
+
+    // Replay with the current token rather than the one it was written with.
+    const headers = { ...entry.headers }
+    if (freshToken && headers.Authorization) {
+      headers.Authorization = `Bearer ${freshToken}`
+    }
+
+    let response
     try {
-      const response = await fetch(entry.url, {
-        method: entry.method,
-        headers: entry.headers,
-        body: entry.body,
+      response = await fetch(entry.url, {
+        method: entry.method, headers, body: entry.body,
       })
-      // A 4xx means the server has seen it and refused it. Retrying forever
-      // would be a queue that never empties, so it is dropped and reported.
-      if (response.ok || (response.status >= 400 && response.status < 500)) {
-        await remove(db, entry.id)
-        if (response.ok) sent += 1
-      }
     } catch {
-      // Still offline. Leave the rest for the next attempt.
+      // Still offline. Leave this and everything after it for the next attempt.
       break
     }
+
+    const verdict = verdictFor(response.status)
+    if (verdict === "sent") {
+      await remove(db, entry.id)
+      sent += 1
+      continue
+    }
+    if (verdict === "refused") {
+      // The server saw it and will not take it, and would not on the tenth try.
+      // Dropped, but *said out loud*: a report that silently disappeared is the
+      // one thing worse than one that failed loudly.
+      await remove(db, entry.id)
+      dropped.push({ reason: `refused (${response.status})`, url: entry.url })
+      continue
+    }
+
+    // Retryable. Count the attempt, and give up only after a long time trying.
+    const attempts = (entry.attempts || 0) + 1
+    if (attempts >= MAX_ATTEMPTS) {
+      await remove(db, entry.id)
+      dropped.push({ reason: `gave up after ${attempts} attempts`, url: entry.url })
+      continue
+    }
+    await update(db, { ...entry, attempts, lastStatus: response.status })
+    // A 401 will hit every remaining entry the same way; stop rather than
+    // burning the whole queue's attempt budget on one expired token.
+    if (response.status === 401) break
   }
 
-  if (sent > 0) {
+  if (sent > 0 || dropped.length) {
     const clients = await self.clients.matchAll({ includeUncontrolled: true })
     for (const client of clients) {
-      client.postMessage({ type: "outbox-sent", count: sent })
+      client.postMessage({ type: "outbox-sent", count: sent, dropped })
     }
   }
   return sent
+}
+
+function update(db, entry) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite")
+    tx.objectStore(STORE).put(entry)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
 }
 
 function remove(db, id) {
@@ -294,6 +379,10 @@ self.addEventListener("sync", (event) => {
 })
 
 self.addEventListener("message", (event) => {
+  // The page knows the current access token; this worker does not and must not
+  // persist one. Taking it on the way in is what lets a replay authenticate
+  // after the token the request was written with has expired.
+  if (event.data?.token) freshToken = event.data.token
   if (event.data?.type === "drain-outbox") event.waitUntil(drain())
   if (event.data?.type === "skip-waiting") self.skipWaiting()
 })

@@ -13,7 +13,7 @@ separately below.
 
 | # | PS20 requirement | Status | Where |
 |---|---|---|---|
-| 1 | Incident / zone reporting interface | **Built** | `POST /reports`, `app/incidents/intake.py`. Five channels (app, field, agency, mesh, sensor, sim) through one door |
+| 1 | Incident / zone reporting interface | **Built** | `POST /reports`, `app/incidents/intake.py`. Five channels (app, field, agency, sensor, sim) through one door |
 | 2 | Resource inventory management | **Built** | `resources` + `resource_kinds` + capability mapping, 23 units seeded |
 | 3 | Needs-assessment agent | **Built, deterministic** | `incident_needs` written per incident from `incident_category_needs`. LLM does not touch it |
 | 4 | Allocation / optimisation agent | **Built** | CP-SAT in `app/solver/allocation.py`, capability matching, greedy fallback |
@@ -183,17 +183,20 @@ the clock exists. What is missing is the tick loop.
 ### Then — resilience
 
 - [ ] Offline-first field PWA: cached assignments, local event log, sync
-- [ ] Mesh envelope: signed offline report format, store-and-forward, gateway
-      endpoint. The intake already accepts `source: "mesh"`, `mesh_hops` and a
-      separate `occurred_at`, and scores it accordingly, so the pipeline is
-      ready for the transport before the transport exists
 
 ### Deliberately not building
 
-Twenty agents. A generic chatbot. Blockchain. Multiple LLMs for a slide. Vision
-before the incident pipeline is solid. Fully autonomous evacuation. Real BLE
-mesh routing. Kubernetes as decoration. Adapters for every hazard beyond flood
-and heat.
+Twenty agents. A generic chatbot. Blockchain. Multiple LLMs for a slide. Fully
+autonomous evacuation. Kubernetes as decoration. Adapters for every hazard
+beyond flood and heat.
+
+**Mesh networking, removed rather than deferred.** The intake used to accept
+`source: "mesh"` with a `mesh_hops` count and score it down per relay hop. It
+was never wired to a transport, no report ever arrived that way — 420 reports,
+`mesh_hops` null on every one — and a scoring rule for a channel that does not
+exist is not groundwork, it is a claim. The code and the column are gone. If an
+offline transport is ever built, it arrives as a source with its own credibility
+weight, which is a one-line change to `SOURCE_CREDIBILITY`.
 
 ---
 

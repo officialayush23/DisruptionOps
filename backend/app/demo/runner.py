@@ -59,6 +59,20 @@ REPLAN_EVERY_TICKS = 6
 SUPPLY_EVERY_TICKS = 5
 #: Shelter and camp occupancy is recomputed this often.
 OCCUPANCY_EVERY_TICKS = 3
+#: The hazard model is re-run this often. Ninety ticks is about ninety seconds
+#: of wall clock: often enough that ward risk visibly moves during a demo,
+#: rare enough that the decision gate is not refilled faster than an officer
+#: can read it. Each run is a full score of every ward plus its own allocation,
+#: so this is the most expensive thing on the clock.
+HAZARD_EVERY_TICKS = 90
+#: A crew reports a street impassable about this often.
+BLOCK_EVERY_TICKS = 22
+#: The forecast is asked whether anything should move *before* it is needed.
+#: Deliberately offset from the hazard run and slower than it: prepositioning
+#: reads the projection a run produces, so it wants to be downstream of one, and
+#: its proposals land in the officer's queue rather than being carried out, so
+#: filling that queue faster than a person reads it helps nobody.
+PREPOSITION_EVERY_TICKS = 120
 #: Below this fraction of its opening stock, a centre raises a real incident.
 SUPPLY_LOW = 0.25
 #: What a supply run puts back, as a fraction of opening stock.
@@ -153,6 +167,10 @@ class DemoState:
 
 state = DemoState()
 _task: asyncio.Task | None = None
+#: A hazard run that outlived the Start call it began in. Tracked so that
+#: stopping the demo also stops it, rather than letting a run that nobody
+#: is watching write scores into a world that has been put away.
+_hazard_task: asyncio.Task | None = None
 _rng = random.Random(state.seed)
 
 #: The tick loop and a re-plan both rewrite `assignments` and `resources`. When
@@ -164,7 +182,7 @@ _world = asyncio.Lock()
 
 # ------------------------------------------------------------------ control ---
 async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoState:
-    global _task, _rng
+    global _task, _rng, _hazard_task
     await stop()
 
     state.running = True
@@ -190,19 +208,103 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     _rng = random.Random(state.seed)
 
     state.beat("start", "Demo started. Reports will arrive a few seconds apart.")
+
+    # Score the hazard before the first report arrives.
+    #
+    # This was the single largest hole in the running system and it did not look
+    # like one, because everything downstream of intake worked. `run_hazard` is
+    # the only writer of `ward_risks`, `hazard_runs`, `agent_runs` and
+    # `agent_steps`, and nothing called it: `POST /runs` existed and was never
+    # pressed. So the risk board read an empty table, the forecast had no
+    # history, the citizen app's severity badge never rendered, and the guidance
+    # fallback answered "there is no active hazard for your ward right now" in
+    # the middle of a flood. A city with 357 open incidents and no ward risk is
+    # not a system with a quiet forecast; it is a forecast that never ran.
+    #
+    # Awaited, but not unboundedly. Risk on the board before the first report
+    # lands is worth a couple of seconds of Start button; a cold Open-Meteo
+    # behind a 12-second feed timeout is not, and a Start that appears to hang
+    # for twelve seconds in front of an audience reads as a crash. So: wait
+    # briefly, and if the run is slower than that let it finish in the
+    # background rather than cancelling work that is already half done. The
+    # scores land a moment later and the console is polling anyway.
+    _hazard_task = asyncio.create_task(_run_hazard_guarded("demo start"))
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(_hazard_task), timeout=6.0)
+
     _task = asyncio.create_task(_loop())
     log.info("demo_started", city=city_id)
     return state
 
 
+async def _run_hazard_guarded(trigger: str) -> None:
+    """`_run_hazard` for callers that are not already inside the tick.
+
+    The tick holds `_world` for its whole body, and `_run_hazard` rewrites
+    `assignments` and `resources` — the exact pair the lock was introduced to
+    keep apart after a re-plan and a tick deadlocked on each other's rows. The
+    run started by `start()` lives outside the tick, so it has to take the lock
+    itself; the periodic one is already inside it and must not, because an
+    asyncio lock is not reentrant and taking it twice would hang the world.
+    """
+    async with _world:
+        await _run_hazard(trigger)
+
+
+async def _run_hazard(trigger: str) -> None:
+    """Score the hazard across the city, and never let it stop the world.
+
+    `run_hazard` is documented as never raising on upstream failure — a dead
+    feed degrades and says so. That is a claim about the feeds, not about the
+    database, and this is the first thing in the demo loop that reaches outside
+    the process on a timer. It is wrapped because a run that fails in front of
+    an audience should cost the risk board an update, not the whole demo.
+    """
+    from app.agents import orchestrator
+
+    try:
+        result = await orchestrator.run_hazard(
+            "flood", city_id=state.city_id, clock=WALL,
+            actor=f"agent:demo:{trigger.replace(' ', '_')}",
+        )
+    except Exception as exc:  # noqa: BLE001 - the world keeps turning
+        log.warning("demo_hazard_run_failed", trigger=trigger, error=str(exc))
+        state.beat(
+            "error",
+            f"The hazard model could not run ({exc}). Incidents and dispatch are "
+            "unaffected; ward risk is showing the previous scores.",
+        )
+        return
+
+    state.beat(
+        "hazard",
+        f"Flood model run on {trigger}: {result.wards_scored} wards scored in "
+        f"{result.mode} mode. {result.auto_issued} action(s) cleared the gate, "
+        f"{result.awaiting_approval} waiting on an officer, "
+        f"{result.alerts} alert(s) issued.",
+        wardsScored=result.wards_scored, mode=result.mode,
+        autoIssued=result.auto_issued, awaiting=result.awaiting_approval,
+        alerts=result.alerts, assignments=result.assignments,
+        uncovered=result.uncovered, runId=result.run_id,
+    )
+    # New ward risk changes what the citizen app and the guidance agent see, and
+    # both read through a short cache. Leaving it would show the old scores for
+    # a few seconds after a run that exists to change them.
+    cache.ward_risk.clear()
+    cache.citizen_state.clear()
+    state.dirty = True
+
+
 async def stop() -> None:
-    global _task
+    global _task, _hazard_task
     state.running = False
-    if _task is not None:
-        _task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await _task
-        _task = None
+    for name in ("_task", "_hazard_task"):
+        task = globals()[name]
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            globals()[name] = None
 
 
 async def _loop() -> None:
@@ -243,6 +345,15 @@ async def _tick_locked() -> None:
 
     if state.tick % OCCUPANCY_EVERY_TICKS == 0:
         await _move_people()
+
+    if state.tick % HAZARD_EVERY_TICKS == 0:
+        await _run_hazard(f"tick {state.tick}")
+
+    if state.tick % BLOCK_EVERY_TICKS == 0:
+        await _report_road_block()
+
+    if state.tick % PREPOSITION_EVERY_TICKS == 0:
+        await _preposition()
 
     if state.tick % SUPPLY_EVERY_TICKS == 0:
         await _draw_down_supplies()
@@ -658,6 +769,7 @@ async def _work_and_resolve() -> None:
         if r["category"] == "supply_shortage":
             await _refill(r["rid"], r["iid"])
         if r["resolved"]:
+            await _confirm_reports(r["iid"], r["label"])
             await ev.append(
                 clock=WALL, kind=ev.Kind.INCIDENT_RESOLVED, actor=ev.agent("field"),
                 subject_type="incident", subject_id=r["iid"], city_id=state.city_id,
@@ -669,6 +781,53 @@ async def _work_and_resolve() -> None:
                 resourceId=r["rid"], incidentId=r["iid"],
             )
             state.dirty = True
+
+
+async def _confirm_reports(incident_id: str, unit_label: str) -> None:
+    """A crew got there, found the thing, and closed the job. The reports were real.
+
+    This is the missing half of the trust loop, and the shape of what was wrong
+    is worth stating exactly. `reporter_reliability` feeds the trust score, and
+    the only thing that had ever written the inputs it reads was the trust score
+    itself: a reporter was believed because the scorer had believed them before.
+    A model agreeing with itself hardens its first impression of somebody into a
+    fact, and over a long run that is how a system stops listening to a real
+    person who happened to file their first report on a bad day.
+
+    `outcome` is the column that breaks that circle, because it is the only one
+    nothing automatic was allowed to write. An officer pressing the verdict
+    button fills it — and in 420 reports nobody ever had, so it was null on
+    every row and the view fell back to the automatic status for all of them.
+
+    A crew reaching the scene, working it, and closing the incident is ground
+    truth of the same kind as an officer's verdict, and stronger than most:
+    somebody physically went and looked. So that is what this records, and it
+    records it as `field:<unit>` rather than as an officer, because who
+    confirmed a report is the first question anybody asks about a reporter whose
+    reports stopped being believed.
+
+    Only confirmation, never the reverse. An incident closing without a crew
+    finding anything is not evidence the report was false — the water may have
+    gone down on its own, or somebody else may have cleared it — and marking a
+    reporter down on an absence of evidence is exactly the failure this is meant
+    to fix, pointed the other way.
+    """
+    try:
+        await db.execute(
+            """
+            update citizen_reports
+               set outcome = 'confirmed',
+                   outcome_by = $2,
+                   outcome_at = now(),
+                   outcome_note = coalesce(outcome_note,
+                       'A crew reached the scene and closed the job.')
+             where incident_id = $1::uuid
+               and outcome is null
+            """,
+            incident_id, f"field:{unit_label}",
+        )
+    except Exception as exc:  # noqa: BLE001 - the loop must not stop the world
+        log.warning("confirm_reports_failed", incident=incident_id, error=str(exc))
 
 
 #: What fraction of a facility's capacity arrives in an hour, by the severity of
@@ -1085,6 +1244,169 @@ async def _draw_down_supplies() -> None:
             lifelineId=r["id"], incidentId=result.incident_id, wardId=r["ward_id"],
         )
         state.dirty = True
+
+
+async def _preposition() -> None:
+    """Ask the forecast whether anything should move before it is needed.
+
+    The third and last member of the "written, correct, never called" family.
+    `preposition.propose_all` was reachable only through
+    `POST /forecast/preposition`, which nobody had pressed, so
+    `preposition_outcomes` had no rows and the forecast half of the system could
+    project a shortage and do nothing about it.
+
+    It is worth being precise about what this does and does not do, because the
+    difference is the whole safety argument. It moves nothing. It reads the
+    projection, finds the ward whose own history most wants a capability that is
+    running short, picks spare units — `status = 'available'` only, so a
+    committed crew is never re-tasked into a forecast — and puts a proposal
+    through the same delegation gate as a dispatch. `preposition_equipment` is
+    delegated to the Ward Officer, so most clear it and appear in the feed with
+    the clause cited. Carrying one out is the existing approval path.
+
+    Each proposal is also recorded against a horizon, so the same table later
+    answers whether prepositioning that capability has ever been worth doing.
+    A forecast nobody scores is a forecast nobody has to be right about.
+    """
+    from app.agents import preposition
+
+    try:
+        decisions = await preposition.propose_all(city_id=state.city_id, clock=WALL)
+    except Exception as exc:  # noqa: BLE001 - a projection must not stop the world
+        log.warning("demo_preposition_failed", error=str(exc))
+        return
+
+    if not decisions:
+        # Said out loud, because "nothing proposed" has two very different
+        # meanings and an officer should not have to guess which one this is.
+        state.beat(
+            "forecast",
+            "Forecast checked: nothing is projected short enough to move "
+            "equipment for.",
+        )
+        return
+
+    for d in decisions:
+        state.beat(
+            "forecast",
+            f"Forecast proposes: {d.get('action', 'move equipment')}. "
+            + (
+                "Cleared the gate on the ward officer's delegation."
+                if d.get("status") == "auto_issued"
+                else "Waiting on an officer."
+            ),
+            decisionId=d.get("id"), status=d.get("status"),
+        )
+    state.dirty = True
+
+
+#: What a crew says when it finds a street it cannot get down.
+BLOCK_REASONS = [
+    "Water over the carriageway, too deep for the tender",
+    "Tree down across both lanes, not clearable without a JCB",
+    "Slab collapsed at the culvert, road unsafe",
+    "Live wire in the water, road closed until the substation confirms",
+    "Bund breached, water moving fast across the road",
+]
+
+
+async def _report_road_block() -> None:
+    """A crew finds a street it cannot get down, and says so.
+
+    `road_blocks` had never held a single row, which quietly undermined the
+    thing the routing is proudest of. Both the allocator and the citizen
+    guidance remove blocked points from the graph, and with an empty table
+    every route ever issued avoided nothing and reported `hazardsConsidered: 0`.
+    The capability was real and permanently untested, which in a demo is
+    indistinguishable from absent.
+
+    The block is put near a genuinely open incident rather than at a random
+    point, because the interesting case is a crew reporting the street *it was
+    sent down*, which is what forces a re-plan around a road the solver had
+    counted on. It writes through the same two tables the field app writes:
+    `field_reports` for the crew's statement, `road_blocks` for the geometry
+    everything routes around.
+    """
+    row = await db.fetchrow(
+        """
+        select i.id::text incident_id, i.ward_id, i.title,
+               extensions.ST_X(i.location::extensions.geometry) lng,
+               extensions.ST_Y(i.location::extensions.geometry) lat,
+               r.id resource_id, r.label, r.operator
+          from incidents i
+          join assignments a on a.incident_id = i.id
+                            and a.status in ('en_route','on_site')
+          join resources r on r.id = a.resource_id
+         where i.city_id = $1 and i.status <> 'resolved'
+           and not exists (
+             select 1 from road_blocks b
+              where extensions.ST_DWithin(b.location, i.location, 300)
+           )
+         order by random()
+         limit 1
+        """,
+        state.city_id,
+    )
+    if row is None:
+        return
+
+    reason = BLOCK_REASONS[_rng.randrange(len(BLOCK_REASONS))]
+    # Offset a little so the block sits on the approach rather than exactly on
+    # the incident: a road closed *at* the job is a different situation from a
+    # road closed on the way to it, and this is the second one.
+    lng = float(row["lng"]) + _rng.uniform(-0.0016, 0.0016)
+    lat = float(row["lat"]) + _rng.uniform(-0.0016, 0.0016)
+
+    try:
+        async with db.transaction() as conn:
+            block_id = await conn.fetchval(
+                """
+                insert into road_blocks (location, reason, reported_by)
+                values (extensions.ST_SetSRID(
+                          extensions.ST_MakePoint($1,$2),4326)::extensions.geography,
+                        $3, $4)
+                returning id
+                """,
+                lng, lat, reason, row["operator"] or row["label"],
+            )
+            # `field_reports` is subject-addressed rather than resource-addressed:
+            # a crew can report on its own vehicle or on a lifeline, so the
+            # subject is named by type and id rather than by a resource column.
+            await conn.execute(
+                """
+                insert into field_reports
+                       (city_id, subject_type, subject_id, status_kind, note,
+                        location, reported_by)
+                values ($1, 'resource', $2, 'route_blocked', $3,
+                        extensions.ST_SetSRID(
+                          extensions.ST_MakePoint($4,$5),4326)::extensions.geography,
+                        $6)
+                """,
+                state.city_id, row["resource_id"], reason, lng, lat,
+                row["operator"] or row["label"],
+            )
+    except Exception as exc:  # noqa: BLE001 - a blocked road must not stop the world
+        log.warning("demo_road_block_failed", error=str(exc))
+        return
+
+    await ev.append(
+        clock=WALL, kind="road.blocked", actor=ev.agent("field"),
+        subject_type="road_block", subject_id=str(block_id),
+        city_id=state.city_id, ward_id=row["ward_id"],
+        payload={"reason": reason, "resource_id": row["resource_id"],
+                 "incident_id": row["incident_id"]},
+    )
+    state.beat(
+        "block",
+        f"{row['label']} reports a road closed: {reason}. "
+        "It is out of the graph now, for crews and for residents.",
+        wardId=row["ward_id"], incidentId=row["incident_id"],
+        resourceId=row["resource_id"],
+    )
+    # A street leaving the network is exactly the kind of change the re-planner
+    # exists for, and residents being routed down it need a new line drawn.
+    cache.citizen_state.clear()
+    state.dirty = True
 
 
 async def _refill(resource_id: str, incident_id: str) -> None:

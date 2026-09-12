@@ -32,16 +32,14 @@ AUTO_CONFIRM = 0.72
 QUARANTINE = 0.35
 
 #: Base credibility by channel. A field operator on shift is not the same kind
-#: of source as an anonymous web form, and a report relayed over a mesh link
-#: starts lower because its chain of custody is longer, not because the person
-#: is less honest.
+#: of source as an anonymous web form, and the gap is about chain of custody
+#: rather than about honesty.
 SOURCE_CREDIBILITY: Mapping[str, float] = {
     "field": 0.95,
     "agency": 0.92,
     "sensor": 0.88,
     "phone": 0.70,
     "app": 0.62,
-    "mesh": 0.55,
     "sim": 0.62,
 }
 
@@ -78,7 +76,6 @@ class TrustInputs:
     near_duplicate_text: int
     #: Implied speed between this reporter's last report and this one, km/h.
     implied_speed_kmh: float | None
-    mesh_hops: int | None = None
     #: Agreement between an attached photo and what was reported, -1..1, from
     #: `vision.assess`. None when there was no photo or no analysis of it.
     photo_agreement: float | None = None
@@ -108,11 +105,6 @@ def score(inputs: TrustInputs, *, life_safety: bool = False) -> Trust:
 
     # 1. Which channel it arrived on.
     c["source"] = SOURCE_CREDIBILITY.get(inputs.source, 0.5)
-    if inputs.source == "mesh" and inputs.mesh_hops:
-        # Each relay hop is another device that could have altered it. Small
-        # penalty, floored: a four-hop report from a cut-off village is still
-        # worth acting on, it just should not outrank a first-hand one.
-        c["source"] = _clamp(c["source"] - 0.04 * min(inputs.mesh_hops, 4), 0.35)
 
     # 2. How this reporter has done before.
     if inputs.reporter_reliability is None:

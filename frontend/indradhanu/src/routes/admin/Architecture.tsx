@@ -53,13 +53,12 @@ const BANDS: Band[] = [
     id: "intake",
     title: "Intake",
     caption:
-      "Six channels, one door. Every report is normalised here, so nothing " +
+      "Five channels, one door. Every report is normalised here, so nothing " +
       "downstream needs to know where it came from.",
     boxes: [
       { label: "Citizen app", sub: "text · voice · photo" },
       { label: "Field crew", sub: "accept → on site → close" },
       { label: "Partner agency", sub: "API" },
-      { label: "Mesh", sub: "store-and-forward" },
       { label: "Sensors", sub: "gauges · feeds" },
       { label: "Simulation", sub: "replay" },
     ],
@@ -157,7 +156,9 @@ export default function Architecture() {
       incidents: state.incidents?.length ?? 0,
       wards: state.wards?.length ?? 0,
       decisions: decisions.length,
-      autoIssued: decisions.filter((d) => d.status === "issued").length,
+      autoIssued: decisions.filter(
+        (d) => d.status === "auto_issued" || d.status === "approved"
+      ).length,
       assignments: (state.resources ?? []).filter(
         (r) => r.status === "en_route" || r.status === "on_site"
       ).length,

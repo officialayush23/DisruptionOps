@@ -121,13 +121,28 @@ export default function FieldApp() {
   async function declare(subjectType: "resource" | "lifeline", subjectId: string, kind: string) {
     setBusy(kind)
     try {
-      const r = await request<{ effects: string[]; label: string }>("/field/status", {
+      const r = await request<{
+        effects?: string[]; label?: string; queued?: boolean; message?: string
+      }>("/field/status", {
         method: "POST",
         body: {
           subjectType, subjectId, statusKind: kind, note,
           lng: unit?.location?.[0], lat: unit?.location?.[1],
         },
       })
+      // Offline, the service worker answers 202 with `queued` and none of the
+      // effects a real status change produces. Reporting "no effects" for
+      // something that has not reached the control room yet would be a lie a
+      // crew acts on, so it says what actually happened instead.
+      if (r.queued) {
+        setEffects([
+          r.message ??
+            "No signal. This is saved on the phone and goes the moment there is.",
+          "The control room has not seen it yet, so do not assume anyone is coming.",
+        ])
+        setNote("")
+        return
+      }
       setEffects(r.effects ?? [])
       setNote("")
       await load()

@@ -45,7 +45,7 @@ export type RawReport = {
   id: string; text: string; category: string
   classifiedAs: string | null; classificationConfidence: number | null
   source: string; deviceId: string | null; reporter: string | null
-  street: string | null; meshHops: number | null; hasPhoto: boolean
+  street: string | null; hasPhoto: boolean
   trust: number | null; trustBreakdown: Record<string, unknown>
   status: string; wardId: string; wardName: string | null
   location: [number, number]; createdAt: string

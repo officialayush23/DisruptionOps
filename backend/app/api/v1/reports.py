@@ -51,9 +51,11 @@ class ReportIn(Camel):
     #: How it reached us. Feeds the trust score; it does not change the pipeline.
     source: str = "app"
     device_id: str | None = None
-    #: For a relayed report: when it actually happened, and how many hops.
+    #: For a delayed report: when it actually happened, as opposed to when it
+    #: reached us. A gauge batch or a crew coming back into signal can both be
+    #: minutes old, and scoring them as if they were live is wrong in both
+    #: directions.
     occurred_at: datetime | None = None
-    mesh_hops: int | None = None
     city_id: CityId = "pune"
     sim_run_id: str | None = None
 
@@ -174,11 +176,10 @@ async def submit_report(body: ReportIn, principal: CurrentPrincipal) -> ReportOu
             location=(body.location[0], body.location[1]),
             note=body.note,
             photo_url=body.photo_url,
-            source=body.source if principal.is_staff or body.source in ("app", "mesh") else "app",
+            source=body.source if principal.is_staff or body.source == "app" else "app",
             reporter_id=principal.user_id,
             reporter_name=principal.full_name or "Anonymous",
             device_id=body.device_id,
-            mesh_hops=body.mesh_hops,
             occurred_at=body.occurred_at,
             city_id=body.city_id,
             clock=clock,
@@ -214,7 +215,7 @@ async def incident_reports(incident_id: str, _: CurrentPrincipal) -> list[dict]:
     rows = await db.fetch(
         """
         select r.id::text, r.note, r.reporter_name, r.source, r.created_at,
-               r.occurred_at, r.trust_score, r.verification_status, r.mesh_hops,
+               r.occurred_at, r.trust_score, r.verification_status,
                l.link_score, l.decided_by, l.rationale, l.components
           from citizen_reports r
           left join report_links l

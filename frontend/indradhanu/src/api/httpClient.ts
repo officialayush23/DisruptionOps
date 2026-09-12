@@ -42,11 +42,24 @@ export class ApiError extends Error {
   }
 }
 
+/** What the response was, apart from its body.
+ *
+ *  `stale` is the service worker saying "the network failed and this is the
+ *  copy I had". That distinction is the entire value of caching here: a map
+ *  from four minutes ago is useful, and a map from four minutes ago presented
+ *  as current is dangerous, because roads close. The worker has always set the
+ *  header; until now nothing read it, so every cached answer was shown as if it
+ *  had just arrived. */
+export type ResponseMeta = { stale: boolean; status: number }
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE"
   body?: unknown
   query?: Record<string, string | number | boolean | undefined | null>
   signal?: AbortSignal
+  /** Called before the body is returned, for callers that need to know whether
+   *  they are looking at live data or the last copy on the phone. */
+  onMeta?: (meta: ResponseMeta) => void
 }
 
 function buildUrl(path: string, query?: RequestOptions["query"]): string {
@@ -73,6 +86,11 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
     headers,
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
     signal: opts.signal,
+  })
+
+  opts.onMeta?.({
+    stale: res.headers.get("X-Indradhanu-Stale") === "1",
+    status: res.status,
   })
 
   if (res.status === 204) return undefined as T

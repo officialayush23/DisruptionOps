@@ -375,7 +375,7 @@ _REPORTS_SQL = """
 select r.id::text, r.note, r.category, r.classified_as,
        r.classification_confidence, r.source, r.device_id, r.reporter_name,
        r.trust_score, r.trust_breakdown, r.verification_status, r.street,
-       r.ward_id, r.created_at, r.mesh_hops, r.photo_path,
+       r.ward_id, r.created_at, r.photo_path,
        r.incident_id::text incident_id,
        -- The human verdict, and who recorded it. Selected here because the
        -- inbox is where somebody rules on a report, and a screen that offers
@@ -680,7 +680,7 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          ),
          "source": r["source"], "deviceId": r["device_id"],
          "reporter": r["reporter_name"], "street": r["street"],
-         "meshHops": r["mesh_hops"], "hasPhoto": bool(r["photo_path"]),
+         "hasPhoto": bool(r["photo_path"]),
          "trust": float(r["trust_score"]) if r["trust_score"] is not None else None,
          "trustBreakdown": r["trust_breakdown"] or {},
          "status": r["verification_status"],

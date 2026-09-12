@@ -1,4 +1,4 @@
-import { CloudOff, Download, Loader2, Smartphone, UploadCloud } from "lucide-react"
+import { AlertTriangle, CloudOff, Download, Loader2, Smartphone, UploadCloud } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useInstall, useManifest, useOutbox } from "@/lib/pwa"
 
@@ -15,10 +15,10 @@ import { useInstall, useManifest, useOutbox } from "@/lib/pwa"
  */
 export function OfflineBar({ manifest }: { manifest: string }) {
   useManifest(manifest)
-  const { queued, online } = useOutbox()
+  const { queued, online, dropped, clearDropped } = useOutbox()
   const { available, installed, install } = useInstall()
 
-  if (online && queued === 0 && (installed || !available)) return null
+  if (online && queued === 0 && !dropped.length && (installed || !available)) return null
 
   return (
     <div className="space-y-2">
@@ -48,6 +48,29 @@ export function OfflineBar({ manifest }: { manifest: string }) {
               ? "Sending now."
               : "Saved on this phone. Nothing is lost; it sends itself later."}
           </span>
+        </div>
+      )}
+
+      {/* Something in the outbox did not make it. Said plainly and attributed,
+          because a report that vanishes silently teaches somebody that the app
+          swallows what they write — which is worse than any single lost report. */}
+      {dropped.length > 0 && (
+        <div className="flex flex-wrap items-start gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs">
+          <AlertTriangle className="text-destructive size-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <span className="font-medium">
+              {dropped.length} queued {dropped.length === 1 ? "item" : "items"} could
+              not be sent.
+            </span>{" "}
+            <span className="text-muted-foreground">
+              {dropped[0].reason}. Nothing else in the queue is affected — if it
+              still matters, please send it again.
+            </span>
+          </div>
+          <button type="button" className="text-muted-foreground underline"
+                  onClick={clearDropped}>
+            Dismiss
+          </button>
         </div>
       )}
 

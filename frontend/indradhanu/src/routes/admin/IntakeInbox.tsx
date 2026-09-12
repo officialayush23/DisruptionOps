@@ -57,7 +57,7 @@ const OUTCOME: Record<Outcome, { label: string; tone: string; note: string }> = 
 
 const SOURCE: Record<string, string> = {
   app: "Citizen app", field: "Field crew", agency: "Agency feed",
-  mesh: "Mesh relay", sensor: "Sensor", sim: "Simulator",
+  sensor: "Sensor", sim: "Simulator",
 }
 
 const time = (iso: string) =>
@@ -274,7 +274,6 @@ export default function IntakeInbox() {
                         trust {(r.trust * 100).toFixed(0)}%
                       </span>
                     )}
-                    {r.meshHops ? <span>{r.meshHops} mesh hop(s)</span> : null}
                     {r.hasPhoto && <span>photo attached</span>}
                   </div>
                 </button>
