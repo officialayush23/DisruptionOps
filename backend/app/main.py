@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
+from app.core.ratelimit import LIMITS as RATE_LIMITS, RateLimitMiddleware
 from app import taxonomy
 from app.db import session as db
 from app.demo import runner as demo_runner
@@ -66,12 +67,20 @@ app = FastAPI(
 )
 
 app.add_middleware(RequestContextMiddleware)
+# Outside the request-context middleware, so a refused request is still logged
+# with its correlation id and still leaves through CORS. Starlette applies these
+# in reverse, so the limiter sees the request before the handler and the 429
+# travels back out the same way a 200 would.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 # A CORS misconfiguration is the one failure this service cannot see: the API
 # answers 200, the browser discards the response, and the logs show a healthy
 # deployment while the frontend shows nothing. Say out loud, once, which origins
 # this process will actually accept, so the answer is in the startup log rather
 # than in a dashboard someone has to remember to open.
+# The public write endpoints are metered. Said at startup for the same reason
+# CORS is: a limit nobody can see is a limit nobody checks until it bites.
+log.info("rate_limits", limits={k: f"{v[0]}/{v[1]}s" for k, v in RATE_LIMITS.items()})
 log.info(
     "cors",
     origins=settings.cors_origin_list,
