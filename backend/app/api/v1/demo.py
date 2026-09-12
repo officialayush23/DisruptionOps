@@ -9,6 +9,7 @@ broken system even when every number in it is correct.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime
 from typing import Any
@@ -524,6 +525,7 @@ select r.id::text, r.note, r.category, r.classified_as,
        -- the ruling without showing the existing one invites a second officer
        -- to overwrite the first without knowing they did.
        r.outcome, r.outcome_by, r.outcome_at, r.reporter_id::text reporter_id,
+       r.photo_evidence, r.photo_agreement,
        -- That reporter's standing, as it is right now. `human_verdicts` travels
        -- with `reliability` on purpose: 0.9 out of twenty officer rulings and
        -- 0.9 out of the scorer's own opinion are different numbers and the
@@ -855,7 +857,17 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
              if r["reporter_reliability"] is not None else None
          ),
          "reporterHumanVerdicts": r["reporter_human_verdicts"],
-         "reporterTotal": r["reporter_total"]}
+         "reporterTotal": r["reporter_total"],
+         # What the vision model actually saw, carried to the inbox rather than
+         # summarised into a number. An officer told that a photo moved a trust
+         # score has to be able to check the claim before acting on it.
+         "photoEvidence": (
+             json.loads(r["photo_evidence"])
+             if isinstance(r["photo_evidence"], str) else r["photo_evidence"]
+         ),
+         "photoAgreement": (
+             float(r["photo_agreement"]) if r["photo_agreement"] is not None else None
+         )}
         for r in report_rows
     ]
     needs = [

@@ -329,6 +329,13 @@ async def receive(
     #: before it touched the database. The `/reports` route, which does not send
     #: it, kept working — which is exactly why the pipeline looked healthy.
     photo_agreement: float | None = None,
+    #: The full validated reading from the vision model, as
+    #: `vision.as_dict(evidence)`. Stored with the report rather than used and
+    #: dropped: the number below is what the scorer consumed, and this is the
+    #: evidence for it — which an officer has to be able to check before acting
+    #: on a trust score, and which is the only durable record of what the city's
+    #: photographs actually showed.
+    photo_evidence: dict[str, Any] | None = None,
     source: str = "app",
     reporter_id: str | None = None,
     #: Who to credit this report to for reliability purposes. 'user:<uuid>' for
@@ -425,16 +432,18 @@ async def receive(
               (ward_id, city_id, category, location, note, photo_path, classified_as,
                reporter_id, reporter_name, source, device_id, occurred_at,
                trust_score, trust_breakdown, verification_status, classification_confidence,
-               sim_run_id, created_at, reporter_key)
+               sim_run_id, created_at, reporter_key, photo_evidence, photo_agreement)
             values ($1,$2,$3,
                     extensions.ST_SetSRID(extensions.ST_MakePoint($4,$5),4326)::extensions.geography,
-                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18,$19)
+                    $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18,$19,
+                    $20::jsonb,$21)
             returning id::text, created_at
             """,
             ward_id, city_id, category, lng, lat, note, photo_url,
             reporter_id, reporter_name, source, device_id, occurred,
             t.score, {"components": t.components, "reasons": t.reasons},
             t.status, t.score, clock.sim_run_id, now, reporter_key,
+            json.dumps(photo_evidence) if photo_evidence else None, photo_agreement,
         )
         report_id = report_row["id"]
 

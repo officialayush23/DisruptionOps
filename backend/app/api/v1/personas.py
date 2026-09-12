@@ -168,6 +168,7 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
             note=body.text,
             photo_url=body.photo_url or ("device://photo" if evidence else None),
             photo_agreement=evidence.agreement if evidence else None,
+            photo_evidence=vision.as_dict(evidence) if evidence else None,
             source="app",
             reporter_id=principal.user_id,
             reporter_name=principal.full_name or "Resident",
@@ -949,6 +950,113 @@ async def field_status(body: FieldStatusIn, principal: CurrentPrincipal) -> dict
             "effects": effects}
 
 
+class FieldHazardIn(Camel):
+    """A crew reporting what is in front of them, rather than about a vehicle.
+
+    `/field/status` answers "my truck has a puncture" and "this shelter is
+    full" — it is always *about* a subject already in the database. There was no
+    way for a crew standing in front of a collapsed wall to say so, which is an
+    odd gap in a system whose whole argument is that the picture is assembled
+    from whoever can see it. The most reliable reporters in the city could see
+    things and had nowhere to put them.
+    """
+
+    lng: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90)
+    #: Free text, classified the same way a resident's sentence is.
+    text: str = ""
+    #: Set when the crew picks from the list instead of typing.
+    category: CategoryId | None = None
+    photo_url: str | None = None
+    photo_token: str | None = None
+    city_id: str = "pune"
+
+
+@router.post("/field/report", status_code=201)
+async def field_report(body: FieldHazardIn, principal: CurrentPrincipal) -> dict:
+    """A crew files a hazard at their own position.
+
+    The same door as everything else — `intake.receive`, one transaction,
+    trust scored before clustering — with one field different: `source="field"`,
+    which the trust model credits at 0.95 against an anonymous app report's
+    0.62. A trained crew standing in front of the thing is the best evidence
+    this system gets, so such a report will usually clear the auto-confirm floor
+    on its own and become a dispatchable incident immediately.
+
+    That is the point of the separate route, and it is worth being explicit
+    about: it is not a shortcut around the scoring, it *is* the scoring. The
+    same report typed by an anonymous phone would sit at `needs_corroboration`
+    until somebody else saw it too, and both of those are the correct answer for
+    who sent them.
+    """
+    loc = await q.locate_ward(body.lng, body.lat, body.city_id)
+    if loc.ward is None or not loc.inside:
+        raise BadRequest(
+            loc.note or "That position is outside the area this deployment covers."
+        )
+
+    parsed = (
+        parse.Parsed(category=body.category, confidence=1.0, method="chosen", note=body.text)
+        if body.category
+        else await parse.parse_with_model(body.text)
+    )
+    evidence = (
+        cache.photo_evidence.peek(body.photo_token) if body.photo_token else None
+    )
+
+    try:
+        result = await intake.receive(
+            ward_id=loc.ward.id,
+            category=parsed.category,
+            location=(body.lng, body.lat),
+            note=body.text,
+            photo_url=body.photo_url or ("device://photo" if evidence else None),
+            photo_agreement=evidence.agreement if evidence else None,
+            photo_evidence=vision.as_dict(evidence) if evidence else None,
+            source="field",
+            reporter_id=principal.user_id,
+            reporter_name=principal.full_name or principal.operator or "Field crew",
+            device_id=f"field-{principal.user_id or principal.operator or 'unknown'}",
+            city_id=body.city_id,
+            clock=clocks.WALL,
+        )
+    except UnknownTaxonomyValue as exc:
+        raise NotFound(str(exc)) from exc
+
+    # The control room hears about it, and the world is marked dirty so the
+    # allocator re-solves. A hazard a crew reported that changes nobody's plan
+    # is a log line, not a report.
+    from app.demo import runner as demo_runner
+
+    demo_runner.state.beat(
+        "field",
+        f"{principal.full_name or 'A crew'} reported {parsed.category.replace('_', ' ')} "
+        f"in {loc.ward.name}"
+        + (" (new incident)" if result.created_incident else " (merged into an open incident)"),
+        incidentId=result.incident_id, reportId=result.report_id,
+        wardId=loc.ward.id, trust=result.trust.score,
+    )
+    demo_runner.state.dirty = True
+
+    return {
+        "reportId": result.report_id,
+        "incidentId": result.incident_id,
+        "createdIncident": result.created_incident,
+        "linked": result.linked,
+        "wardId": loc.ward.id,
+        "wardName": loc.ward.name,
+        "readAs": parsed.category,
+        "readAsLabel": (taxonomy.categories[parsed.category].display_name
+                        if parsed.category in taxonomy.categories else parsed.category),
+        "readHow": parsed.explanation,
+        "trust": result.trust.score,
+        "trustStatus": result.trust.status,
+        "trustReasons": result.trust.reasons,
+        "summary": result.summary,
+        "photo": vision.as_dict(evidence) if evidence else None,
+    }
+
+
 @router.get("/field/state")
 async def field_state(
     principal: CurrentPrincipal,
@@ -1042,6 +1150,57 @@ async def field_state(
         )
     ]
 
+    # Every open incident in the city, not only the ones this crew is assigned
+    # to. A crew that has just reported a collapsed wall needs to see it land on
+    # their own map — otherwise "did that go through?" is answered by faith —
+    # and a crew driving past somebody else's open incident should know it is
+    # there rather than discover it at the junction.
+    #
+    # `report_count` is on purpose: it is what separates "one person said this"
+    # from "eleven people said this", which is the difference between a marker
+    # a driver treats as a rumour and one they route around.
+    incidents = [
+        {"id": r["id"], "title": r["title"], "category": r["category"],
+         "severity": r["severity"], "status": r["status"],
+         "wardId": r["ward_id"], "reportCount": r["report_count"],
+         "verification": r["verification"],
+         "location": [float(r["lng"]), float(r["lat"])]}
+        for r in await db.fetch(
+            """
+            select i.id::text, i.title, i.category, i.severity, i.status::text status,
+                   i.ward_id,
+                   extensions.ST_X(i.location::extensions.geometry) lng,
+                   extensions.ST_Y(i.location::extensions.geometry) lat,
+                   count(c.id)::int report_count,
+                   -- The strongest verification any of its reports carries.
+                   -- One confirmed report in a cluster of ten unconfirmed ones
+                   -- is still a confirmed incident.
+                   case max(case c.verification_status
+                              when 'auto_confirmed' then 3
+                              when 'needs_corroboration' then 2
+                              when 'quarantined' then 1 else 0 end)
+                     when 3 then 'confirmed'
+                     when 2 then 'unconfirmed'
+                     when 1 then 'held'
+                     else 'unconfirmed' end verification
+              from incidents i
+              left join citizen_reports c on c.incident_id = i.id
+             where i.city_id = $1
+               and i.sim_run_id is null
+               -- The four live states. `incident_status` is an enum, so a
+               -- name that is not in it is a hard 22P02 at query time rather
+               -- than an empty result — 'triaged' and 'assigned' are not
+               -- members of it, whatever the domain vocabulary suggests.
+               and i.status in ('reported', 'confirmed', 'dispatched', 'in_progress')
+             group by i.id
+             order by i.severity desc, i.created_at desc
+             limit 200
+            """,
+            city_id,
+        )
+    ]
+
     return {"operator": scope, "units": units,
             "tasks": [t.model_dump(by_alias=True) for t in tasks],
-            "facilities": facilities, "recent": recent}
+            "facilities": facilities, "recent": recent,
+            "incidents": incidents}
