@@ -25,6 +25,7 @@ from pydantic import Field
 
 from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.logging import get_logger
+from app.core import cache
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.db.repositories import queries as q
@@ -463,7 +464,24 @@ async def citizen_state(
     Not the fleet. A resident is shown the units actually coming to something
     near them, because that is reassurance, and nothing else, because the live
     position of every ambulance in the city is not theirs to have.
+
+    Cached for three seconds against a four-second poll, which is a smaller
+    claim than it sounds and the correct one: a lone viewer still reads fresh
+    almost every time, while a street full of people standing together collapses
+    to one set of queries instead of a hundred. The saving is in the herd, not
+    in the timer — see `app/core/cache.py` for why the key is a rounded position
+    rather than the ward it falls in.
     """
+    return await cache.citizen_state.get_or_set(
+        cache.position_key(lng, lat, city_id, round(radius_km, 2)),
+        3.0,
+        lambda: _citizen_state(lng, lat, city_id, radius_km),
+    )
+
+
+async def _citizen_state(
+    lng: float, lat: float, city_id: str, radius_km: float
+) -> dict:
     loc = await q.locate_ward(lng, lat, city_id)
     metres = radius_km * 1000
 
@@ -492,6 +510,14 @@ async def citizen_state(
 
 
 async def _ward_risk(ward_id: str) -> dict | None:
+    """One row per ward, rewritten by the hazard agent on its own cadence — so
+    this one really is ward-shaped, and is keyed the way the plan intended."""
+    return await cache.ward_risk.get_or_set(
+        ward_id, 5.0, lambda: _ward_risk_uncached(ward_id)
+    )
+
+
+async def _ward_risk_uncached(ward_id: str) -> dict | None:
     r = await db.fetchrow(
         """
         select score, severity, lead_time_hours, population_at_risk, drivers

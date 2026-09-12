@@ -18,6 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from app.agents import orchestrator
+from app.agents import preposition
 from app.core.errors import BadRequest, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.hazards import registry
@@ -91,6 +92,43 @@ async def start_run(body: RunRequest, principal: StaffPrincipal) -> RunResult:
         clock=clock,
         actor=ev.officer(principal.full_name or principal.user_id or "unknown"),
     )
+
+
+@router.post("/forecast/preposition", status_code=201)
+async def propose_prepositioning(
+    principal: StaffPrincipal,
+    city_id: str = Query(default="pune"),
+    sim_run_id: str | None = Query(default=None),
+) -> dict:
+    """Act on the forecast: propose moving equipment before it is needed.
+
+    Separate from `POST /runs` on purpose. A run scores a hazard and dispatches
+    against what has already happened; this reads the projection and asks
+    whether anything should move *in anticipation*, which is a different
+    question with a different answer when it is wrong. Keeping them apart also
+    means a forecast an officer distrusts cannot quietly move vehicles as a side
+    effect of a routine run.
+
+    Every proposal goes through the same delegation gate as a dispatch.
+    `preposition_equipment` is delegated to the Ward Officer under PMC DMP 2023
+    cl. 6.1, so most auto-issue under that clause and appear in the decision
+    feed with it cited. Nothing here moves a unit: the decision names the units
+    and the ward, and the existing approval path carries it out.
+    """
+    clock = _clock_for(sim_run_id)
+    decisions = await preposition.propose_all(city_id=city_id, clock=clock)
+    return {
+        "proposed": len(decisions),
+        "decisions": decisions,
+        # Said plainly, because "0 proposals" has two very different meanings and
+        # an officer should not have to guess which one they are looking at.
+        "note": (
+            "Nothing is projected short enough to act on."
+            if not decisions
+            else f"{len(decisions)} proposal(s) in the decision gate."
+        ),
+        "actor": principal.full_name or principal.user_id or "unknown",
+    }
 
 
 @router.get("/events", response_model=list[Event])

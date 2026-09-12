@@ -32,6 +32,7 @@ from typing import Any
 
 from app.agents import gate
 from app.agents import replan as replanner
+from app.core import cache
 from app.core.logging import get_logger
 from app.db import session as db
 from app.incidents import intake
@@ -1024,6 +1025,13 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
     state.error = None
     state.dirty = True
     globals()["_rng"] = random.Random(state.seed)
+
+    # A cached world outliving the world it described is the reset appearing not
+    # to have worked: the tables are empty and `/citizen/state` keeps serving the
+    # flood for another three seconds. Cheap to drop, confusing not to.
+    cache.citizen_state.clear()
+    cache.ward_risk.clear()
+
     state.beat("reset", "World reset to its opening position.")
 
     log.info("demo_reset", city=city_id, cleared=cleared)
