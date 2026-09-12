@@ -119,13 +119,26 @@ class Outcome:
     #: Which engine actually ran. `greedy-fallback` here means OR-Tools is not
     #: installed, and the two optimised arms are not what they claim to be.
     engine: str = "nearest-first"
+    #: How many solves each engine did. `engine` above used to be assigned on
+    #: every solve, so it reported *the last one*, and the last solve in a run
+    #: is the one with the fewest options left — often a demand no remaining
+    #: unit kind can reach, which builds an empty CP-SAT model and returns the
+    #: greedy label. A run where CP-SAT did all the real work therefore printed
+    #: "greedy-fallback" and the harness told you to install OR-Tools before
+    #: reporting any of the numbers. Counting instead of overwriting means the
+    #: label describes the run.
+    engine_solves: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> dict:
         waits = [self.assigned_at[d] - t for d, t in self._born.items() if d in self.assigned_at]
         rides = [self.arrived_at[d] - t for d, t in self._born.items() if d in self.arrived_at]
         return {
             "strategy": self.name,
-            "engine": self.engine,
+            "engine": (
+                max(self.engine_solves, key=self.engine_solves.get)
+                if self.engine_solves else self.engine
+            ),
+            "engine_solves": dict(self.engine_solves),
             "demands": self.total,
             "assigned": len(self.assigned_at),
             "arrived": len(self.arrived_at),
@@ -408,7 +421,9 @@ def run(
                     candidates, free, _matrix(free, candidates),
                     current=current, progress=progress, time_budget_s=2.0,
                 )
-                out.engine = result.engine
+                out.engine_solves[result.engine] = (
+                    out.engine_solves.get(result.engine, 0) + 1
+                )
                 picks = [
                     (a.unit, a.demand, a.eta_minutes)
                     for a in result.allocations
@@ -535,7 +550,15 @@ async def main() -> int:
 
     print()
     print(table(rows))
-    if any(r["engine"] == "greedy-fallback" for r in rows):
+    try:
+        from ortools.sat.python import cp_model  # noqa: F401
+        has_ortools = True
+    except ImportError:
+        has_ortools = False
+    # Asked of the interpreter, not inferred from a label. The old test read the
+    # engine of the last solve and cried wolf on runs where CP-SAT had done
+    # everything that mattered.
+    if not has_ortools:
         print(
             "\nOR-Tools is not installed, so the optimised arms fell back to the "
             "greedy heuristic and this table compares three flavours of greedy. "

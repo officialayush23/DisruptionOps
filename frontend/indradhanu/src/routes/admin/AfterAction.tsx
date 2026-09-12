@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Empty } from "./DecisionGate"
+import BenchmarkCard from "./BenchmarkCard"
 
 /** The record, replayed from the audit log rather than reconstructed.
  *
@@ -89,13 +90,20 @@ export default function AfterAction() {
   const resolved = state.incidents.filter((i) => i.status === "resolved").length
   const reach = state.alerts.reduce((n, a) => n + (a.reach || 0), 0)
 
+  // The benchmark is shown here too. It is a measurement of the dispatch
+  // policy rather than of this run, so it has an answer before a run has
+  // produced anything — and "how much better is it than what we do now" is a
+  // question that gets asked before the demo starts at least as often as after.
   if (!state.events.length) {
     return (
-      <Empty
-        icon={<History className="text-muted-foreground size-8" />}
-        title="Nothing to review yet"
-        body="Every recommendation, cited clause, approval, override and closure lands in the audit log as it happens, and is replayed here in order with the thing that caused it. Start a run and it fills."
-      />
+      <div className="space-y-3 p-4">
+        <Empty
+          icon={<History className="text-muted-foreground size-8" />}
+          title="Nothing to review yet"
+          body="Every recommendation, cited clause, approval, override and closure lands in the audit log as it happens, and is replayed here in order with the thing that caused it. Start a run and it fills."
+        />
+        <BenchmarkCard />
+      </div>
     )
   }
 
@@ -141,6 +149,8 @@ export default function AfterAction() {
           </CardContent>
         </Card>
       </div>
+
+      <BenchmarkCard />
 
       {state.plan?.headline && (
         <Card>

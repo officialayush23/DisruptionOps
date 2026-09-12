@@ -55,14 +55,23 @@ says so.
 Against a nearest-first baseline, five random seeds, one third of the fleet, the
 same incident stream:
 
-- **−7%** demands left uncovered
-- **4.2 min** to commit a unit, against **10.7**
-- **+9%** on arrival p90 — what re-tasking costs
+- **10% fewer** demands left uncovered — 63 against 70, of 385
+- **−16%** on the worst-case time to commit a unit — 39.8 min against 47.3
+- **+51%** on arrival p90, and 163 crews turned around — what re-tasking costs
 
-That last number is on the slide on purpose. The better plan is not free: we pay
-9% on the slowest arrivals to leave 7% fewer demands uncovered. That trade is a
+That last line is on the slide on purpose. The better plan is not free: we pay
+51% on the slowest arrivals to leave 10% fewer demands uncovered. That trade is a
 product decision, it is measured, and the harness is in the repo so anyone can
 re-run it.
+
+And the number that decides what this system is: the same CP-SAT model solved
+**once** and never revisited left 70 uncovered — identical to nearest-first. The
+optimiser is not the product. Re-running it as the world changes is.
+
+Conditions, because they matter: the harness's `--offline` synthetic city, not
+Pune; synthetic arrivals; fixed service times; travel times straight-line at an
+urban speed with road blocks applied, identical for every arm. The same table is
+on the After-Action screen of the running system, with the conditions under it.
 
 ---
 

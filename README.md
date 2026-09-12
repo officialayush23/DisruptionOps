@@ -330,19 +330,38 @@ Nothing here depends on a licence we could lose.
 
 ## Benchmarks
 
-Against a nearest-first baseline — five random seeds, one third of the fleet, the
-same incident stream:
+Against a nearest-first baseline — five seeds (7, 11, 23, 42, 101), one third of
+the fleet, 385 demands over 180 sim minutes each, the same incident stream
+replayed into every arm:
 
-| Metric | Result |
-|---|---|
-| Demands left uncovered | **−7%** |
-| Time to commit a unit | **4.2 min** vs 10.7 |
-| Arrival p90 | **+9%** — what re-tasking costs |
+| Metric | Nearest-first | Indradhanu | |
+|---|---|---|---|
+| Demands left uncovered | 70 of 385 (18.2%) | 63 (16.4%) | **10% fewer** |
+| Time to commit a unit, p90 | 47.3 min | 39.8 min | **−16%** |
+| Time to commit a unit, median | 2.2 min | 2.3 min | no difference |
+| Arrival p90 | 71.0 min | 107.5 min | **+51%** — what re-tasking costs |
+| Committed units re-tasked | 0 | 163 | |
 
-The third row is published deliberately. The better plan is not free: we pay 9%
-on the slowest arrivals to leave 7% fewer demands uncovered. That trade is a
-product decision, it is measured, and the harness is in this repository so anyone
-can re-run it.
+```
+python scripts/benchmark_strategies.py --offline --fleet 0.3 --minutes 180 --seed 11
+```
+
+Three things worth saying out loud.
+
+**The last two rows are the price.** The better plan is not free: we pay 51% on
+the slowest arrivals to leave 10% fewer demands uncovered, and 163 crews were
+turned around to do it. That trade is a product decision, it is measured, and
+anyone can re-run the harness above.
+
+**The gain is the re-planning, not the optimiser.** The middle arm — the same
+CP-SAT model, solved once and never revisited — left 70 demands uncovered, which
+is exactly what nearest-first left. Optimising a snapshot buys nothing here. Only
+revisiting does.
+
+**These are the `--offline` synthetic city, not Pune.** Arrivals are synthetic
+and service times are fixed. It is a fair test of dispatch policy and it is not
+evidence about any real city, which is why the conditions are printed next to the
+numbers on the After-Action screen rather than left in a README.
 
 ---
 
