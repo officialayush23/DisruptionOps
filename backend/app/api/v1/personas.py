@@ -17,6 +17,7 @@ convenient layer rather than the one holding the line.
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import asdict
 from typing import Literal
 
@@ -112,6 +113,10 @@ class CitizenReportIn(Camel):
     #: Optional override when someone does choose from the list.
     category: CategoryId | None = None
     photo_url: str | None = None
+    #: Returned by `/citizen/vision/analyse`. Says "a photo was looked at, and
+    #: the server remembers what it showed" without the client being able to say
+    #: what it showed. The image itself never has to leave the phone.
+    photo_token: str | None = None
     city_id: str = "pune"
 
 
@@ -137,13 +142,22 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         else await parse.parse_with_model(body.text)
     )
 
+    # A photo assessed a moment ago, redeemed here. Unknown or expired tokens
+    # are ignored rather than refused: a report that arrives without the photo
+    # evidence is a slightly less trusted report, and losing the report over a
+    # bookkeeping detail would be the wrong trade in a flood.
+    evidence = (
+        cache.photo_evidence.peek(body.photo_token) if body.photo_token else None
+    )
+
     try:
         result = await intake.receive(
             ward_id=loc.ward.id,
             category=parsed.category,
             location=(body.lng, body.lat),
             note=body.text,
-            photo_url=body.photo_url,
+            photo_url=body.photo_url or ("device://photo" if evidence else None),
+            photo_agreement=evidence.agreement if evidence else None,
             source="app",
             reporter_id=principal.user_id,
             reporter_name=principal.full_name or "Resident",
@@ -153,6 +167,25 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         )
     except UnknownTaxonomyValue as exc:
         raise NotFound(str(exc)) from exc
+
+    # The control room hears about it.
+    #
+    # This was missing, and it was not cosmetic. The spoken path below already
+    # beat and marked the world dirty; the typed path — which is the one almost
+    # everybody uses — wrote its rows and told nothing. So a resident could file
+    # a report, watch it land in the database, and see no beat on the console and
+    # no re-plan, because `dirty` is what trips the re-allocation trigger. A
+    # report that changes nothing is not a report, it is a log line.
+    from app.demo import runner as demo_runner
+
+    demo_runner.state.beat(
+        "you",
+        f"{principal.full_name or 'A resident'} reported: “{body.text[:70]}”"
+        + (" (new incident)" if result.created_incident else " (merged into an open incident)"),
+        incidentId=result.incident_id, reportId=result.report_id,
+        wardId=loc.ward.id, trust=result.trust.score,
+    )
+    demo_runner.state.dirty = True
 
     return {
         "reportId": result.report_id,
@@ -172,7 +205,57 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         "trustReasons": result.trust.reasons,
         "linkScore": result.link_score,
         "summary": result.summary,
+        # What the photo contributed, shown back rather than applied silently.
+        # A person who attached a photo and saw the report trusted *less* for it
+        # deserves to be told why, and an officer reading the queue needs the
+        # same sentence.
+        "photo": vision.as_dict(evidence) if evidence else None,
     }
+
+
+class ArrivedIn(Camel):
+    """I got there."""
+
+    lifeline_id: str
+    #: How many people walked in together. One phone, a family.
+    party_size: int = Field(default=1, ge=1, le=20)
+
+
+@router.post("/citizen/arrived")
+async def citizen_arrived(body: ArrivedIn, principal: CurrentPrincipal) -> dict:
+    """A resident reached a shelter, and the shelter now holds one more person.
+
+    Worth being exact about what this is. The occupancy model in the demo
+    runner estimates a crowd from the severity of the ward — useful, and a
+    guess. This is not a guess: it is one account, at one facility, saying it
+    arrived. Both write the same `occupancy` column, because the building does
+    not care which of them a head came from, but the count of arrivals the
+    system actually witnessed is kept separately so the console can distinguish
+    evidence from estimate.
+
+    Arriving also *consumes*. Before this a person could be routed to a relief
+    centre, counted at the door, and take nothing off its shelves, because stock
+    only ever moved on a model rate. A shelter whose occupancy rises while its
+    supplies do not is a shelter that will read as coping right up to the moment
+    it is not.
+    """
+    from app.demo import runner as demo_runner
+
+    try:
+        result = await demo_runner.arrive(
+            lifeline_id=body.lifeline_id,
+            party_size=body.party_size,
+            reporter_id=principal.user_id,
+            reporter_name=principal.full_name or "A resident",
+        )
+    except ValueError as exc:
+        raise NotFound(str(exc)) from exc
+
+    # The citizen view is cached for three seconds against its own poll; a
+    # facility that just took someone in should not keep reporting the old
+    # figure to the person standing in it.
+    cache.citizen_state.clear()
+    return result
 
 
 class VisionIn(Camel):
@@ -354,11 +437,27 @@ async def citizen_vision_analyse(
         )
     if body.report_id:
         await _record_photo_evidence(body.report_id, call.evidence)
+
+    # Hold the assessment against a token so the report that follows can be
+    # *scored* on it rather than annotated with it afterwards. Writing the
+    # agreement over a report whose trust score is already computed changes a
+    # JSON column and nothing else — the photo could not lower the score of a
+    # report it contradicted, which is most of the reason to look at photos.
+    token = secrets.token_urlsafe(18)
+    await cache.photo_evidence.get_or_set(
+        token, cache.PHOTO_TOKEN_TTL, lambda: _hold(call.evidence)
+    )
     return {
         "accepted": True,
         "latencyMs": call.latency_ms,
+        "photoToken": token,
         "evidence": vision.as_dict(call.evidence),
     }
+
+
+async def _hold(evidence: vision.PhotoEvidence) -> vision.PhotoEvidence:
+    """`TTLCache` computes values asynchronously; this one is already computed."""
+    return evidence
 
 
 async def _record_photo_evidence(
@@ -506,6 +605,17 @@ async def _citizen_state(
             {"id": c.id, "label": c.display_name, "lifeSafety": c.life_safety}
             for c in taxonomy.categories.values()
         ],
+        # What this deployment can actually do, so the app can offer it or not.
+        #
+        # Voice and photo analysis are both optional upstream services. Without
+        # a key the endpoints correctly refuse, and the app was finding that out
+        # the only way left to it: by offering a microphone, recording somebody
+        # standing in water, uploading the audio, and showing them a 400. A
+        # button that cannot work should say so before it is pressed, not after.
+        "capabilities": {
+            "voice": speech.configured(),
+            "vision": vision_client.configured(),
+        },
     }
 
 

@@ -117,6 +117,21 @@ class TTLCache:
             entry.expires_at = time.monotonic() + ttl_seconds
             return value
 
+    def peek(self, key: Hashable) -> Any:
+        """Read without computing, and without extending the entry's life.
+
+        `get_or_set` is the wrong shape when there is nothing to fall back to:
+        redeeming a token that has expired should answer "no" rather than invent
+        a value for it. Returns None for a miss, which is also what a genuinely
+        stored None looks like — fine here, because nothing stores None.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.expires_at <= time.monotonic():
+            self.misses += 1
+            return None
+        self.hits += 1
+        return entry.value
+
     def _sweep(self, now: float) -> None:
         """Drop what has expired; if that frees nothing, drop the oldest half.
 
@@ -156,6 +171,21 @@ citizen_state = TTLCache(name="citizen_state")
 #: Ward risk genuinely *is* ward-shaped — one row per ward, rewritten by the
 #: hazard agent on its own cadence — so this one is keyed the way the plan said.
 ward_risk = TTLCache(name="ward_risk")
+
+#: A photo assessment, held between "look at this" and "now file it".
+#:
+#: The app shows somebody what their photo contributes *before* the report is
+#: filed, which means the assessment exists a few seconds earlier than the
+#: report it belongs to. The alternative shapes are both worse: analysing twice
+#: costs a second model call on a phone in a flood, and letting the app hand the
+#: assessment back at file time means the score a report is trusted on is a
+#: number the client could edit. So the server keeps it, briefly, and the client
+#: gets an opaque token.
+#:
+#: Five minutes. Long enough to look at what the model said and decide, short
+#: enough that a token found later is worth nothing.
+photo_evidence = TTLCache(name="photo_evidence")
+PHOTO_TOKEN_TTL = 300.0
 
 
 def position_key(lng: float, lat: float, *args: Any) -> tuple:

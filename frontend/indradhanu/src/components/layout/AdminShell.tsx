@@ -7,6 +7,7 @@ import {
   Handshake,
   History,
   Inbox,
+  Network,
   Radar,
   Radio,
   Route,
@@ -50,6 +51,7 @@ const NAV = [
   { to: "/admin/alerts", label: "Issued alerts", icon: Radio },
   { to: "/admin/replay", label: "Replay", icon: Rewind },
   { to: "/admin/after-action", label: "After-action", icon: History },
+  { to: "/admin/architecture", label: "How this works", icon: Network },
   { to: "/admin/configuration", label: "Configuration", icon: Settings2 },
 ]
 

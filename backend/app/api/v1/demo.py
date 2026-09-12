@@ -744,6 +744,11 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          "kindLabel": r["kind_label"] or r["kind"].replace("_", " ").title(),
          "status": r["status"],
          "capacity": r["capacity"], "occupancy": r["occupancy"],
+         # How many of those heads the system actually watched walk in, as
+         # opposed to inferred from the ward's severity. An estimate and a
+         # measurement should not be shown as the same number without saying
+         # which part is which.
+         "realArrivals": runner.state.real_arrivals.get(r["id"], 0),
          "acceptsCasualties": r["accepts_casualties"],
          "wardId": r["ward_id"],
          "supplies": r["supplies"] or {},

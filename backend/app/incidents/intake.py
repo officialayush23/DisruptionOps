@@ -123,6 +123,7 @@ async def _trust_inputs(
     lat: float,
     note: str,
     has_photo: bool,
+    photo_agreement: float | None,
     now: datetime,
     corroborations: int,
     mesh_hops: int | None,
@@ -215,6 +216,7 @@ async def _trust_inputs(
         category_plausible=plausible,
         corroborations=corroborations,
         has_photo=has_photo,
+        photo_agreement=photo_agreement,
         recent_from_source=int(recent),
         near_duplicate_text=int(near_dupe),
         implied_speed_kmh=speed,
@@ -310,6 +312,12 @@ async def receive(
     location: tuple[float, float],
     note: str = "",
     photo_url: str | None = None,
+    #: How well an attached photo matched what was typed, -1..1, from
+    #: `vision.assess`. Threaded in here rather than written over the report
+    #: afterwards on purpose: a photo that contradicts the claim has to be able
+    #: to *lower* the trust score, and a score already computed and stored
+    #: cannot be lowered by a later update to a JSON column nothing re-reads.
+    photo_agreement: float | None = None,
     source: str = "app",
     reporter_id: str | None = None,
     reporter_name: str = "Anonymous",
@@ -368,7 +376,8 @@ async def receive(
         t_inputs = await _trust_inputs(
             conn=conn, source=source, reporter_id=reporter_id, device_id=device_id,
             ward_id=ward_id, category=category, lng=lng, lat=lat, note=note,
-            has_photo=bool(photo_url), now=occurred, corroborations=int(corroborations),
+            has_photo=bool(photo_url), photo_agreement=photo_agreement,
+            now=occurred, corroborations=int(corroborations),
             mesh_hops=mesh_hops,
         )
         if ev_obj.injection_suspected:

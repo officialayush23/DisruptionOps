@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass,
+  AlertTriangle, Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass,
   Droplets, Hospital, Loader2, Mic, Navigation, Pill, Send, ShieldCheck,
   Siren, Square, Utensils, WifiOff,
 } from "lucide-react"
@@ -46,6 +46,9 @@ type State = {
   roadBlocks: { id: string; reason: string; reportedBy: string
                 radiusM: number; location: [number, number] }[]
   categories: { id: string; label: string; lifeSafety: boolean }[]
+  /** What this deployment can do. Both are optional upstream services, and a
+   *  button that cannot work should say so before somebody presses it. */
+  capabilities?: { voice: boolean; vision: boolean }
 }
 
 type VoiceResult = {
@@ -57,7 +60,7 @@ type VoiceResult = {
 type Guidance = {
   intent: string; headline: string; shouldMove: boolean
   reasoning: string[]; warnings: string[]
-  destination: { name: string; kind: string; why: string[]; distance_km: number } | null
+  destination: { id: string; name: string; kind: string; why: string[]; distance_km: number } | null
   alternatives: { name: string; why: string[] }[]
   route: number[][]; routeKm: number; routeMinutes: number
   routeEngine: string; hazardsConsidered: number; exposedPoints: number
@@ -182,6 +185,31 @@ export default function CitizenApp() {
   const [newAlert, setNewAlert] = useState<string | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
+  /** A photo, and what the model made of it.
+   *
+   *  `token` is the server's receipt for the assessment; `unanalysed` means a
+   *  photo is attached and nobody looked at it, which is a different and more
+   *  honest state than no photo at all. */
+  type PhotoState = {
+    token: string | null
+    unanalysed?: boolean
+    hazards?: string[]
+    water?: { present?: boolean | null; depthBand?: string | null; moving?: boolean | null }
+    agreement?: number
+    confidence?: number
+    imageQuality?: string
+    lifeSafetySignal?: boolean
+    caption?: string | null
+    notes?: string[]
+  }
+  const [photo, setPhoto] = useState<PhotoState | null>(null)
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null)
+  const photoInput = useRef<HTMLInputElement | null>(null)
+
+  /** How many people this phone is bringing. One phone is usually a family, and
+   *  a shelter that counts phones rather than people runs out earlier than its
+   *  own numbers say it will. */
+  const [partySize, setPartySize] = useState(1)
   /** What the live route was solved for: where they stood, what hazards were
    *  known, and when. A route is an answer to a question asked at a moment; to
    *  know whether it is still the answer you have to remember the moment. */
@@ -449,8 +477,14 @@ export default function CitizenApp() {
     recorder.current = null
   }
 
-  async function ask(intent: string, condition?: string, silent = false) {
+  /** @param fromPerson  They pressed something. An advisory arriving on its own
+   *  must not then overrule the destination they chose, so this is what marks
+   *  the difference between a route the system offered and one they asked for. */
+  async function ask(
+    intent: string, condition?: string, silent = false, fromPerson = true
+  ) {
     lastIntent.current = intent
+    if (fromPerson) chosenByPerson.current = true
     if (!silent) setBusy(intent)
     try {
       const g = await request<Guidance>("/citizen/guide", {
@@ -466,6 +500,76 @@ export default function CitizenApp() {
       // directions would be worse than saying nothing.
       if (!silent) setError(e instanceof Error ? e.message : String(e))
     } finally { if (!silent) setBusy(null) }
+  }
+
+  /** Shrink a camera photo to something worth sending.
+   *
+   *  A modern phone takes a 12-megapixel, four-megabyte image. The model reads
+   *  it at 1024 px on the longest edge, so the other three-and-a-half megabytes
+   *  are a slower upload over a congested cell in a flood and nothing else. This
+   *  runs on the phone, before anything leaves it.
+   */
+  async function shrink(file: File, maxEdge = 1024): Promise<string> {
+    const bitmap = await createImageBitmap(file)
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+    const w = Math.round(bitmap.width * scale)
+    const h = Math.round(bitmap.height * scale)
+    const canvas = document.createElement("canvas")
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext("2d")
+    if (!ctx) throw new Error("This browser cannot prepare the photo.")
+    ctx.drawImage(bitmap, 0, 0, w, h)
+    bitmap.close?.()
+    // 0.78 rather than 0.9: at this size the difference is invisible to a
+    // person and to the model, and it is a third of the bytes.
+    return canvas.toDataURL("image/jpeg", 0.78).split(",")[1] ?? ""
+  }
+
+  /** Look at the photo before the report is filed.
+   *
+   *  Deliberately *before*. The photo can raise or lower how much the report is
+   *  trusted, and showing somebody that after they have already sent it is
+   *  showing them a verdict rather than their working. It also means an honest
+   *  answer is possible when the two disagree: the person can look at what the
+   *  model saw and fix the text, which is a correction rather than an argument.
+   *
+   *  The image does not have to stay. What the server keeps is the assessment,
+   *  against a short-lived token; the photo itself is on this phone unless the
+   *  reporter uploads it.
+   */
+  async function attachPhoto(file: File) {
+    setError(null)
+    setBusy("photo")
+    setPhoto(null)
+    try {
+      const b64 = await shrink(file)
+      setPhotoPreview(`data:image/jpeg;base64,${b64}`)
+      const r = await request<{
+        photoToken: string
+        evidence: Omit<PhotoState, "token" | "unanalysed">
+      }>("/citizen/vision/analyse", {
+        method: "POST",
+        body: { imageBase64: b64, category: heard?.readAs ?? "flooded_road" },
+      })
+      setPhoto({ token: r.photoToken, ...r.evidence })
+    } catch (e) {
+      // No vision service, or it refused. The photo still counts as a photo —
+      // attaching one is itself weak evidence — so the report is not blocked,
+      // and the person is told plainly that nobody looked at it.
+      setPhoto({ token: null, unanalysed: true })
+      setError(
+        e instanceof Error && /vision service/i.test(e.message)
+          ? "Your photo is attached, but no one has looked at it: photo analysis is not switched on for this deployment. The report goes through either way."
+          : e instanceof Error ? e.message : String(e)
+      )
+    } finally { setBusy(null) }
+  }
+
+  function clearPhoto() {
+    setPhoto(null)
+    setPhotoPreview(null)
+    if (photoInput.current) photoInput.current.value = ""
   }
 
   async function fileReport() {
@@ -493,10 +597,19 @@ export default function CitizenApp() {
     setBusy("report")
     try {
       const r = await request<Record<string, unknown>>("/citizen/report", {
-        method: "POST", body: { lng: pos.lng, lat: pos.lat, text, cityId: "pune" },
+        method: "POST",
+        body: {
+          lng: pos.lng, lat: pos.lat, text, cityId: "pune",
+          photoToken: photo?.token ?? undefined,
+          // A photo nobody could look at is still a photo. The trust model
+          // scores "attached an image" separately from "the image agreed", so
+          // saying so is worth a little rather than nothing.
+          photoUrl: photo?.unanalysed ? "device://photo" : undefined,
+        },
       })
       setFiled(r)
       setText("")
+      clearPhoto()
       await load(pos)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -518,13 +631,34 @@ export default function CitizenApp() {
    *  shelter; the same one re-arriving does not, because the person may have
    *  deliberately asked for something else since and having the screen snap
    *  back to a shelter every four seconds is worse than not routing at all.
+   *
+   *  `routedFor` was not enough on its own, and the reason is worth writing
+   *  down. The alert list is "the ten most recent advisories near you", so
+   *  during a live flood its first element changes every time the city issues
+   *  one anywhere nearby — a different id each time, none of it about this
+   *  person. Each change looked like a new advisory, re-solved the route, and
+   *  put the turn-by-turn back at step one. Somebody halfway to a hospital was
+   *  being marched back to a shelter every couple of minutes.
+   *
+   *  Two guards fix it. Every alert id ever routed for is remembered, not just
+   *  the last, so an older advisory rotating back to the top is not mistaken
+   *  for a new one. And once the person has chosen a destination themselves,
+   *  an advisory no longer overrides it: they know something the alert does
+   *  not, which is where they are going.
    */
+  const routedAlerts = useRef<Set<string>>(new Set())
+  const chosenByPerson = useRef(false)
+
   useEffect(() => {
     const alert = state?.alerts?.[0]
     if (!alert || !state?.inside) return
+    if (routedAlerts.current.has(alert.id)) return
+    routedAlerts.current.add(alert.id)
     if (routedFor.current === alert.id) return
     routedFor.current = alert.id
-    void ask("shelter")
+    // They picked a destination. Leave it alone.
+    if (chosenByPerson.current) return
+    void ask("shelter", undefined, false, false)
     // `ask` is stable enough for this: it closes over `pos`, and routing from
     // the position held when the advisory arrived is correct — the turn-by-turn
     // below re-projects against live position from there.
@@ -540,18 +674,53 @@ export default function CitizenApp() {
    *  actually routes around; incident severity is included because a category
    *  worsening is what turns a passable street into a closed one.
    */
-  const hazardSig = useMemo(
-    () =>
-      [
-        ...(state?.roadBlocks ?? []).map((b) => `b${b.id}`),
-        ...(state?.incidents ?? []).map((i) => `i${i.id}:${i.severity}`),
-      ]
-        .sort()
-        .join("|"),
-    [state?.roadBlocks, state?.incidents]
-  )
+  /** Only the hazards that could actually affect *this* route count.
+   *
+   *  The first version of this signed every incident within the four-kilometre
+   *  radius, severity included. That is a couple of dozen rows in a busy city
+   *  and at least one of them changes on almost every four-second poll, so the
+   *  signature was never equal to itself twice, "conditions changed" was always
+   *  true, and the route re-solved roughly as often as the cooldown allowed —
+   *  which is the jump back to step one that made navigation unusable.
+   *
+   *  A hazard matters to a route if it is near the line you are being asked to
+   *  walk. Everything else is news, not an obstruction. So: keep road blocks
+   *  and incidents within a corridor of the route, and round severity into
+   *  passable / impassable rather than tracking 1-to-5, because a flooded road
+   *  going from severity 2 to 3 does not change whether you should walk down
+   *  it and re-routing somebody over it is worse than leaving them alone.
+   */
+  const CORRIDOR_M = 250
+  const hazardSig = useMemo(() => {
+    const route = guide?.route
+    const near = (p: [number, number]) => {
+      if (!route?.length) return true // No route yet: everything is relevant.
+      for (const q of route) {
+        // Rough metres. Precision is not the point — the corridor is.
+        const dx = (p[0] - q[0]) * 111_320 * Math.cos((p[1] * Math.PI) / 180)
+        const dy = (p[1] - q[1]) * 110_540
+        if (dx * dx + dy * dy <= CORRIDOR_M * CORRIDOR_M) return true
+      }
+      return false
+    }
+    return [
+      ...(state?.roadBlocks ?? [])
+        .filter((b) => near(b.location as [number, number]))
+        .map((b) => `b${b.id}`),
+      ...(state?.incidents ?? [])
+        .filter((i) => near(i.location as [number, number]))
+        // Two buckets, not five. Only a crossing of the impassable line is a
+        // reason to redraw a route somebody is already walking.
+        .map((i) => `i${i.id}:${i.severity >= 4 ? "x" : "o"}`),
+    ]
+      .sort()
+      .join("|")
+  }, [state?.roadBlocks, state?.incidents, guide?.route])
 
   const sev = state?.risk?.severity ?? 0
+  /** Undefined means an older server that does not report its capabilities; the
+   *  button stays enabled there, which is the behaviour that existed before. */
+  const voiceOff = state?.capabilities?.voice === false
 
   /** Recomputed on every position change, which is what makes it navigation
    *  rather than a printed list of directions. */
@@ -608,11 +777,58 @@ export default function CitizenApp() {
         ? "Conditions changed. This route has been redrawn."
         : "You had left the route. It has been redrawn from where you are."
     )
-    void ask(lastIntent.current, undefined, true)
+    void ask(lastIntent.current, undefined, true, false)
     // `ask` and `nav` are rebuilt every render by design; the guard above is
     // what decides when this fires, not the dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navOn, nav?.offBy, nav?.arrived, hazardSig, guide?.route?.length])
+
+  /** Arriving is an event the shelter needs to know about.
+   *
+   *  A route that ends and tells nobody is the whole coordination problem in
+   *  miniature. The control room's occupancy figure is otherwise a model of a
+   *  crowd, and a model is what it stays even while real people are walking
+   *  through the door — so a centre could read "820 of 1,200" on the console
+   *  with a queue outside it. This is the one place the system can replace an
+   *  estimate with a fact, and it costs one request.
+   *
+   *  Once per destination, guarded on the facility id rather than on `arrived`,
+   *  because `nav` is rebuilt on every position change and GPS jitter around
+   *  the door would otherwise check the same family in a dozen times.
+   */
+  const arrivedAt = useRef<string | null>(null)
+  const [arrival, setArrival] = useState<
+    { name: string; occupancy: number; capacity: number; turnedAway: number } | null
+  >(null)
+
+  useEffect(() => {
+    const dest = guide?.destination
+    if (!navOn || !nav?.arrived || !dest?.id) return
+    if (arrivedAt.current === dest.id) return
+    arrivedAt.current = dest.id
+    void (async () => {
+      try {
+        const r = await request<{
+          name: string; occupancy: number; capacity: number
+          turnedAway: number; admitted: number
+        }>("/citizen/arrived", {
+          method: "POST",
+          body: { lifelineId: dest.id, partySize },
+        })
+        setArrival({
+          name: r.name, occupancy: r.occupancy,
+          capacity: r.capacity, turnedAway: r.turnedAway,
+        })
+        // If it turned out to be full, the honest next move is to route again
+        // rather than leave somebody standing at a closed door.
+        if (r.turnedAway > 0) void ask(lastIntent.current, undefined, false, false)
+        await load(pos)
+      } catch {
+        // Failing to record an arrival must never look like failing to arrive.
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navOn, nav?.arrived, guide?.destination?.id])
 
   // The re-route notice is an explanation, not a state to sit in.
   useEffect(() => {
@@ -853,11 +1069,66 @@ export default function CitizenApp() {
                   </div>
 
                   {nav.arrived ? (
-                    <p className="text-base font-semibold">
-                      You have arrived at {guide?.destination?.name ?? "your destination"}.
-                    </p>
+                    <>
+                      <p className="text-base font-semibold">
+                        You have arrived at {guide?.destination?.name ?? "your destination"}.
+                      </p>
+                      {/* What the building now knows, said back to the person
+                          who changed it. Somebody who has just walked two
+                          kilometres in the rain deserves confirmation that it
+                          counted, and the control room is reading the same
+                          number at the same moment. */}
+                      {arrival && (
+                        <p className="text-muted-foreground text-xs tabular-nums">
+                          {arrival.turnedAway > 0 ? (
+                            <>
+                              {arrival.name} is full. {arrival.turnedAway} of your
+                              party could not be taken in — finding you somewhere
+                              else now.
+                            </>
+                          ) : (
+                            <>
+                              Checked in. {arrival.name} now holds{" "}
+                              {arrival.occupancy.toLocaleString()}
+                              {arrival.capacity
+                                ? ` of ${arrival.capacity.toLocaleString()}`
+                                : ""}
+                              .
+                            </>
+                          )}
+                        </p>
+                      )}
+                    </>
                   ) : (
                     <>
+                      {/* Asked before arrival, not after, because at the door
+                          nobody is looking at a phone. One phone is usually a
+                          family and a shelter counting handsets rather than
+                          heads runs out sooner than its own figures say. */}
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">People with you</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="size-6 rounded border tabular-nums disabled:opacity-40"
+                            disabled={partySize <= 1}
+                            onClick={() => setPartySize((n) => Math.max(1, n - 1))}
+                            aria-label="One fewer"
+                          >
+                            −
+                          </button>
+                          <span className="w-6 text-center tabular-nums">{partySize}</span>
+                          <button
+                            type="button"
+                            className="size-6 rounded border tabular-nums disabled:opacity-40"
+                            disabled={partySize >= 20}
+                            onClick={() => setPartySize((n) => Math.min(20, n + 1))}
+                            aria-label="One more"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
                       <div className="text-2xl font-semibold tabular-nums leading-tight">
                         {readable(nav.toNextM)}
                       </div>
@@ -974,8 +1245,8 @@ export default function CitizenApp() {
                 type="button"
                 variant={recording ? "destructive" : "secondary"}
                 className="w-full"
-                disabled={busy === "voice"}
-                onPointerDown={() => { if (!recording) void startRecording() }}
+                disabled={busy === "voice" || voiceOff}
+                onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
                 onPointerUp={() => { if (recording) stopRecording() }}
                 onPointerLeave={() => { if (recording) stopRecording() }}
               >
@@ -987,6 +1258,14 @@ export default function CitizenApp() {
                   <><Mic className="size-4" /> Hold to speak</>
                 )}
               </Button>
+              {voiceOff && (
+                <p className="text-muted-foreground text-xs">
+                  Speaking a report is not switched on for this deployment, so
+                  type it instead. Everything after the words is identical —
+                  spoken reports go through the same parser and the same
+                  scoring.
+                </p>
+              )}
 
               {heard && (
                 <div className="space-y-1 rounded border p-2 text-xs">
@@ -1015,6 +1294,122 @@ export default function CitizenApp() {
                 placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
                 rows={3}
               />
+
+              {/* A photo, if there is one to take.
+                  `capture="environment"` opens the rear camera straight away on
+                  a phone and is ignored on a laptop, where it falls back to a
+                  file picker — which is the right behaviour in both places
+                  without asking which one you are on. */}
+              <input
+                ref={photoInput}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) void attachPhoto(f)
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full"
+                disabled={busy === "photo"}
+                onClick={() => photoInput.current?.click()}
+                title={
+                  state?.capabilities?.vision === false
+                    ? "Your photo will be attached, but no model will look at it here."
+                    : undefined
+                }
+              >
+                {busy === "photo" ? (
+                  <><Loader2 className="size-4 animate-spin" /> Looking at the photo…</>
+                ) : (
+                  <><Camera className="size-4" /> {photo ? "Change photo" : "Add a photo"}</>
+                )}
+              </Button>
+
+              {photoPreview && (
+                <div className="space-y-2 rounded border p-2">
+                  <div className="flex items-start gap-2">
+                    <img
+                      src={photoPreview}
+                      alt="The photo attached to this report"
+                      className="size-20 shrink-0 rounded object-cover"
+                    />
+                    <div className="min-w-0 flex-1 space-y-1 text-xs">
+                      {photo?.unanalysed ? (
+                        <p className="text-muted-foreground">
+                          Attached. Nobody has looked at it — photo analysis is
+                          not switched on here — so it counts for a little and
+                          not for much.
+                        </p>
+                      ) : photo ? (
+                        <>
+                          {/* What the model saw, said plainly, before the
+                              report goes. The agreement number is the whole
+                              point: a photo that backs the text raises how much
+                              this report is trusted, one that contradicts it
+                              lowers it, and either way the person gets to see
+                              that and fix their wording first. */}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge
+                              variant={
+                                (photo.agreement ?? 0) > 0.15
+                                  ? "default"
+                                  : (photo.agreement ?? 0) < -0.15
+                                    ? "destructive"
+                                    : "outline"
+                              }
+                            >
+                              {(photo.agreement ?? 0) > 0.15
+                                ? "Backs up what you wrote"
+                                : (photo.agreement ?? 0) < -0.15
+                                  ? "Does not match what you wrote"
+                                  : "Adds little either way"}
+                            </Badge>
+                            {photo.lifeSafetySignal && (
+                              <Badge variant="destructive">People visible</Badge>
+                            )}
+                            {photo.water?.depthBand && (
+                              <Badge variant="outline">
+                                water {photo.water.depthBand}
+                              </Badge>
+                            )}
+                          </div>
+                          {photo.hazards?.length ? (
+                            <p className="text-muted-foreground">
+                              Seen in the photo: {photo.hazards.join(", ")}.
+                            </p>
+                          ) : (
+                            <p className="text-muted-foreground">
+                              Nothing it recognises as a hazard.
+                            </p>
+                          )}
+                          {photo.imageQuality && photo.imageQuality !== "good" && (
+                            <p className="text-muted-foreground">
+                              The image is {photo.imageQuality}, so this counts
+                              for less.
+                            </p>
+                          )}
+                          <p className="text-muted-foreground">
+                            A photo can only raise or lower how much your report
+                            is believed. It never decides what happens next.
+                          </p>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-muted-foreground text-xs underline"
+                    onClick={clearPhoto}
+                  >
+                    Remove photo
+                  </button>
+                </div>
+              )}
               <Button className="w-full" onClick={fileReport}
                       disabled={busy !== null || !text.trim()}>
                 {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
@@ -1038,6 +1433,11 @@ export default function CitizenApp() {
                   )}
                   {Number(filed.urgencyBoost ?? 0) > 0 && (
                     <Badge variant="destructive">Flagged urgent</Badge>
+                  )}
+                  {filed.photo != null && (
+                    <div className="text-muted-foreground">
+                      Your photo was taken into account when scoring this report.
+                    </div>
                   )}
                 </div>
               )}

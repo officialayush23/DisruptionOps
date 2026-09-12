@@ -57,6 +57,8 @@ WORK_TICKS = 8
 REPLAN_EVERY_TICKS = 6
 #: Relief stock is checked and drawn down this often.
 SUPPLY_EVERY_TICKS = 5
+#: Shelter and camp occupancy is recomputed this often.
+OCCUPANCY_EVERY_TICKS = 3
 #: Below this fraction of its opening stock, a centre raises a real incident.
 SUPPLY_LOW = 0.25
 #: What a supply run puts back, as a fraction of opening stock.
@@ -126,6 +128,15 @@ class DemoState:
     supply_baseline: dict[str, dict[str, float]] = field(default_factory=dict)
     #: Centres that already have a shortage incident open. One per centre.
     supply_flagged: set[str] = field(default_factory=set)
+    #: lifeline id -> the highest occupancy band it has been announced at, so
+    #: "filling up" is said once per band rather than once per tick.
+    occupancy_band: dict[str, int] = field(default_factory=dict)
+    #: Facilities already carrying an "at capacity" incident. One per facility.
+    capacity_flagged: set[str] = field(default_factory=set)
+    #: People who arrived through the citizen app rather than the model, kept
+    #: apart so the console can say how many of the heads in a shelter are ones
+    #: the system actually watched walk in.
+    real_arrivals: dict[str, int] = field(default_factory=dict)
     dirty: bool = False
     last_replan_tick: int = -99
     last_plan: dict[str, Any] | None = None
@@ -167,6 +178,9 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     state.gated.clear()
     state.supply_baseline.clear()
     state.supply_flagged.clear()
+    state.occupancy_band.clear()
+    state.capacity_flagged.clear()
+    state.real_arrivals.clear()
     state.dirty = False
     state.last_replan_tick = -99
     state.last_plan = None
@@ -226,6 +240,9 @@ async def _tick_locked() -> None:
 
     if state.tick % state.report_every_ticks == 0:
         await _inject_report()
+
+    if state.tick % OCCUPANCY_EVERY_TICKS == 0:
+        await _move_people()
 
     if state.tick % SUPPLY_EVERY_TICKS == 0:
         await _draw_down_supplies()
@@ -654,6 +671,303 @@ async def _work_and_resolve() -> None:
             state.dirty = True
 
 
+#: What fraction of a facility's capacity arrives in an hour, by the severity of
+#: the ward it stands in. Below severity 3 nobody is being told to move, so
+#: nobody does: an empty shelter in a calm ward is the correct reading, not a
+#: missing feature. The curve is steep on purpose — the difference between
+#: "moderate" and "critical" is not linear in how many people leave home.
+#:
+#: Tuned against the real seeded capacities, not guessed. At these rates the
+#: worst ward's 1,200-place relief centre is about half full twenty minutes into
+#: a run and reaches capacity at around forty; a merely busy ward sits near a
+#: third; a calm one barely moves. An earlier set was five times steeper and
+#: filled every centre in the city inside ten minutes, which is worse than the
+#: bug it replaced: a board reading "full" everywhere says as little as one
+#: reading zero everywhere, and it buries the decision gate in `shelter_full`.
+ARRIVAL_RATE = {0: 0.0, 1: 0.0, 2: 0.002, 3: 0.013, 4: 0.030, 5: 0.050}
+
+#: What fraction of the people inside leave in an hour once the ward has calmed
+#: down. Nearly twice the steepest arrival rate, which is not a claim that people
+#: leave faster than they came: arrivals are a fraction of *capacity* and this is
+#: a fraction of *occupancy*, so a centre that is a third full empties gently and
+#: a packed one clears faster, which is the right shape.
+DEPARTURE_RATE = 0.09
+
+#: Occupancy bands the console narrates, as percentages of capacity.
+OCCUPANCY_BANDS = (50, 80, 95)
+
+#: A hospital fills from casualties rather than from people walking in, so it
+#: takes a fraction of the pressure a relief centre does.
+ARRIVAL_KIND_WEIGHT = {
+    "relief_centre": 1.0,
+    "shelter": 1.0,
+    "medical_camp": 0.35,
+    "hospital": 0.18,
+}
+
+
+async def _move_people() -> None:
+    """People go to shelters, and later they go home.
+
+    Capacity was modelled and occupancy was not, so every shelter in the city
+    read `0 / 25,020` however bad the flood got. That is not a display bug, it
+    is a missing half of the model: a shelter with room and a shelter that is
+    full are different answers to "where should I send this family", and the
+    citizen agent was choosing between them on a number nothing ever wrote.
+
+    Two flows, not one. People arrive because their ward is dangerous, and they
+    leave because it stopped being dangerous — so occupancy follows the hazard
+    with a lag rather than tracking it, which is what actually happens and what
+    makes the number worth looking at. A facility that fills raises an ordinary
+    incident so it is covered by the same solver as everything else, rather than
+    getting a special case.
+    """
+    # Two independent readings of how bad the ward is, and the worse one wins.
+    #
+    # `ward_risks` is the hazard model's own answer and the better one, but it
+    # is only written when a hazard run has happened — on a fresh database it is
+    # empty, and a model keyed on it alone would compute zero arrivals for every
+    # shelter in the city. Which is precisely the bug this exists to fix: the
+    # figure would still be 0/25,020, only now with code behind it.
+    #
+    # Open incidents are always there during a run, and they are the more honest
+    # signal anyway: people leave home because their street is under water, not
+    # because a forecast was published.
+    rows = await db.fetch(
+        """
+        select l.id, l.name, l.kind, l.ward_id, l.capacity,
+               coalesce(l.occupancy, 0) occupancy, l.status,
+               extensions.ST_X(l.location::extensions.geometry) lng,
+               extensions.ST_Y(l.location::extensions.geometry) lat,
+               coalesce(wr.severity, 0) risk_severity,
+               coalesce(inc.worst, 0) incident_severity,
+               coalesce(inc.open_count, 0) open_count
+          from lifelines l
+          left join lateral (
+            select severity from ward_risks
+             where ward_id = l.ward_id order by created_at desc limit 1
+          ) wr on true
+          left join lateral (
+            select max(severity) worst, count(*) open_count
+              from incidents
+             where ward_id = l.ward_id and status <> 'resolved'
+          ) inc on true
+         where l.city_id = $1
+           and l.kind in ('relief_centre','shelter','medical_camp','hospital')
+           and coalesce(l.capacity, 0) > 0
+        """,
+        state.city_id,
+    )
+    if not rows:
+        return
+
+    hours = SIM_MINUTES_PER_TICK * OCCUPANCY_EVERY_TICKS / 60.0
+    updates: list[tuple[str, int, str]] = []
+
+    for r in rows:
+        capacity = int(r["capacity"])
+        before = int(r["occupancy"])
+        severity = max(int(r["risk_severity"] or 0), int(r["incident_severity"] or 0))
+        # A ward with a lot going on displaces people even when no single
+        # incident in it is severe. Ten flooded streets is an evacuation whatever
+        # the worst one scores, so volume lifts the reading by one step.
+        if int(r["open_count"] or 0) >= 6:
+            severity = min(5, severity + 1)
+        weight = ARRIVAL_KIND_WEIGHT.get(r["kind"], 0.5)
+
+        # Arrivals scale with capacity because a 1,200-bed centre draws from a
+        # bigger catchment than a 260-bed one; they are not a fixed queue split
+        # between facilities.
+        rate = ARRIVAL_RATE.get(min(severity, 5), 0.0) * weight
+        # A little noise so the curve is not visibly a formula. Seeded, so a
+        # replay of the same run produces the same numbers.
+        arrivals = capacity * rate * hours * _rng.uniform(0.7, 1.3)
+
+        departures = 0.0
+        if severity <= 2 and before:
+            departures = before * DEPARTURE_RATE * hours * _rng.uniform(0.6, 1.2)
+
+        after = before + arrivals - departures
+        after_i = max(0, min(capacity, int(round(after))))
+        if after_i == before:
+            continue
+
+        status = r["status"]
+        if after_i >= capacity and status == "open":
+            status = "full"
+        elif after_i < capacity * 0.95 and status == "full":
+            status = "open"
+        updates.append((r["id"], after_i, status))
+
+        # Narration, once per band crossed rather than once per tick.
+        pct = int(after_i * 100 / capacity) if capacity else 0
+        band = max((b for b in OCCUPANCY_BANDS if pct >= b), default=0)
+        if band and band > state.occupancy_band.get(r["id"], 0):
+            state.occupancy_band[r["id"]] = band
+            state.beat(
+                "shelter",
+                f"{r['name']} is {pct}% full — {after_i:,} of {capacity:,}.",
+                lifelineId=r["id"], wardId=r["ward_id"], occupancy=after_i,
+                capacity=capacity,
+            )
+        elif band < state.occupancy_band.get(r["id"], 0):
+            state.occupancy_band[r["id"]] = band
+
+        # A full shelter is a real operational problem and gets a real incident,
+        # so the same allocator that sends a boat to a stranded person sends a
+        # bus to move people off a full site.
+        if after_i >= capacity and r["id"] not in state.capacity_flagged:
+            state.capacity_flagged.add(r["id"])
+            await _raise_capacity_incident(r, capacity)
+        elif after_i < capacity * 0.9:
+            state.capacity_flagged.discard(r["id"])
+
+    if not updates:
+        return
+
+    await db.execute(
+        """
+        update lifelines l
+           set occupancy = u.occ, status = u.status, last_reported_at = now()
+          from (select * from unnest($1::text[], $2::int[], $3::text[])
+                  as t(id, occ, status)) u
+         where l.id = u.id
+        """,
+        [u[0] for u in updates],
+        [u[1] for u in updates],
+        [u[2] for u in updates],
+    )
+    state.dirty = True
+
+
+async def _raise_capacity_incident(row: Any, capacity: int) -> None:
+    """A facility at capacity enters the system as an incident, not an alarm.
+
+    Deliberately the same door as everything else. `shelter_full` needs mass
+    transport, `incident_category_needs` already says so, and the solver sends
+    a bus without knowing that this particular demand came from a building
+    rather than from a person.
+    """
+    note = (
+        f"{row['name']} is at capacity — {capacity:,} people inside and no room "
+        "left. Arrivals need to be turned to another site."
+    )
+    try:
+        result = await intake.receive(
+            ward_id=row["ward_id"], category="shelter_full",
+            location=(float(row["lng"]), float(row["lat"])), note=note,
+            source="field", reporter_name=row["name"],
+            device_id=f"lifeline-{row['id']}",
+            city_id=state.city_id, clock=WALL,
+        )
+    except Exception as exc:  # noqa: BLE001 - occupancy must not stop the world
+        log.warning("shelter_full_failed", lifeline=row["id"], error=str(exc))
+        return
+    state.beat(
+        "shelter", note, lifelineId=row["id"], incidentId=result.incident_id,
+        wardId=row["ward_id"],
+    )
+
+
+async def arrive(
+    *, lifeline_id: str, party_size: int = 1, reporter_id: str | None = None,
+    reporter_name: str = "Resident",
+) -> dict:
+    """Somebody actually got there.
+
+    The model above guesses at a crowd. This is one real person on one real
+    phone saying they walked in, and it is worth keeping separate: a head the
+    system watched arrive is evidence, and the rest is an estimate. Both land
+    in the same `occupancy` column because the shelter does not care which is
+    which, but `real_arrivals` keeps the count that is evidence so the console
+    can say so.
+
+    Arriving also consumes. A person in a relief centre eats and drinks, and
+    before this the stock only moved on a model rate that no individual ever
+    touched — so a citizen could walk into a centre, be counted, and take
+    nothing.
+    """
+    row = await db.fetchrow(
+        """
+        select id, name, kind, ward_id, capacity, coalesce(occupancy,0) occupancy,
+               supplies, status
+          from lifelines where id = $1
+        """,
+        lifeline_id,
+    )
+    if row is None:
+        raise ValueError(f"No facility {lifeline_id!r}.")
+
+    capacity = int(row["capacity"] or 0)
+    party = max(1, min(20, int(party_size)))
+    before = int(row["occupancy"])
+    after = before + party if capacity <= 0 else min(capacity, before + party)
+    turned_away = (before + party) - after
+
+    stock = dict(row["supplies"] or {})
+    admitted = after - before
+    if stock and admitted:
+        # One night's worth for the people who got in, from this centre's own
+        # shelves. `CONSUMPTION` is the hourly figure the model uses; a person
+        # arriving takes about a day of it.
+        for line, per_person_hour in CONSUMPTION.items():
+            if line in stock:
+                stock[line] = round(
+                    max(0.0, float(stock[line]) - per_person_hour * 24 * admitted), 1
+                )
+
+    status = row["status"]
+    if capacity > 0 and after >= capacity:
+        status = "full"
+
+    await db.execute(
+        """
+        update lifelines
+           set occupancy = $2, supplies = $3, status = $4, last_reported_at = now()
+         where id = $1
+        """,
+        lifeline_id, after, stock, status,
+    )
+    if admitted:
+        state.real_arrivals[lifeline_id] = (
+            state.real_arrivals.get(lifeline_id, 0) + admitted
+        )
+
+    await ev.append(
+        clock=WALL, kind="shelter.arrival", actor=f"citizen:{reporter_id or 'anon'}",
+        subject_type="lifeline", subject_id=lifeline_id,
+        ward_id=row["ward_id"], city_id=state.city_id,
+        payload={"party_size": party, "admitted": admitted,
+                 "turned_away": turned_away, "occupancy": after,
+                 "capacity": capacity, "reporter_name": reporter_name},
+    )
+
+    if turned_away:
+        state.beat(
+            "shelter",
+            f"{reporter_name} reached {row['name']} and it was full. "
+            f"{turned_away} of {party} could not be taken in.",
+            lifelineId=lifeline_id, wardId=row["ward_id"],
+        )
+    else:
+        state.beat(
+            "you",
+            f"{reporter_name} arrived at {row['name']}. "
+            f"{after:,}"
+            + (f" of {capacity:,} inside." if capacity else " inside."),
+            lifelineId=lifeline_id, wardId=row["ward_id"], occupancy=after,
+        )
+    state.dirty = True
+
+    return {
+        "lifelineId": lifeline_id, "name": row["name"], "kind": row["kind"],
+        "admitted": admitted, "turnedAway": turned_away,
+        "occupancy": after, "capacity": capacity, "status": status,
+        "supplies": stock,
+        "realArrivals": state.real_arrivals.get(lifeline_id, 0),
+    }
+
+
 #: What one person takes from a centre in an hour, per stock line. The numbers
 #: are ordinary relief-planning figures rather than anything clever: a packet of
 #: food and a few litres of water per person per day, scaled to the tick.
@@ -683,6 +997,7 @@ async def _draw_down_supplies() -> None:
         """
         select l.id, l.name, l.ward_id, l.kind, l.supplies,
                coalesce(l.people_served_per_hour, 0) rate,
+               coalesce(l.occupancy, 0) occupancy,
                extensions.ST_X(l.location::extensions.geometry) lng,
                extensions.ST_Y(l.location::extensions.geometry) lat,
                coalesce(wr.severity, 1) severity
@@ -705,7 +1020,16 @@ async def _draw_down_supplies() -> None:
         # A worse ward sends more people to its centre. One tick is half a
         # simulated minute, so an hourly rate is scaled accordingly.
         pressure = 0.4 + 0.4 * int(r["severity"] or 1)
-        people = float(r["rate"]) * pressure * (SIM_MINUTES_PER_TICK * SUPPLY_EVERY_TICKS / 60.0)
+        hours = SIM_MINUTES_PER_TICK * SUPPLY_EVERY_TICKS / 60.0
+        # Two sources for how many mouths this centre is feeding, and the larger
+        # wins. The rate is a planning figure — what the centre is *staffed* to
+        # serve in an hour — and it was the only input until occupancy existed.
+        # Now that people are actually counted through the door, a centre
+        # holding nine hundred of them draws stock for nine hundred, whatever
+        # its staffing says. Keeping the rate as a floor matters too: a water
+        # point has no beds and no occupancy, and still hands out water.
+        served = float(r["rate"]) * pressure
+        people = max(served, float(r["occupancy"])) * hours
 
         opening = state.supply_baseline.setdefault(r["id"], dict(stock))
         drained: dict[str, float] = {}
@@ -1018,6 +1342,9 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
     state.gated.clear()
     state.supply_baseline.clear()
     state.supply_flagged.clear()
+    state.occupancy_band.clear()
+    state.capacity_flagged.clear()
+    state.real_arrivals.clear()
     state.citizen_route = None
     state.last_plan = None
     state.last_replan_tick = -99
