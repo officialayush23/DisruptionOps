@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { AlertTriangle, CheckCircle2, Loader2, Radio, Truck } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Loader2, MapPin, Radio, Send, Truck } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
 import { MapStage } from "@/components/map/MapStage"
@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { DemoCredentials } from "@/auth/DemoCredentials"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 
@@ -54,6 +55,23 @@ type FieldState = {
   facilities: Facility[]
   recent: { subjectId: string; statusKind: string; note: string
             reportedBy: string; at: string }[]
+  /** Every open incident in the city, so a crew sees what they just reported
+   *  land on their own map instead of taking it on faith. */
+  incidents?: {
+    id: string; title: string; category: string; severity: number
+    status: string; wardId: string; reportCount: number
+    verification: "confirmed" | "unconfirmed" | "held"
+    location: [number, number]
+  }[]
+}
+
+type Category = { id: string; displayName: string }
+
+/** What a filed hazard came back as. */
+type Filed = {
+  incidentId: string | null; createdIncident: boolean; linked: boolean
+  wardName: string; readAsLabel: string; readHow: string
+  trust: number; trustStatus: string; summary: string
 }
 
 const TONE: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
@@ -68,6 +86,15 @@ export default function FieldApp() {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [effects, setEffects] = useState<string[]>([])
+  // Reporting what is in front of the crew, as opposed to what is wrong with
+  // their vehicle. See the `/field/report` route: same intake door as a
+  // resident's report, but credited at 0.95 rather than 0.62 because a trained
+  // crew standing at the thing is the best evidence this system gets.
+  const [cats, setCats] = useState<Category[]>([])
+  const [hazardText, setHazardText] = useState("")
+  const [hazardCat, setHazardCat] = useState("")
+  const [myPos, setMyPos] = useState<[number, number] | null>(null)
+  const [filed, setFiled] = useState<Filed | null>(null)
 
   /** `selected` as a ref, read inside `load` without `load` depending on it.
    *
@@ -116,7 +143,65 @@ export default function FieldApp() {
     return () => clearInterval(id)
   }, [load, live])
 
+  // The hazard list comes from the taxonomy, never a hard-coded array: a second
+  // city that adds "landslide" must get it on the crew screen without a deploy.
+  useEffect(() => {
+    void request<{ incidentCategories: Category[] }>("/taxonomy", {
+      query: { cityId: "pune" },
+    })
+      .then((t) => setCats(t.incidentCategories ?? []))
+      .catch(() => setCats([]))
+  }, [])
+
+  // Where the crew actually is. Their own GPS first — that is the whole point
+  // of "report what is in front of me" — and the position of the unit they have
+  // selected as the fallback, because a tablet bolted into a truck cab often
+  // has no geolocation permission and a crew should not be blocked by that.
+  useEffect(() => {
+    if (!navigator.geolocation) return
+    const id = navigator.geolocation.watchPosition(
+      (p) => setMyPos([p.coords.longitude, p.coords.latitude]),
+      () => setMyPos(null),
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 }
+    )
+    return () => navigator.geolocation.clearWatch(id)
+  }, [])
+
   const unit = state?.units.find((u) => u.id === selected) ?? null
+  const reportAt = myPos ?? unit?.location ?? null
+
+  /** File a hazard at the crew's own position, through the same intake door
+   *  every other report goes through. */
+  async function fileHazard() {
+    if (!reportAt) {
+      setError("No position yet. Allow location, or pick one of your units.")
+      return
+    }
+    if (!hazardText.trim() && !hazardCat) {
+      setError("Say what you can see, or pick a kind from the list.")
+      return
+    }
+    setBusy("hazard")
+    try {
+      const r = await request<Filed>("/field/report", {
+        method: "POST",
+        body: {
+          lng: reportAt[0], lat: reportAt[1],
+          text: hazardText.trim(),
+          category: hazardCat || undefined,
+          cityId: "pune",
+        },
+      })
+      setFiled(r)
+      setHazardText(""); setHazardCat(""); setError(null)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
 
   async function declare(subjectType: "resource" | "lifeline", subjectId: string, kind: string) {
     setBusy(kind)
@@ -212,13 +297,28 @@ export default function FieldApp() {
                 resources={state?.units.map((u) => ({ ...u, capabilities: [] })) ?? []}
                 facilities={state?.facilities ?? []}
                 incidents={
-                  state?.units
-                    .filter((u) => u.incidentLocation)
-                    .map((u) => ({
-                      id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
-                      category: "", severity: 4, reportCount: 1,
-                      location: u.incidentLocation as [number, number],
-                    })) ?? []
+                  // Real incidents when the API offers them, the crew's own
+                  // tasks as the fallback so an older backend still draws
+                  // something rather than an empty map.
+                  state?.incidents?.length
+                    ? state.incidents.map((i) => ({
+                        id: i.id,
+                        title:
+                          i.verification === "unconfirmed"
+                            ? `${i.title} · unconfirmed`
+                            : i.title,
+                        category: i.category,
+                        severity: i.severity,
+                        reportCount: i.reportCount,
+                        location: i.location,
+                      }))
+                    : state?.units
+                        .filter((u) => u.incidentLocation)
+                        .map((u) => ({
+                          id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
+                          category: "", severity: 4, reportCount: 1,
+                          location: u.incidentLocation as [number, number],
+                        })) ?? []
                 }
                 routes={
                   state?.units
@@ -280,6 +380,84 @@ export default function FieldApp() {
               </CardContent>
             </Card>
           )}
+
+          {/* Report what is in front of you.
+              A crew could always say "my truck has a puncture" and never
+              "there is a collapsed wall here", which is a strange gap in a
+              system whose argument is that the picture is assembled from
+              whoever can see it. The most credible reporters in the city could
+              see things and had nowhere to put them. */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <MapPin className="size-4" /> Report a hazard here
+              </CardTitle>
+              <CardDescription className="text-xs">
+                {myPos
+                  ? "Filed at your GPS position."
+                  : unit
+                    ? `No GPS — this will be filed at ${unit.label}'s position.`
+                    : "No position yet. Allow location, or pick one of your units."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Textarea
+                value={hazardText}
+                onChange={(e) => setHazardText(e.target.value)}
+                placeholder="Wall collapsed across the lane, nobody trapped"
+                className="min-h-16 text-xs"
+              />
+              <div className="flex flex-wrap gap-1">
+                {cats.slice(0, 10).map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => setHazardCat(hazardCat === c.id ? "" : c.id)}
+                    className={
+                      "rounded border px-2 py-1 text-[11px] " +
+                      (hazardCat === c.id
+                        ? "border-primary bg-primary/10 font-medium"
+                        : "border-muted-foreground/25")
+                    }
+                  >
+                    {c.displayName}
+                  </button>
+                ))}
+              </div>
+              <Button
+                size="sm"
+                className="w-full"
+                disabled={busy !== null || !reportAt}
+                onClick={() => void fileHazard()}
+              >
+                {busy === "hazard"
+                  ? <Loader2 className="mr-1 size-3 animate-spin" />
+                  : <Send className="mr-1 size-3" />}
+                File it
+              </Button>
+
+              {filed && (
+                <div className="space-y-1 rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs">
+                  <div className="font-medium">
+                    {filed.readAsLabel} in {filed.wardName}
+                    {filed.createdIncident
+                      ? " — new incident on the map"
+                      : filed.linked
+                        ? " — merged into an incident already open there"
+                        : " — held, no incident"}
+                  </div>
+                  {/* The trust score, shown rather than applied quietly. A crew
+                      whose report was held deserves the sentence explaining
+                      why, and a crew whose report dispatched a unit should see
+                      that their word did that. */}
+                  <div className="text-muted-foreground">
+                    Trust {filed.trust.toFixed(2)} · {filed.trustStatus.replace(/_/g, " ")}
+                  </div>
+                  <div className="text-muted-foreground">{filed.readHow}</div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader className="pb-2">

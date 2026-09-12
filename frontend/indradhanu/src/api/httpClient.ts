@@ -117,6 +117,26 @@ const SAYS: [RegExp, Exclude<ToastSpec, false>][] = [
   [/^\/demo\/stop$/,     { loading: "Stopping…",               success: "Stopped. Nothing further will happen on its own." }],
   [/^\/demo\/reset$/,    { loading: "Resetting the world…",    success: "Back to the opening position. Units are home and available." }],
   [/^\/demo\/replan$/,   { loading: "Re-solving…",             success: "Re-planned against the current picture." }],
+  [/\/incidents\/[^/]+\/corroborate$/, {
+    loading: "Asking the neighbours…",
+    // The numbers are the whole point of the button, so the toast carries them
+    // rather than saying "done" over the top of the thing you wanted to see.
+    success: (d) => {
+      const r = d as {
+        before?: { reports?: number }
+        after?: { reports?: number; autoConfirmed?: number; severity?: number }
+      }
+      const from = r.before?.reports ?? 0
+      const to = r.after?.reports ?? 0
+      const confirmed = r.after?.autoConfirmed ?? 0
+      return (
+        `${from} report became ${to}` +
+        (confirmed > 0
+          ? " — independent corroboration cleared the auto-confirm floor."
+          : " — still short of auto-confirm.")
+      )
+    },
+  }],
   [/\/decisions\/[^/]+\/approve$/,  { loading: "Approving…",   success: "Approved. The decision is issued and the log has your name on it." }],
   [/\/decisions\/[^/]+\/reject$/,   { loading: "Rejecting…",   success: "Rejected. Nothing was dispatched." }],
   [/\/decisions\/[^/]+\/override$/, { loading: "Overriding…",  success: "Overridden — recorded as an override, not as an approval." }],

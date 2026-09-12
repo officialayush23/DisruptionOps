@@ -3,16 +3,14 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 pydantic>=2.9
 pydantic-settings>=2.6
-orjson>=3.10
 python-multipart>=0.0.12
 
 # --- database ---
 asyncpg>=0.30
 supabase>=2.9            # storage + auth admin only; queries go through asyncpg
 
-# --- http / resilience ---
+# --- http ---
 httpx>=0.27
-tenacity>=9.0
 
 # --- auth ---
 pyjwt[crypto]>=2.9
@@ -20,24 +18,31 @@ cryptography>=43.0
 
 # --- observability ---
 structlog>=24.4
-prometheus-fastapi-instrumentator>=7.0
 
-# --- rate limiting ---
-slowapi>=0.1.9
-
-# --- optimisation & geometry ---
-ortools>=9.11
-shapely>=2.0
-pyproj>=3.7
-
-# --- agents / llm ---
-langchain>=0.3
-langchain-core>=0.3
-langgraph>=0.2
-langchain-google-genai>=2.0
-google-genai>=0.3
-langchain-aws>=0.2
-boto3>=1.35
+# --- optimisation ---
+ortools>=9.11            # CP-SAT, the allocator
 
 # --- config ---
 python-dotenv>=1.0
+
+# Removed, and worth recording why rather than quietly dropping:
+#
+#   langchain, langchain-core, langgraph, langchain-google-genai, langchain-aws
+#       Imported nowhere. The orchestrator is deterministic on purpose — a fixed
+#       order, one transaction, every step writing an event that names its cause
+#       — so there was never a graph runtime to install. Leaving them declared
+#       invited a fair question about what this project actually is, and the
+#       honest answer is better than the dependency.
+#
+#   google-genai, boto3
+#       Provider SDKs for models reached over plain HTTP through `httpx`.
+#
+#   shapely, pyproj
+#       Geometry is done in PostGIS, in the database, where the data already is.
+#
+#   slowapi, prometheus-fastapi-instrumentator, tenacity, orjson
+#       Rate limiting is `app/core/ratelimit.py`, retries are in the feed
+#       clients, and FastAPI's own JSON encoder was never replaced.
+#
+# Every line above is imported by code that runs. Re-add anything the moment it
+# is actually used, not in anticipation.

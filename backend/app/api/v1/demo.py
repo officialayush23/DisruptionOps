@@ -82,6 +82,148 @@ async def demo_reset(body: StartIn, _: StaffPrincipal) -> dict:
     return {"running": False, "tick": 0, "cleared": cleared}
 
 
+class CorroborateIn(Camel):
+    """Ask N simulated neighbours to report the same thing."""
+
+    #: Kept small on purpose. Three independent reports is what it takes to
+    #: cross the auto-confirm floor, and the point of the button is to show the
+    #: threshold being crossed, not to produce a big number.
+    count: int = Field(default=3, ge=1, le=8)
+    city_id: str = "pune"
+
+
+@router.post("/demo/incidents/{incident_id}/corroborate")
+async def corroborate_incident(
+    incident_id: str, body: CorroborateIn, principal: StaffPrincipal
+) -> dict:
+    """Simulated neighbours report an incident that already exists.
+
+    Why this button is shaped the way it is
+    ---------------------------------------
+    The tempting version of this feature fabricates forty agreeing reporters the
+    moment somebody files, so the demo looks busy. That version demonstrates the
+    precise failure this system is built to prevent — `intake` scores trust
+    *before* clustering exactly so that a burst cannot manufacture its own
+    corroboration — and it invites the one question there would then be no good
+    answer to.
+
+    So this does the honest version, and every constraint below is there to keep
+    it honest:
+
+    * Each neighbour gets **its own device id**, because the corroboration
+      component counts *independent* sources. Reports from one device do not
+      corroborate each other, and a version of this that reused one id would
+      show no lift at all — correctly.
+    * `source="sim"`, credited at 0.62, the same as an anonymous app report.
+      Not "field", not inflated. These are strangers with phones.
+    * Every one is named **"Simulated neighbour"** in the database, in the
+      intake inbox and in the audit log. Nobody downstream, and nobody watching,
+      can mistake them for real traffic.
+    * They go through `intake.receive` like everything else — same clustering,
+      same trust scoring, same events. Nothing is written directly.
+
+    What comes back is the before-and-after, because the state *change* is the
+    demonstration: one report is an unconfirmed rumour, three independent ones
+    clears the auto-confirm floor and the solver may commit a unit to it.
+    """
+    from app.incidents import intake
+
+    row = await db.fetchrow(
+        """
+        select i.id::text, i.category, i.ward_id, i.severity, i.status::text status,
+               extensions.ST_X(i.location::extensions.geometry) lng,
+               extensions.ST_Y(i.location::extensions.geometry) lat,
+               (select count(*) from citizen_reports c where c.incident_id = i.id) reports,
+               coalesce(cat.dedup_radius_m, 150) radius
+          from incidents i
+          left join incident_categories cat on cat.id = i.category
+         where i.id = $1::uuid
+        """,
+        incident_id,
+    )
+    if row is None:
+        raise NotFound("No such incident.")
+
+    before = {
+        "reports": int(row["reports"]),
+        "severity": int(row["severity"]),
+        "status": row["status"],
+    }
+
+    # Jitter inside the category's own dedup radius, so these genuinely cluster
+    # into this incident rather than opening new ones beside it. Roughly metres
+    # to degrees; exactness does not matter, staying inside the radius does.
+    import random
+
+    rng = random.Random()
+    spread = (float(row["radius"]) * 0.6) / 111_320.0
+
+    results = []
+    for n in range(body.count):
+        results.append(
+            await intake.receive(
+                ward_id=row["ward_id"],
+                category=row["category"],
+                location=(
+                    float(row["lng"]) + rng.uniform(-spread, spread),
+                    float(row["lat"]) + rng.uniform(-spread, spread),
+                ),
+                note="Simulated neighbour reporting the same thing.",
+                source="sim",
+                reporter_id=None,
+                reporter_name="Simulated neighbour",
+                # Its own device, because independence is the whole mechanism.
+                device_id=f"sim-neighbour-{rng.randrange(100000, 999999)}",
+                city_id=body.city_id,
+                clock=clocks.WALL,
+            )
+        )
+
+    after = await db.fetchrow(
+        """
+        select i.severity, i.status::text status,
+               (select count(*) from citizen_reports c where c.incident_id = i.id) reports,
+               (select max(trust_score) from citizen_reports c where c.incident_id = i.id) best_trust,
+               (select count(*) from citizen_reports c
+                 where c.incident_id = i.id
+                   and c.verification_status = 'auto_confirmed') confirmed
+          from incidents i where i.id = $1::uuid
+        """,
+        incident_id,
+    )
+
+    runner.state.beat(
+        "corroboration",
+        f"{body.count} simulated neighbour(s) reported the same thing — "
+        f"{before['reports']} report(s) became {int(after['reports'])}",
+        incidentId=incident_id, wardId=row["ward_id"],
+    )
+    runner.state.dirty = True
+
+    newest = results[-1].trust if results else None
+    return {
+        "incidentId": incident_id,
+        "simulated": True,
+        "before": before,
+        "after": {
+            "reports": int(after["reports"]),
+            "severity": int(after["severity"]),
+            "status": after["status"],
+            "bestTrust": float(after["best_trust"]) if after["best_trust"] is not None else None,
+            "autoConfirmed": int(after["confirmed"]),
+        },
+        "newestTrust": newest.score if newest else None,
+        "newestStatus": newest.status if newest else None,
+        "newestReasons": newest.reasons if newest else [],
+        "merged": sum(1 for r in results if r.linked),
+        "openedSeparately": sum(1 for r in results if r.created_incident),
+        "note": (
+            "Simulated neighbours, labelled as such in the log. Each has its own "
+            "device id, because only independent sources corroborate."
+        ),
+        "actor": principal.full_name or principal.user_id or "demo",
+    }
+
 @router.post("/demo/replan")
 async def demo_replan(_: StaffPrincipal) -> dict:
     await runner.force_replan()

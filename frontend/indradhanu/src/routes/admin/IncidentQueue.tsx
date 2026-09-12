@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { Copy, Siren, TriangleAlert } from "lucide-react"
+import { Copy, Siren, TriangleAlert, Users } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -219,18 +219,52 @@ export default function IncidentQueue() {
                           rather than silently under-serving it.
                         </p>
                       )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="mt-2 h-7 text-xs"
-                        disabled={busy !== null}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void run("replan", "/demo/replan")
-                        }}
-                      >
-                        Re-plan now
-                      </Button>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={busy !== null}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void run("replan", "/demo/replan")
+                          }}
+                        >
+                          Re-plan now
+                        </Button>
+
+                        {/* The honest version of "make the demo look busy".
+                            Three simulated neighbours, each with its own device
+                            id — because only *independent* sources corroborate,
+                            and a button that reused one id would show no lift at
+                            all, correctly. They are labelled as simulated in the
+                            database, the inbox and the audit log.
+
+                            The point is watching the threshold get crossed: one
+                            report is an unconfirmed rumour, three independent
+                            ones clear the auto-confirm floor and the solver may
+                            commit a unit. Fabricating forty agreeing reporters
+                            instead would be demonstrating the exact attack the
+                            trust layer exists to defeat. */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={busy !== null}
+                          title="Files 3 simulated, independent reports on this incident — labelled as simulated everywhere"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void run(
+                              `corr-${i.id}`,
+                              `/demo/incidents/${i.id}/corroborate`,
+                              { count: 3 }
+                            )
+                          }}
+                        >
+                          <Users className="mr-1 size-3" />
+                          3 neighbours report this
+                        </Button>
+                      </div>
                     </div>
                     <div>
                       <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
