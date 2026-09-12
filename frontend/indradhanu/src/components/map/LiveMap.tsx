@@ -320,7 +320,7 @@ const propsOf = (f: unknown): Record<string, unknown> =>
 export function LiveMap({
   wards = [], incidents = [], resources = [], facilities = [], blocks = [],
   needs = [], activity, routes = [],
-  route, routeLabel, me, center = [73.88, 18.58], zoom = 10.2, className,
+  route, routeLabel, me, center = [73.88, 18.58], zoom = 11.6, className,
   onPickIncident, followMe = false, recentreKey = 0,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
@@ -427,7 +427,7 @@ export function LiveMap({
           id: "facility-dot", type: "symbol", source: "facilities",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.55, 13, 0.8, 16, 1.0],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 13, 1.15, 16, 1.45],
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
@@ -438,7 +438,7 @@ export function LiveMap({
           id: "facility-alarm", type: "circle", source: "facilities",
           filter: ["in", ["get", "status"], ["literal", ["full", "closed"]]],
           paint: {
-            "circle-radius": 13, "circle-color": "rgba(0,0,0,0)",
+            "circle-radius": 18, "circle-color": "rgba(0,0,0,0)",
             "circle-stroke-width": 2, "circle-stroke-color": "#ef4444",
           },
         }, "facility-dot")
@@ -448,7 +448,7 @@ export function LiveMap({
           id: "block-dot", type: "symbol", source: "blocks",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 14, 0.95],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.9, 14, 1.35],
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
@@ -461,7 +461,7 @@ export function LiveMap({
         m.addLayer({
           id: "incident-halo", type: "circle", source: "incidents",
           paint: {
-            "circle-radius": ["+", 12, ["*", 3, ["get", "reportCount"]]],
+            "circle-radius": ["+", 17, ["*", 3.5, ["get", "reportCount"]]],
             "circle-color": ["get", "colour"],
             "circle-opacity": 0.18,
             "circle-stroke-width": 1, "circle-stroke-color": ["get", "colour"],
@@ -472,7 +472,7 @@ export function LiveMap({
           id: "incident-dot", type: "symbol", source: "incidents",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.65, 13, 0.95, 16, 1.2],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.95, 13, 1.35, 16, 1.7],
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
@@ -485,7 +485,7 @@ export function LiveMap({
           filter: [">", ["get", "reportCount"], 1],
           layout: {
             "text-field": ["to-string", ["get", "reportCount"]],
-            "text-font": FONT, "text-size": 11, "text-allow-overlap": true,
+            "text-font": FONT, "text-size": 13, "text-allow-overlap": true,
             "text-offset": [1.3, -2.3], "text-anchor": "left",
           },
           paint: {
@@ -499,7 +499,7 @@ export function LiveMap({
           id: "resource-dot", type: "symbol", source: "resources",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.6, 13, 0.85, 16, 1.05],
+            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.9, 13, 1.2, 16, 1.5],
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
@@ -508,13 +508,13 @@ export function LiveMap({
         m.addSource("me", { type: "geojson", data: fc([]) })
         m.addLayer({
           id: "me-halo", type: "circle", source: "me",
-          paint: { "circle-radius": 20, "circle-color": "#8b5cf6", "circle-opacity": 0.18 },
+          paint: { "circle-radius": 26, "circle-color": "#8b5cf6", "circle-opacity": 0.18 },
         })
         m.addLayer({
           id: "me-dot", type: "symbol", source: "me",
           layout: {
             "icon-image": ["get", "icon"],
-            "icon-size": 1.0,
+            "icon-size": 1.4,
             "icon-anchor": "bottom",
             "icon-allow-overlap": true, "icon-ignore-placement": true,
           },
@@ -527,7 +527,7 @@ export function LiveMap({
         m.addLayer({
           id: "endpoint-ring", type: "circle", source: "endpoints",
           paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 15, 15],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 11, 15, 20],
             "circle-color": "rgba(0,0,0,0)",
             "circle-stroke-width": 2.4,
             "circle-stroke-color": ["get", "colour"],
@@ -539,7 +539,7 @@ export function LiveMap({
           minzoom: 12,
           layout: {
             "text-field": ["get", "label"], "text-font": FONT,
-            "text-size": 10.5, "text-offset": [0, 1.6], "text-anchor": "top",
+            "text-size": 12, "text-offset": [0, 1.9], "text-anchor": "top",
             "text-max-width": 12,
           },
           paint: {

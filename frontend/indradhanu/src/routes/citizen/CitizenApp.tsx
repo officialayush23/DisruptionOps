@@ -937,6 +937,69 @@ export default function CitizenApp() {
         </div>
       </div>
 
+      {/* The three things somebody in water actually came here to do.
+       *
+       *  They used to be below the map, which on a phone means below the fold:
+       *  a person standing in a flooded street had to scroll past a map they
+       *  cannot read one-handed to find the microphone. Nothing else on this
+       *  screen is an action, so nothing else competes for the top of it.
+       *
+       *  Sticky, because the one time this matters is the one time the person
+       *  has already scrolled. */}
+      <div className="bg-background/95 sticky top-0 z-20 -mx-4 grid grid-cols-3 gap-2 px-4 py-2 backdrop-blur">
+        <Button
+          type="button"
+          size="lg"
+          variant={sev >= 4 || state?.alerts?.length ? "destructive" : "default"}
+          className="h-14 flex-col gap-0.5 text-xs"
+          disabled={busy === "shelter"}
+          onClick={() => void ask("shelter")}
+        >
+          {busy === "shelter" ? (
+            <Loader2 className="size-5 animate-spin" />
+          ) : (
+            <Navigation className="size-5" />
+          )}
+          Where do I go
+        </Button>
+        <Button
+          type="button"
+          size="lg"
+          variant={recording ? "destructive" : "secondary"}
+          className="h-14 flex-col gap-0.5 text-xs"
+          disabled={busy === "voice" || voiceOff}
+          // Hold to talk, exactly as the card below does it — the same handlers,
+          // not a second recorder, so there is one answer to "am I recording".
+          onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
+          onPointerUp={() => { if (recording) stopRecording() }}
+          onPointerLeave={() => { if (recording) stopRecording() }}
+        >
+          {busy === "voice" ? (
+            <Loader2 className="size-5 animate-spin" />
+          ) : recording ? (
+            <Square className="size-5" />
+          ) : (
+            <Mic className="size-5" />
+          )}
+          {recording ? "Release to stop" : voiceOff ? "Voice is off" : "Hold to talk"}
+        </Button>
+        <Button
+          type="button"
+          size="lg"
+          variant="secondary"
+          className="h-14 flex-col gap-0.5 text-xs"
+          disabled={busy === "photo"}
+          onClick={() => photoInput.current?.click()}
+        >
+          {busy === "photo" ? (
+            <Loader2 className="size-5 animate-spin" />
+          ) : (
+            <Camera className="size-5" />
+          )}
+          {photo ? "Change photo" : "Take a photo"}
+        </Button>
+      </div>
+
       {gpsNote && <Alert><AlertDescription className="text-xs">{gpsNote}</AlertDescription></Alert>}
       {state && !state.inside && (
         <Alert variant="destructive">
@@ -1059,7 +1122,7 @@ export default function CitizenApp() {
                 blocks={state?.roadBlocks ?? []}
                 me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
                 center={[pos.lng, pos.lat]}
-                zoom={13.5}
+                zoom={14.3}
                 followMe
                 recentreKey={recentre}
               />

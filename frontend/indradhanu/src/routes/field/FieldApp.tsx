@@ -444,7 +444,7 @@ export default function FieldApp() {
                 // in the city, and not themselves.
                 me={myPos ? { lng: myPos[0], lat: myPos[1], label: "You" } : null}
                 center={myPos ?? unit?.location ?? [73.88, 18.58]}
-                zoom={12}
+                zoom={13.2}
               />
             )}
           />

@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
@@ -16,6 +17,7 @@ import {
   Siren,
   TrendingUp,
   Truck,
+  Waypoints,
 } from "lucide-react"
 import {
   Sidebar,
@@ -31,9 +33,14 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
+} from "@/components/ui/sheet"
 import { Separator } from "@/components/ui/separator"
+import Copilot from "@/routes/admin/Copilot"
 import { PersonaSwitcher } from "./PersonaSwitcher"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { DemoProvider, useDemo } from "@/routes/demo/DemoProvider"
 
 /** What each nav badge counts, and how loudly to say it.
@@ -63,52 +70,68 @@ type Tone = "blocked" | "gap"
 type Count = { n: number; tone: Tone; what: string }
 
 const NAV: {
+  group: "Operations" | "Analysis" | "Setup"
   to: string
   label: string
   icon: typeof Radar
   count?: (c: Counts) => Count | null
 }[] = [
-  { to: "/admin/console", label: "Command console", icon: Radar },
-  { to: "/admin/copilot", label: "Copilot", icon: BrainCircuit },
+  // Operations: the four screens an officer works from during an event. A judge
+  // who opened this console found sixteen and could not tell which four those
+  // were, which is the whole of the "too cluttered" complaint — not density on
+  // any one screen, but no answer to "where do I start".
+  { group: "Operations", to: "/admin/console", label: "Live map", icon: Radar },
   {
-    to: "/admin/intake", label: "Intake inbox", icon: Inbox,
+    group: "Operations", to: "/admin/dispatch", label: "Dispatch", icon: Waypoints,
+    count: (c) => (c.short ? { n: c.short, tone: "gap", what: "incidents short of a unit" } : null),
+  },
+  {
+    group: "Operations", to: "/admin/decisions", label: "Approvals", icon: ClipboardCheck,
+    count: (c) => (c.gate ? { n: c.gate, tone: "blocked", what: "waiting for an approval" } : null),
+  },
+  {
+    group: "Operations", to: "/admin/intake", label: "Reports", icon: Inbox,
     count: (c) => (c.held ? { n: c.held, tone: "blocked", what: "held for a human" } : null),
   },
+
+  // Analysis: real work, none of it urgent. Collapsed by default, so the rail
+  // reads as four things rather than sixteen and everything is still one click
+  // from where it was.
   {
-    to: "/admin/risk", label: "Risk board", icon: Gauge,
-    count: (c) => (c.severeWards ? { n: c.severeWards, tone: "gap", what: "wards at severity 4 or above" } : null),
-  },
-  {
-    to: "/admin/forecast", label: "Forecast", icon: TrendingUp,
-    count: (c) => (c.shortfalls ? { n: c.shortfalls, tone: "gap", what: "capabilities projected short" } : null),
-  },
-  {
-    to: "/admin/incidents", label: "Incident queue", icon: Siren,
+    group: "Analysis", to: "/admin/incidents", label: "Incident queue", icon: Siren,
     count: (c) => (c.unattended ? { n: c.unattended, tone: "gap", what: "open with nobody on the way" } : null),
   },
   {
-    to: "/admin/allocation", label: "Allocation planner", icon: Route,
+    group: "Analysis", to: "/admin/allocation", label: "Allocation planner", icon: Route,
     count: (c) => (c.uncovered ? { n: c.uncovered, tone: "blocked", what: "demands nobody can serve" } : null),
   },
   {
-    to: "/admin/handoff", label: "Agency handoff", icon: Handshake,
+    group: "Analysis", to: "/admin/handoff", label: "Agency handoff", icon: Handshake,
     count: (c) => (c.handoffs ? { n: c.handoffs, tone: "blocked", what: "requests another agency has not answered" } : null),
   },
   {
-    to: "/admin/decisions", label: "Decision gate", icon: ClipboardCheck,
-    count: (c) => (c.gate ? { n: c.gate, tone: "blocked", what: "waiting for an approval" } : null),
+    group: "Analysis", to: "/admin/risk", label: "Risk board", icon: Gauge,
+    count: (c) => (c.severeWards ? { n: c.severeWards, tone: "gap", what: "wards at severity 4 or above" } : null),
   },
-  { to: "/admin/agent", label: "Agent trace", icon: Activity },
   {
-    to: "/admin/resources", label: "Resources", icon: Truck,
+    group: "Analysis", to: "/admin/forecast", label: "Forecast", icon: TrendingUp,
+    count: (c) => (c.shortfalls ? { n: c.shortfalls, tone: "gap", what: "capabilities projected short" } : null),
+  },
+  {
+    group: "Analysis", to: "/admin/resources", label: "Resources", icon: Truck,
     count: (c) => (c.offline ? { n: c.offline, tone: "gap", what: "units out of the fleet" } : null),
   },
-  { to: "/admin/alerts", label: "Issued alerts", icon: Radio },
-  { to: "/admin/replay", label: "Replay", icon: Rewind },
-  { to: "/admin/after-action", label: "After-action", icon: History },
-  { to: "/admin/architecture", label: "How this works", icon: Network },
-  { to: "/admin/configuration", label: "Configuration", icon: Settings2 },
+  { group: "Analysis", to: "/admin/alerts", label: "Issued alerts", icon: Radio },
+  { group: "Analysis", to: "/admin/agent", label: "Agent trace", icon: Activity },
+  { group: "Analysis", to: "/admin/copilot", label: "Copilot, full screen", icon: BrainCircuit },
+
+  { group: "Setup", to: "/admin/replay", label: "Replay", icon: Rewind },
+  { group: "Setup", to: "/admin/after-action", label: "After-action", icon: History },
+  { group: "Setup", to: "/admin/architecture", label: "How this works", icon: Network },
+  { group: "Setup", to: "/admin/configuration", label: "Configuration", icon: Settings2 },
 ]
+
+const GROUPS = ["Operations", "Analysis", "Setup"] as const
 
 /** The world clock, in the header.
  *
@@ -153,6 +176,7 @@ function LiveBadge() {
  *  handoff said so, and the other four queues below are no less blocking. */
 type Counts = {
   held: number
+  short: number
   gate: number
   handoffs: number
   uncovered: number
@@ -189,6 +213,20 @@ function useCounts(): Counts {
       (r) => r.status !== "available" && !r.assignedTo
     ).length,
     shortfalls: (state.forecast?.demand ?? []).filter((d) => d.shortfall > 0.5).length,
+    // Incidents the dispatch board has something to do about: a recorded need
+    // that nobody is meeting. Distinct from `unattended`, which counts nobody
+    // *en route* — an incident can have a unit driving to it and still be short
+    // of a second capability nobody holds.
+    short: (() => {
+      const open = new Set(
+        state.incidents.filter((i) => i.status !== "resolved").map((i) => i.id)
+      )
+      const bad = new Set<string>()
+      for (const n of state.needs) {
+        if (n.met < n.required && open.has(n.incidentId)) bad.add(n.incidentId)
+      }
+      return bad.size
+    })(),
     severeWards: state.wards.filter((w) => (w.severity ?? 0) >= 4).length,
   }
 }
@@ -256,6 +294,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const current = NAV.find((n) => location.pathname.startsWith(n.to))
   const counts = useCounts()
+  const [copilot, setCopilot] = useState(false)
 
   return (
     <SidebarProvider>
@@ -275,47 +314,57 @@ function Chrome({ children }: { children: React.ReactNode }) {
         </SidebarHeader>
 
         <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>Operations</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {NAV.map((item) => {
-                  const count = item.count?.(counts) || null
-                  return (
-                    <SidebarMenuItem key={item.to} className="relative">
-                      <SidebarMenuButton
-                        asChild
-                        isActive={location.pathname.startsWith(item.to)}
-                        // The tooltip is the only place a collapsed rail can say
-                        // what the dot is about, so it carries the sentence
-                        // rather than repeating the label.
-                        tooltip={
-                          count
-                            ? `${item.label} — ${count.n} ${count.what}`
-                            : item.label
-                        }
-                      >
-                        <NavLink
-                          // A badge is a destination, not a notice: where a
-                          // screen can open straight onto the queue that is
-                          // being counted, the link says so.
-                          to={
-                            count && item.to === "/admin/intake"
-                              ? `${item.to}?filter=held`
-                              : item.to
+          {GROUPS.map((group) => (
+            <SidebarGroup
+              key={group}
+              // Operations stays open. The other two collapse, because an
+              // officer during an event is not configuring anything and a rail
+              // that shows them sixteen equal choices is asking them to triage
+              // the navigation before they triage the city.
+              className={group === "Analysis" ? "group-data-[collapsible=icon]:hidden" : undefined}
+            >
+              <SidebarGroupLabel>{group}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {NAV.filter((n) => n.group === group).map((item) => {
+                    const count = item.count?.(counts) || null
+                    return (
+                      <SidebarMenuItem key={item.to} className="relative">
+                        <SidebarMenuButton
+                          asChild
+                          isActive={location.pathname.startsWith(item.to)}
+                          size={group === "Operations" ? "lg" : "default"}
+                          // The tooltip is the only place a collapsed rail can
+                          // say what the dot is about, so it carries the
+                          // sentence rather than repeating the label.
+                          tooltip={
+                            count
+                              ? `${item.label} — ${count.n} ${count.what}`
+                              : item.label
                           }
                         >
-                          <item.icon />
-                          <span>{item.label}</span>
-                          {count && <NavBadge count={count} />}
-                        </NavLink>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  )
-                })}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+                          <NavLink
+                            // A badge is a destination, not a notice: where a
+                            // screen can open straight onto the queue that is
+                            // being counted, the link says so.
+                            to={
+                              count && item.to === "/admin/intake"
+                                ? `${item.to}?filter=held`
+                                : item.to
+                            }
+                          >
+                            <item.icon />
+                            <span>{item.label}</span>
+                            {count && <NavBadge count={count} />}
+                          </NavLink>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    )
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ))}
 
           <SidebarGroup className="mt-auto group-data-[collapsible=icon]:hidden">
             <SidebarGroupLabel>Right now</SidebarGroupLabel>
@@ -359,6 +408,33 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
           <div className="ml-auto flex items-center gap-3">
             <LiveBadge />
+            {/* The Copilot, over whatever they are doing rather than instead of
+                it. As its own primary tab it was the clearest example of the
+                console showing an officer something they had not asked for: a
+                full-screen chat sitting between them and the map. Here it is
+                available from every screen, answers against the same world the
+                screen behind it is showing, and closes. */}
+            <Sheet open={copilot} onOpenChange={setCopilot}>
+              <SheetTrigger asChild>
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+                  <BrainCircuit className="size-3.5" />
+                  <span className="hidden sm:inline">Ask</span>
+                </Button>
+              </SheetTrigger>
+              <SheetContent
+                side="right"
+                className="flex w-full flex-col gap-0 p-0 sm:max-w-xl"
+              >
+                <SheetHeader className="shrink-0 border-b px-4 py-3">
+                  <SheetTitle className="flex items-center gap-2 text-sm">
+                    <BrainCircuit className="size-4" /> Commissioner Copilot
+                  </SheetTitle>
+                </SheetHeader>
+                <div className="min-h-0 flex-1 p-3">
+                  <Copilot compact />
+                </div>
+              </SheetContent>
+            </Sheet>
             <PersonaSwitcher />
           </div>
         </header>

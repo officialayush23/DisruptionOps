@@ -20,6 +20,7 @@ from pydantic import Field
 from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
+from app.agents import gate
 from app.copilot import execute
 from app.demo import runner
 from app.agents import forecast as forecasting
@@ -261,6 +262,106 @@ async def demo_citizen_report(body: CitizenReportIn, _: CurrentPrincipal) -> dic
         "linkScore": result.link_score,
         "reasons": result.trust.reasons,
         "summary": result.summary,
+    }
+
+
+class AssignIn(Camel):
+    resource_id: str
+    incident_id: str
+    note: str = ""
+
+
+@router.post("/dispatch/assign")
+async def dispatch_assign(body: AssignIn, principal: StaffPrincipal) -> dict:
+    """Send this unit to that incident, now.
+
+    The dispatch board needed a verb. Everything an officer could do to the plan
+    before this went through the solver — re-plan and hope, or approve something
+    the Copilot had proposed — and neither is what a person does when they can
+    see, on one screen, that the boat two streets away is idle.
+
+    It does **not** write an assignment directly. It proposes through the same
+    `gate.propose` every agent uses, with the same delegation matrix and the
+    same clause, and lets the gate decide whether an officer's own hands are
+    enough. Auto-issued, it is carried out here in the same request so the unit
+    is moving before the next poll; held, it appears on the decision gate with
+    the clause that held it, exactly like any other proposal. A dispatch board
+    that could move a vehicle around the gate would be the second path this
+    system exists to not have.
+
+    Confidence is 1.0 because a person looked at it. That is not a claim the
+    move is correct; it is the honest input to a gate whose other axis is
+    severity, and it is why an officer picking a unit inside their delegation
+    goes straight through while one reaching past it still stops.
+    """
+    unit = await db.fetchrow(
+        "select id, label, status from resources where id = $1", body.resource_id
+    )
+    if unit is None:
+        raise NotFound("No such unit.")
+    incident = await db.fetchrow(
+        """
+        select i.id::text id, i.title, i.ward_id, i.severity, i.status
+          from incidents i where i.id = $1::uuid
+        """,
+        body.incident_id,
+    )
+    if incident is None:
+        raise NotFound("No such incident.")
+    if incident["status"] == "resolved":
+        raise Conflict("That incident is already closed.")
+
+    decision = await gate.propose(
+        action_key="reallocate_unit",
+        action=f"Send {unit['label']} to {incident['title']}",
+        target=incident["title"],
+        ward_id=incident["ward_id"],
+        rationale=(
+            f"Assigned by {principal.full_name or 'an officer'} from the dispatch "
+            f"board." + (f" {body.note}" if body.note else "")
+        ),
+        confidence=1.0,
+        severity=int(incident["severity"] or 3),
+        clock=clocks.WALL,
+        actor=ev.officer(principal.full_name or "Officer"),
+        params={"resource_id": body.resource_id, "incident_id": body.incident_id},
+    )
+
+    carried: dict | None = None
+    if decision["status"] == "auto_issued":
+        try:
+            carried = await execute.apply_decision(
+                decision["id"], actor=principal.full_name or "Officer"
+            )
+        except execute.NotExecutable as exc:
+            carried = {"note": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - the decision stands either way
+            carried = {"note": f"Issued, but could not be carried out: {exc}"}
+        invalidate_slow()
+
+    runner.state.beat(
+        "dispatch",
+        f"{unit['label']} sent to “{incident['title']}”."
+        if carried and "note" not in carried
+        else f"{unit['label']} proposed for “{incident['title']}”.",
+    )
+    runner.state.dirty = True
+
+    return {
+        "decisionId": decision["id"],
+        "status": decision["status"],
+        "clause": decision["clause"],
+        "delegatedTo": decision["delegatedTo"],
+        "withinDelegation": decision["withinDelegation"],
+        "carriedOut": carried,
+        # Said in words, because "auto_issued" and "awaiting_approval" look
+        # equally successful to somebody who just pressed a button.
+        "note": (
+            f"{unit['label']} is on its way."
+            if carried and "note" not in carried
+            else f"Held at the gate under {decision['clause']}. "
+                 "Approve it on the decision gate to carry it out."
+        ),
     }
 
 

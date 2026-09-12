@@ -97,6 +97,17 @@ export default function DemoConsole() {
             <Square className="size-4" /> Stop
           </Button>
         )}
+        {/* Re-plan and reset are scaffolding, not command. An officer during
+            an event does not delete the world, and a judge shown a button that
+            does is being shown the machinery instead of the product — which is
+            most of what "too cluttered" turned out to mean here. Folded into a
+            disclosure that says what it holds; one click away, and not in the
+            way of the map. */}
+        <details className="relative">
+          <summary className="text-muted-foreground hover:text-foreground cursor-pointer list-none rounded-md border px-2.5 py-1.5 text-xs">
+            Simulation controls
+          </summary>
+          <div className="bg-background absolute left-0 top-full z-30 mt-1 flex w-max flex-wrap items-center gap-2 rounded-md border p-2 shadow-md">
         <Button variant="outline" onClick={() => run("replan", "/demo/replan")} disabled={busy !== null}>
           {busy === "replan" ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
           Re-plan now
@@ -125,7 +136,8 @@ export default function DemoConsole() {
             <RotateCcw className="size-4" /> Reset world
           </Button>
         )}
-
+          </div>
+        </details>
         <div className="text-muted-foreground ml-2 flex flex-wrap items-center gap-3 text-xs">
           <span>tick <span className="tabular-nums font-medium">{state.tick}</span></span>
           <span>{state.incidents.length} open incidents</span>
@@ -295,6 +307,18 @@ export default function DemoConsole() {
             </Alert>
           )}
 
+          {/* Everything below is the running commentary, not the decision.
+              A judge opening this console said, fairly, that it showed them
+              things they had no business seeing; the last plan's diff and a
+              scrolling narration are two of them — real, and for afterwards.
+              Folded away, open in one click, and the state is remembered for
+              whoever wants it open. */}
+          <details className="group rounded-lg border" open={false}>
+            <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium">
+              <span className="group-open:hidden">Show the running detail</span>
+              <span className="hidden group-open:inline">Hide the running detail</span>
+            </summary>
+            <div className="space-y-3 border-t p-3">
           {state.plan && (
             <Card>
               <CardHeader className="pb-2">
@@ -328,6 +352,8 @@ export default function DemoConsole() {
               </div>
             </CardContent>
           </Card>
+            </div>
+          </details>
         </div>
       </div>
     </div>

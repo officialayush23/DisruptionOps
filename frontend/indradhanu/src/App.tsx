@@ -5,6 +5,7 @@ import { RequireRole } from "@/auth/RequireRole"
 import Login from "@/routes/auth/Login"
 import DemoConsole from "@/routes/demo/DemoConsole"
 import Copilot from "@/routes/admin/Copilot"
+import Dispatch from "@/routes/admin/Dispatch"
 import CitizenApp from "@/routes/citizen/CitizenApp"
 import FieldApp from "@/routes/field/FieldApp"
 import IntakeInbox from "@/routes/admin/IntakeInbox"
@@ -57,6 +58,9 @@ export function App() {
               <Routes>
                 <Route path="console" element={<DemoConsole />} />
                 <Route path="copilot" element={<Copilot />} />
+                {/* Who is going where. It was only on the map, which answers
+                    "where" and not "why that unit". */}
+                <Route path="dispatch" element={<Dispatch />} />
                 <Route path="intake" element={<IntakeInbox />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="forecast" element={<Forecast />} />

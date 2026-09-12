@@ -58,7 +58,20 @@ const OPENERS = [
   "Who authorises an evacuation?",
 ]
 
-export default function Copilot() {
+/** Rendered inside the header's side panel rather than as its own screen.
+ *
+ *  A judge's first complaint about this console was that it showed them things
+ *  they had no business seeing, and a full-screen three-column Copilot in the
+ *  primary navigation was the clearest example: an officer with an approval
+ *  waiting does not navigate to a chat. So the conversation moved into a panel
+ *  that opens over whatever they are doing, and the two side columns — the live
+ *  stat rail and the proposal list — are dropped there, because both restate
+ *  what the screen behind the panel is already showing.
+ *
+ *  The full page stays, one level down under Analysis, for the case the panel
+ *  is too small for: reading a long comparison table beside the world it came
+ *  from. */
+export default function Copilot({ compact = false }: { compact?: boolean }) {
   const { state } = useDemo()
   const [turns, setTurns] = useState<Turn[]>([])
   const [question, setQuestion] = useState("")
@@ -145,8 +158,15 @@ export default function Copilot() {
   }
 
   return (
-    <div className="grid h-[calc(100svh-3.5rem)] grid-cols-1 gap-3 p-3 lg:grid-cols-[220px_1fr_320px]">
+    <div
+      className={
+        compact
+          ? "flex h-full min-h-0 flex-col gap-3"
+          : "grid h-[calc(100svh-3.5rem)] grid-cols-1 gap-3 p-3 lg:grid-cols-[220px_1fr_320px]"
+      }
+    >
       {/* The world, so an answer can be checked against it while it is read. */}
+      {!compact && (
       <aside className="hidden space-y-2 lg:block">
         <Stat label="Open incidents" value={state.incidents.length} />
         <Stat label="Severity 4+" value={situation.critical} tone={situation.critical ? "bad" : undefined} />
@@ -175,6 +195,7 @@ export default function Copilot() {
           </div>
         )}
       </aside>
+      )}
 
       {/* The conversation. */}
       <section className="flex min-h-0 flex-col rounded-lg border">
@@ -286,6 +307,7 @@ export default function Copilot() {
       </section>
 
       {/* Whatever is pending. */}
+      {!compact && (
       <aside className="min-h-0 space-y-2 overflow-auto rounded-lg border p-3">
         <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
           Proposed actions
@@ -325,6 +347,7 @@ export default function Copilot() {
           </div>
         )}
       </aside>
+      )}
     </div>
   )
 }
