@@ -8,6 +8,7 @@ device, not a person:
     POST /mesh/inbound       packets heard on the mesh
     GET  /mesh/outbox        what to broadcast next
     POST /mesh/outbox/ack    what was broadcast
+    POST /mesh/civ-sync      a bitchat phone's whole "back online" bundle
 
 Plus `POST /ingest/sensor` for a camera node that has internet and can skip the
 mesh, and `GET /mesh/status` for the console.
@@ -91,6 +92,29 @@ async def outbox_ack(body: AckIn,
                      x_mesh_gateway_key: str | None = Header(default=None)) -> dict:
     _gateway(x_mesh_gateway_key)
     return {"acked": await service.ack(body.ids)}
+
+
+class CivBundleIn(Camel):
+    """`bitchat.civ.sync/v1`, as the bitchat fork's SyncBundleBuilder writes it."""
+
+    bundle_schema: str = "bitchat.civ.sync/v1"
+    produced_at: int | None = None
+    gateway_id: str = Field(default="bitchat", min_length=1, max_length=80)
+    city_id: str = "pune"
+    incidents: list[dict] = Field(default_factory=list, max_length=500)
+    shelters: list[dict] = Field(default_factory=list, max_length=500)
+
+
+@router.post("/mesh/civ-sync")
+async def civ_sync(body: CivBundleIn,
+                   x_mesh_gateway_key: str | None = Header(default=None)) -> dict:
+    """A phone that carried mesh traffic into signal posts it all here. Each
+    incident is turned into an R packet (or an S packet for a VLM camera brief
+    with a known hazard class) and handled exactly like one heard on the mesh,
+    so a report that arrives both ways is still one report."""
+    _gateway(x_mesh_gateway_key)
+    return await service.receive_civ_bundle(body.model_dump(), gateway_id=body.gateway_id,
+                                            city_id=body.city_id)
 
 
 @router.post("/ingest/sensor")

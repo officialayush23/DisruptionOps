@@ -122,6 +122,91 @@ class Envelope(unittest.TestCase):
                          envelope.encode("S", body, key=self.KEY))
 
 
+class CivBundle(unittest.TestCase):
+    """The bitchat phone's back-online bundle becomes ordinary mesh packets."""
+
+    KEY = "test-key"
+
+    def setUp(self):
+        from app.mesh import service
+        self.service = service
+
+    def test_geotagged_sos_becomes_signed_report(self):
+        text = self.service.civ_incident_packet(
+            {"id": "ABCDEF0123", "timestamp": 1790000000000, "sender": "anon1",
+             "role": "CIVILIAN", "lat": 18.52, "lon": 73.85,
+             "content": "SOS water rising geo:18.52,73.85"}, key=self.KEY)
+        pkt = envelope.decode(text, key=self.KEY)
+        self.assertEqual(pkt.type, "R")
+        self.assertTrue(pkt.verified)
+        self.assertEqual(pkt.body["id"], "bABCDEF0123")
+        self.assertEqual(pkt.body["t"], 1790000000)
+        self.assertEqual(pkt.location, (73.85, 18.52))
+
+    def test_vlm_fire_brief_becomes_sensor_packet(self):
+        text = self.service.civ_incident_packet(
+            {"id": "v1", "lat": 18.5, "lon": 73.8, "content": "car on fire",
+             "source": "vlm", "kind": "fire", "confidence": 0.9}, key=self.KEY)
+        pkt = envelope.decode(text, key=self.KEY)
+        self.assertEqual(pkt.type, "S")
+        self.assertEqual(pkt.body["k"], "fire")
+        self.assertEqual(pkt.body["v"], 1)
+
+    def test_responder_role_is_kept_in_text(self):
+        text = self.service.civ_incident_packet(
+            {"id": "a1", "lat": 18.5, "lon": 73.8, "role": "AMBULANCE",
+             "content": "two injured"}, key=self.KEY)
+        self.assertIn("[ambulance] two injured", text)
+
+    def test_no_location_or_id_is_skipped(self):
+        for inc in ({"id": "x", "content": "no gps"}, {"lat": 1, "lon": 2},
+                    {"id": "z", "lat": 0, "lon": 0}, {"id": "q", "lat": "a", "lon": 1}):
+            self.assertIsNone(self.service.civ_incident_packet(inc, key=self.KEY))
+
+
+class EventRouter(unittest.TestCase):
+    """What each event causes, independent of the demo runner."""
+
+    def setUp(self):
+        from app.agents import event_router
+        self.route = event_router.route
+
+    def test_new_incident_replans(self):
+        r = self.route({"kind": "incident.opened", "actor": "agent:triage", "ward_id": "W1",
+                        "payload": {"severity": 2, "category": "flooded_road"}})
+        self.assertIn("incident.opened", r.replan)
+        self.assertIsNone(r.nudge)
+
+    def test_severe_incident_wakes_commander(self):
+        r = self.route({"kind": "incident.opened", "actor": "agent:triage", "subject_id": "i9",
+                        "payload": {"severity": 5, "category": "fire"}})
+        self.assertIsNotNone(r.replan)
+        self.assertEqual(r.nudge["key"], "incident:i9")
+
+    def test_field_and_override_prefixes(self):
+        self.assertIsNotNone(self.route({"kind": "field.route_blocked", "actor": "field:crew1"}).replan)
+        self.assertIsNotNone(self.route({"kind": "field.route_blocked", "actor": "field:crew1"}).nudge)
+        self.assertIsNotNone(self.route({"kind": "override.hold", "actor": "officer:a"}).replan)
+
+    def test_planner_output_never_loops(self):
+        for kind in ("plan.generated", "assignment.created", "assignment.changed", "demand.uncovered"):
+            r = self.route({"kind": kind, "actor": "agent:allocation_planner"})
+            self.assertIsNone(r.replan)
+        r = self.route({"kind": "resource.status_changed", "actor": "agent:allocation_planner"})
+        self.assertIsNone(r.replan)
+        r = self.route({"kind": "incident.opened", "actor": "agent:demo:inject"})
+        self.assertIsNone(r.replan)
+
+    def test_officer_cancel_replans_agent_cancel_does_not(self):
+        self.assertIsNotNone(self.route({"kind": "assignment.cancelled", "actor": "officer:a"}).replan)
+        self.assertIsNone(self.route({"kind": "assignment.cancelled", "actor": "agent:executor"}).replan)
+
+    def test_payload_as_json_text(self):
+        r = self.route({"kind": "incident.severity_changed", "actor": "agent:triage",
+                        "payload": '{"severity": 4}'})
+        self.assertIsNotNone(r.nudge)
+
+
 class Commitments(unittest.TestCase):
     def setUp(self):
         from app import taxonomy as tx

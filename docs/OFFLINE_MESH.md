@@ -66,6 +66,21 @@ but never auto-dispatch on their own.
 | Re-plan, CP-SAT, gate | cloud | still cloud: runs when packets arrive |
 | Camera node | `/ingest/sensor` over HTTPS | IDX1 S via the bitchat phone on its Wi-Fi |
 
+## The bitchat phone app (teammate's build + command-centre link)
+
+The field app is `kurukshetra_hackathon/src/bitchat-android`: roles (Civilian, Ambulance,
+Fire, Gov, Command) on every announce and broadcast, a shelter registry gossiped over
+the mesh, SOS with GPS, an osmdroid map, the VLM API, and the link to this API
+(`vlm/IndradhanuGateway.kt`, configured in *About → Command Centre*). While a phone has
+validated internet it:
+
+| Direction | Endpoint | What |
+|---|---|---|
+| push | `POST /api/v1/mesh/inbound` | IDX1 packets heard on the mesh (store-and-forward queue) |
+| push | `POST /api/v1/mesh/civ-sync` | `bitchat.civ.sync/v1` bundle: SOS, geotagged posts, VLM briefs, shelters. Each incident becomes an R packet (an S packet for a VLM fire/smoke/flood brief), signed with `MESH_HMAC_KEY`, and goes through `receive()` like any mesh packet, so it is deduplicated with the IDX1 path by id |
+| listen | `GET /api/v1/mesh/outbox` + `/ack` | alerts, dispatches, cancellations, blocks, broadcast on the mesh tagged **Command** with a `geo:` tag so every phone pins them on its map |
+| cache | `GET /api/v1/lifelines`, `/shelters` | shelters, relief centres, hospitals, medical camps, food and water points into the phone's shelter registry (persisted, gossiped to the mesh), plus walking routes to the nearest few for offline navigation |
+
 ## Setting it up
 
 1. **API** (Render): set `MESH_GATEWAY_KEY` and `MESH_HMAC_KEY` (long random

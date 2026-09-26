@@ -502,6 +502,13 @@ def _replan_soon(trigger: str) -> None:
     Through the demo runner's lock when it is running, so a tick and this
     re-plan never write the same rows at once (the TimeoutError of 11 Sep).
     """
+    # The event router serialises and coalesces re-plans; use it when it runs.
+    from app.agents import event_router
+
+    if event_router.running():
+        event_router.request_replan(trigger)
+        return
+
     async def _go() -> None:
         await asyncio.sleep(0.5)
         try:

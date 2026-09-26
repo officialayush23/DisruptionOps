@@ -88,6 +88,73 @@ def _category(kind: str) -> str:
     return "unknown_report"
 
 
+# ------------------------------------------------------ bitchat civ sync ---
+#: The bitchat fork's "return to civilization" bundle (`bitchat.civ.sync/v1`):
+#: when a phone that heard the mesh gets internet it posts everything it holds,
+#: incidents (SOS, geotagged broadcasts, VLM camera briefs) and shelters. Each
+#: incident becomes an ordinary R packet so it takes exactly the same path as a
+#: report typed into the web app's mesh mode: same dedupe, same trust, same
+#: intake. Nothing here decides what a report means.
+CIV_SCHEMA = "bitchat.civ.sync/v1"
+
+
+def civ_incident_packet(inc: dict[str, Any], *, key: str) -> str | None:
+    """One bundle incident as an IDX1 R packet, or None if it cannot be one."""
+    raw_id = str(inc.get("id") or "").strip()
+    if not raw_id:
+        return None
+    try:
+        lat = float(inc["lat"])
+        lon = float(inc["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    ts = inc.get("timestamp")
+    try:
+        t = int(int(ts) / 1000) if ts and int(ts) > 10**11 else int(ts or 0) or None
+    except (TypeError, ValueError):
+        t = None
+    text = str(inc.get("content") or "").strip()
+    role = str(inc.get("role") or "UNSET").upper()
+    source = str(inc.get("source") or "").lower()
+    kind = str(inc.get("kind") or "").lower()
+    if source == "vlm" and kind in SENSOR_CATEGORY:
+        body = {"id": "b" + raw_id[:30], "n": str(inc.get("sender") or "camera")[:40],
+                "k": kind, "c": float(inc.get("confidence") or 0.7), "v": 1,
+                "la": round(lat, 5), "lo": round(lon, 5), "x": text[:280], "t": t}
+        return envelope.encode("S", body, key=key)
+    body = {"id": "b" + raw_id[:30], "n": str(inc.get("sender") or "mesh")[:40],
+            "la": round(lat, 5), "lo": round(lon, 5), "x": text[:280], "t": t}
+    if role not in ("", "UNSET", "CIVILIAN"):
+        body["x"] = f"[{role.lower()}] " + body["x"]
+    return envelope.encode("R", body, key=key)
+
+
+async def receive_civ_bundle(bundle: dict[str, Any], *, gateway_id: str,
+                             city_id: str = "pune") -> dict:
+    incidents = bundle.get("incidents") or []
+    shelters = bundle.get("shelters") or []
+    packets, skipped = [], 0
+    for inc in incidents[:200]:
+        text = civ_incident_packet(inc, key=settings.mesh_hmac_key)
+        if text is None:
+            skipped += 1
+        else:
+            packets.append(text)
+    results = []
+    for i in range(0, len(packets), 100):
+        results += await receive(packets[i:i + 100], gateway_id=gateway_id, city_id=city_id)
+    outcomes: dict[str, int] = {}
+    for r in results:
+        key = r.get("outcome") or ("error" if not r.get("ok") else "ok")
+        outcomes[key] = outcomes.get(key, 0) + 1
+    log.info("civ_bundle", gateway=gateway_id, incidents=len(incidents),
+             shelters=len(shelters), skipped=skipped, outcomes=outcomes)
+    return {"ok": True, "incidents": len(incidents), "accepted": len(packets),
+            "skipped": skipped, "shelters": len(shelters), "outcomes": outcomes}
+
+
 # ----------------------------------------------------------------- inbound ---
 async def receive(texts: list[str], *, gateway_id: str, city_id: str = "pune") -> list[dict]:
     """Handle what a gateway heard. One result per text, in order."""

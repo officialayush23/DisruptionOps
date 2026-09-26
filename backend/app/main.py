@@ -22,6 +22,7 @@ from app.core.ratelimit import LIMITS as RATE_LIMITS, RateLimitMiddleware
 from app import taxonomy
 from app.db import session as db
 from app.demo import runner as demo_runner
+from app.agents import event_router
 
 configure_logging(settings.log_level, json_logs=settings.is_production)
 log = get_logger(__name__)
@@ -41,9 +42,12 @@ async def lifespan(_: FastAPI):
         hazards=len(taxonomy.cache.hazards),
         resource_kinds=len(taxonomy.cache.resource_kinds),
     )
+    # Listen to the event log from now on, demo or no demo.
+    await event_router.start()
     try:
         yield
     finally:
+        await event_router.stop()
         # Stop the demo loop before the pool closes. Otherwise a reload leaves a
         # task writing into a disconnected pool and the log fills with noise
         # that looks like a real failure.

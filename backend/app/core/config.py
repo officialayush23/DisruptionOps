@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # not a convenience, it is an unauthenticated admin endpoint.
     dev_auth_role: str = ""
 
+    # ---- event router ----
+    # Always on: whether the system reacts to a report must not depend on the
+    # demo runner. Off only for tests that want a silent database.
+    event_router_enabled: bool = True
+    event_router_poll_s: float = 1.5
+
     # ---- llm ----
     llm_provider: LLMProvider = "gemini"
     gemini_api_key: str = ""

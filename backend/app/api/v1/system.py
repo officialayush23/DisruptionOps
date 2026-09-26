@@ -31,6 +31,15 @@ async def llm_status() -> dict:
     }
 
 
+@router.get("/status/router")
+async def router_status() -> dict:
+    """Is the event router listening, and what has it done? The first question
+    when a report lands and nothing re-plans."""
+    from app.agents import event_router
+
+    return event_router.status()
+
+
 @router.get("/status", response_model=SystemStatus)
 async def status() -> SystemStatus:
     run = await q.latest_run(HazardType.FLOOD)
