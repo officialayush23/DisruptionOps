@@ -97,6 +97,9 @@ class TaskStatus(StrEnum):
     ACCEPTED = "accepted"
     ON_SITE = "on_site"
     COMPLETE = "complete"
+    #: Stood down by the planner or an officer (migration 021). Distinct from
+    #: complete so a cancelled job is never counted as work done.
+    CANCELLED = "cancelled"
 
 
 # ------------------------------------------------------------- geography ---

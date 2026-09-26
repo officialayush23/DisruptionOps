@@ -38,6 +38,12 @@ SOURCE_CREDIBILITY: Mapping[str, float] = {
     "field": 0.95,
     "agency": 0.92,
     "sensor": 0.88,
+    # A person's report that reached us over the offline mesh. The words and
+    # the GPS fix are theirs; the device cannot be looked up and the packet
+    # passed through strangers' phones. Signed packets only — unsigned ones are
+    # scored as "mesh_unsigned".
+    "mesh": 0.66,
+    "mesh_unsigned": 0.45,
     "phone": 0.70,
     "app": 0.62,
     "sim": 0.62,

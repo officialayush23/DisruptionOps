@@ -74,6 +74,28 @@ Rows in `cities`, then its own wards, lifelines, resources, agencies and policy
 clauses carrying that `city_id`. No code changes. `GET /api/v1/taxonomy?cityId=`
 is what the frontend reads so it does not hard-code any of it.
 
+## New modules (26 Sep 2026)
+
+| Path | What |
+|---|---|
+| `app/agents/commander.py` | Incident Commander: event-woken LLM tool loop, ≤6 steps, ends in a gated proposal or `no_action` |
+| `app/copilot/memory.py` | Conversation and long-term memory in Supabase (migration 020) |
+| `app/ops/operations.py`, `app/api/v1/ops.py` | Live operations, cancel with "instead", standing orders the planner obeys (migration 021) |
+| `app/mesh/`, `app/api/v1/mesh.py` | IDX1 packets, mesh inbound/outbound, `/ingest/sensor` (migration 022) |
+| `app/demo/scenarios.py` | Eight scripted, self-checking scenarios |
+| `scripts/mesh_bridge.py` | Laptop bridge between a bitchat phone and the API; `sim` mode needs no phone |
+| `tests/` | `python -m unittest discover -s tests -v` (stubs the network-facing packages if missing) |
+
+New endpoints: `GET /ops`, `POST /ops/preview`, `POST /ops/cancel`,
+`POST /ops/overrides/{id}/lift`, `GET|POST /copilot/memory`,
+`DELETE /copilot/memory/{id}`, `GET /copilot/commander`,
+`POST /copilot/commander/wake`, `POST /mesh/inbound`, `GET /mesh/outbox`,
+`POST /mesh/outbox/ack`, `POST /ingest/sensor`, `GET /mesh/status`,
+`GET /demo/scenarios`, `POST /demo/scenarios/{name}/run`,
+`GET /demo/scenarios/last`. `/copilot/ask` accepts `sessionId`.
+
+Full record: [`../docs/CHANGELOG_2026-09-26.md`](../docs/CHANGELOG_2026-09-26.md).
+
 ## Where the LLM is, and is not
 
 The model reasons and explains. It does not produce numbers. Risk scores come

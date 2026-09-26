@@ -1,5 +1,8 @@
-import { useMemo } from "react"
-import { Inbox, Siren, Truck } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { Ban, Inbox, Pin, Siren, Truck } from "lucide-react"
+import { request } from "@/api/httpClient"
+import { Button } from "@/components/ui/button"
+import { CancelDialog } from "@/components/ops/CancelDialog"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -65,8 +68,52 @@ function Progress({ value }: { value: number }) {
   )
 }
 
+type Override = {
+  id: string; kind: "pin" | "hold" | "forbid"; resource_id: string; unit: string
+  incident: string | null; reason: string; createdBy: string; expiresAt: string | null
+  text: string
+}
+type Op = { resourceId: string; reroutes: number; why: string; setBy: string }
+
+/** Live operations from `/ops`: the standing orders the planner is obeying,
+ *  and per-unit re-route counts. Polled more slowly than the world, because
+ *  these change when a person acts, not every tick. */
+function useOps() {
+  const [overrides, setOverrides] = useState<Override[]>([])
+  const [ops, setOps] = useState<Map<string, Op>>(new Map())
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    let live = true
+    const load = () =>
+      request<{ overrides: Override[]; operations: Op[] }>("/ops", { toast: false })
+        .then((r) => {
+          if (!live) return
+          setOverrides(r.overrides ?? [])
+          setOps(new Map((r.operations ?? []).map((o) => [o.resourceId, o] as const)))
+        })
+        .catch(() => { /* the table below still works from the poll */ })
+    void load()
+    const id = setInterval(load, 4000)
+    return () => { live = false; clearInterval(id) }
+  }, [tick])
+  return { overrides, ops, refresh: () => setTick((t) => t + 1) }
+}
+
 export default function Dispatch() {
   const { state, selected, setSelected } = useDemo()
+  const { overrides, ops, refresh } = useOps()
+  const [cancelFor, setCancelFor] = useState<{ id: string; label: string } | null>(null)
+  const pinned = useMemo(
+    () => new Set(overrides.filter((o) => o.kind === "pin").map((o) => o.resource_id)),
+    [overrides]
+  )
+
+  async function lift(id: string) {
+    await request(`/ops/overrides/${id}/lift`, {
+      method: "POST", toast: { loading: "Lifting…", success: "Lifted. The planner may use the unit again." },
+    }).catch(() => undefined)
+    refresh()
+  }
 
   const wardName = useMemo(
     () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
@@ -238,6 +285,7 @@ export default function Dispatch() {
                   <TableHead>Journey done</TableHead>
                   <TableHead>Attached by</TableHead>
                   <TableHead className="min-w-[20rem]">Why this unit</TableHead>
+                  <TableHead>Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -256,6 +304,16 @@ export default function Dispatch() {
                       <span className="text-muted-foreground ml-1.5 text-xs font-normal">
                         {pretty(unit.kind)}
                       </span>
+                      {pinned.has(unit.id) && (
+                        <Badge variant="outline" className="ml-1.5 gap-1 font-normal" title="An officer pinned this unit; the planner may not move it">
+                          <Pin className="size-3" /> pinned
+                        </Badge>
+                      )}
+                      {(ops.get(unit.id)?.reroutes ?? 0) > 0 && (
+                        <Badge variant="secondary" className="ml-1.5 font-normal" title="Re-routed round a reported road block on this job">
+                          re-routed ×{ops.get(unit.id)?.reroutes}
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell className="max-w-[16rem]">
                       <div className="flex items-center gap-1.5">
@@ -330,12 +388,18 @@ export default function Dispatch() {
                         </span>
                       )}
                     </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
+                              onClick={() => setCancelFor({ id: unit.id, label: unit.label })}>
+                        <Ban className="size-3" /> Cancel…
+                      </Button>
+                    </TableCell>
                   </TableRow>
                   )
                 })}
                 {assigned.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={10} className="text-muted-foreground text-xs">
+                    <TableCell colSpan={11} className="text-muted-foreground text-xs">
                       Nothing committed. Either nothing is open, or the planner
                       has not run since it opened.
                     </TableCell>
@@ -346,6 +410,61 @@ export default function Dispatch() {
           </div>
         </CardContent>
       </Card>
+
+      {/* ------------------------------------------------ standing orders -- */}
+      {overrides.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Pin className="size-4" /> Standing orders the planner is obeying
+            </CardTitle>
+            <CardDescription>
+              Set by a person when they cancelled, redirected or held a unit. Every
+              re-plan reads these first. They lapse on their own; lift one early if
+              the reason has gone.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Order</TableHead>
+                  <TableHead>Why</TableHead>
+                  <TableHead>By</TableHead>
+                  <TableHead>Lapses</TableHead>
+                  <TableHead />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {overrides.map((o) => (
+                  <TableRow key={o.id}>
+                    <TableCell className="text-sm">{o.text}</TableCell>
+                    <TableCell className="text-muted-foreground max-w-[24rem] text-xs">{o.reason}</TableCell>
+                    <TableCell className="text-xs">{o.createdBy}</TableCell>
+                    <TableCell className="text-xs tabular-nums">
+                      {o.expiresAt ? time(o.expiresAt) : "—"}
+                    </TableCell>
+                    <TableCell>
+                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => void lift(o.id)}>
+                        Lift
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <CancelDialog
+        open={cancelFor !== null}
+        onOpenChange={(o) => { if (!o) { setCancelFor(null); refresh() } }}
+        resourceId={cancelFor?.id ?? null}
+        unitLabel={cancelFor?.label ?? ""}
+        incidents={state.incidents}
+        wards={state.wards}
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
         {/* --------------------------------------------------------- left -- */}

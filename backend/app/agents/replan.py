@@ -34,7 +34,8 @@ from typing import Any, Sequence
 from app.core.logging import get_logger
 from app.db import session as db
 from app.solver import routing
-from app.solver.allocation import Demand, Unit, allocate
+from app.solver.allocation import MAX_ETA_MINUTES, Demand, Unit, allocate
+from app.taxonomy import cache as taxonomy
 from app.world import events as ev
 from app.world.clock import WALL, Clock
 
@@ -42,6 +43,121 @@ log = get_logger(__name__)
 
 #: Statuses that mean a unit is committed but has not finished.
 ACTIVE = ("proposed", "approved", "en_route", "on_site")
+#: An assignment younger than this is treated as at least half-way done when
+#: pricing a switch. Without it a unit tasked on one re-plan was nearly free to
+#: re-task on the next, six seconds later, and the map showed trucks turning
+#: round in the street for no reason anyone could see.
+MIN_DWELL_SECONDS = 60
+DWELL_PROGRESS_FLOOR = 0.5
+
+
+def map_commitments(
+    units: Sequence[Unit],
+    current_raw: dict[str, str],
+    demands: Sequence[Demand],
+    progress: dict[str, float],
+) -> dict[str, str]:
+    """Which demand each committed unit is already serving.
+
+    The first version mapped every unit on an incident to that incident's
+    *first* demand id. Two faults, both of which made plans thrash:
+
+      * capability-blind: a pump on a flooded road that also needs an ambulance
+        was "committed" to the ambulance demand, which it cannot serve, so
+        staying put was priced as a switch and the solver happily moved it;
+      * shared: two units on one incident were both mapped to the same demand,
+        only one could keep it, and the other paid a switching cost for
+        staying exactly where it was.
+
+    Now each committed unit gets its own demand of a capability it can provide,
+    most-progressed unit first, so the unit nearest to finishing keeps its job.
+    """
+    by_incident: dict[str, list[Demand]] = {}
+    for d in demands:
+        if d.incident_id:
+            by_incident.setdefault(d.incident_id, []).append(d)
+    kinds = {u.id: u.kind for u in units}
+    taken: set[str] = set()
+    out: dict[str, str] = {}
+    for unit_id in sorted(current_raw, key=lambda u: -progress.get(u, 0.0)):
+        options = by_incident.get(current_raw[unit_id]) or []
+        kind = kinds.get(unit_id, "")
+        for d in options:
+            if d.id in taken:
+                continue
+            if taxonomy.kind_can(kind, d.capability):
+                out[unit_id] = d.id
+                taken.add(d.id)
+                break
+    return out
+
+
+async def load_overrides(conn: Any, city_id: str) -> dict[str, Any]:
+    """Standing instructions from a person that the planner must respect.
+
+    `pin`    — keep this unit on its current job; the planner may not move it.
+    `hold`   — this unit is out of the plan (resting, reserved, broken down).
+    `forbid` — this unit must not be sent to this incident (it was cancelled
+               there, and the officer said why).
+
+    Read defensively: if migration 021 has not been applied the table does not
+    exist and the planner behaves exactly as it did before, rather than failing.
+    """
+    empty = {"pin": set(), "hold": set(), "forbid": set()}
+    try:
+        rows = await conn.fetch(
+            """
+            select kind, resource_id, incident_id::text incident_id
+              from operator_overrides
+             where city_id = $1 and active
+               and (expires_at is null or expires_at > now())
+            """,
+            city_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - absent table must not stop planning
+        log.info("overrides_unavailable", error=type(exc).__name__)
+        return empty
+    for r in rows:
+        if r["kind"] == "forbid" and r["incident_id"]:
+            empty["forbid"].add((r["resource_id"], r["incident_id"]))
+        elif r["kind"] in ("pin", "hold"):
+            empty[r["kind"]].add(r["resource_id"])
+    return empty
+
+
+_TASK_CANCEL_SUPPORTED: bool | None = None
+
+
+async def close_tasks(conn: Any, assignment_id: str | None, why: str) -> None:
+    """Take a stood-down job off the crew's phone.
+
+    Re-tasking and releasing used to close the assignment and leave its field
+    task open, so the crew app kept showing a job the plan had taken away and a
+    crew could drive to it. Uses `cancelled` when migration 021 added it to
+    `task_status`, `complete` with the reason otherwise.
+    """
+    global _TASK_CANCEL_SUPPORTED
+    if not assignment_id:
+        return
+    if _TASK_CANCEL_SUPPORTED is None:
+        _TASK_CANCEL_SUPPORTED = bool(await conn.fetchval(
+            """
+            select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+             where t.typname = 'task_status' and e.enumlabel = 'cancelled'
+            """
+        ))
+    status = "cancelled" if _TASK_CANCEL_SUPPORTED else "complete"
+    await conn.execute(
+        f"""
+        update field_tasks
+           set status = '{status}',
+               proof_note = coalesce(proof_note, $2),
+               completed_at = coalesce(completed_at, now())
+         where assignment_id = $1::uuid
+           and status::text not in ('complete', 'cancelled')
+        """,
+        assignment_id, why[:400],
+    )
 
 
 @dataclass(slots=True)
@@ -153,6 +269,8 @@ async def _fleet(
                a.incident_id::text as incident_id,
                a.eta_minutes,
                a.created_at,
+               a.progress,
+               a.status::text      as assignment_status,
                -- The road this unit is already driving. Needed to answer the
                -- question nothing was asking: is the path we gave it still
                -- passable?
@@ -193,13 +311,23 @@ async def _fleet(
             "incident_title": r["incident_title"] or "",
             "label": r["label"],
             "operator": r["operator"],
+            "progress": float(r["progress"] or 0.0),
+            "assignment_status": r["assignment_status"],
         }
         if r["incident_id"]:
             # Any demand of this incident counts as "where it is already going".
             current[r["id"]] = r["incident_id"]
             eta = max(1, int(r["eta_minutes"] or 1))
-            elapsed = (now - r["created_at"]).total_seconds() / 60.0
-            progress[r["id"]] = max(0.0, min(1.0, elapsed / eta))
+            age_s = (now - r["created_at"]).total_seconds()
+            # The distance actually driven, when the unit has a road to drive;
+            # elapsed time over ETA only when it does not.
+            if r["route"] and r["progress"] is not None:
+                done = float(r["progress"])
+            else:
+                done = age_s / 60.0 / eta
+            if age_s < MIN_DWELL_SECONDS:
+                done = max(done, DWELL_PROGRESS_FLOOR)
+            progress[r["id"]] = max(0.0, min(1.0, done))
     return units, current, progress, context
 
 
@@ -252,18 +380,26 @@ async def replan(
         if not demands:
             return PlanDiff(plan_id=None, engine="none", runtime_ms=0, coverage=1.0)
 
-        # `current` maps unit -> demand id. A unit committed to an incident is
-        # treated as committed to any demand of that incident, so staying on the
-        # same job is free even when the specific demand row was rebuilt.
-        by_incident: dict[str, list[str]] = {}
-        for d in demands:
-            if d.incident_id:
-                by_incident.setdefault(d.incident_id, []).append(d.id)
-        current: dict[str, str] = {}
-        for unit_id, incident_id in current_raw.items():
-            ids = by_incident.get(incident_id)
-            if ids:
-                current[unit_id] = ids[0]
+        # `current` maps unit -> the one demand it is already serving.
+        current = map_commitments(units, current_raw, demands, progress)
+
+        # Locked units: on scene and working, or pinned by a person. They keep
+        # their job and the demand they serve leaves the problem, so no solve
+        # can move a crew that is already pumping out a basement, and no
+        # re-plan can quietly undo what an officer ordered.
+        overrides = await load_overrides(conn, city_id)
+        locked = {
+            uid for uid, ctx in context.items()
+            if current_raw.get(uid) and (
+                ctx.get("assignment_status") == "on_site" or uid in overrides["pin"]
+            )
+        }
+        held = overrides["hold"] - set(current_raw)
+        served_by_locked = {current[uid] for uid in locked if uid in current}
+        total_demands = len(demands)
+        demands = [d for d in demands if d.id not in served_by_locked]
+        units = [u for u in units if u.id not in locked and u.id not in held]
+        current = {u: d for u, d in current.items() if u not in locked}
 
         # Every hazard the city currently believes in, as a point a route should
         # not pass through. Fed to both the matrix (so a blocked pairing costs
@@ -275,6 +411,14 @@ async def replan(
         matrix = await routing.travel_matrix(
             [u.location for u in units], [d.location for d in demands], blocked
         )
+        # A unit an officer took off an incident must not be sent straight back
+        # to it by the next solve. Pricing the pair out of reach does that
+        # without a second code path in the solver.
+        if overrides["forbid"]:
+            for i, u in enumerate(units):
+                for j, d in enumerate(demands):
+                    if (u.id, d.incident_id) in overrides["forbid"]:
+                        matrix.durations[i][j] = MAX_ETA_MINUTES + 1
         result = allocate(demands, units, matrix, current=current, progress=progress)
         runtime = int((time.perf_counter() - started) * 1000)
 
@@ -300,9 +444,14 @@ async def replan(
         )
         plan_id = plan["id"]
 
+        # Coverage over every demand, counting the ones locked units already
+        # serve; the solver only saw the rest.
+        coverage = (
+            (total_demands - len(result.unmet)) / total_demands if total_demands else 1.0
+        )
         diff = PlanDiff(
             plan_id=plan_id, engine=result.engine, runtime_ms=runtime,
-            coverage=round(result.coverage, 4),
+            coverage=round(coverage, 4),
             uncovered=[
                 {"ward_id": u.demand.ward_id, "incident_id": u.demand.incident_id,
                  "capability": u.demand.capability, "reason": u.reason}
@@ -323,6 +472,20 @@ async def replan(
 
         for unit_id, ctx in context.items():
             was = current_raw.get(unit_id)
+            if unit_id in locked:
+                diff.kept.append(Change(
+                    kind="kept", resource_id=unit_id, resource_label=ctx["label"],
+                    incident_id=was, incident_title=ctx["incident_title"],
+                    ward_id="",
+                    reason=(
+                        "Pinned here by an officer; the planner may not move it."
+                        if unit_id in overrides["pin"]
+                        else "On scene and working; not moved mid-job."
+                    ),
+                ))
+                continue
+            if unit_id in held and not was:
+                continue
             now_alloc = new_by_unit.get(unit_id)
             to = now_alloc.demand.incident_id if now_alloc else None
 
@@ -374,9 +537,11 @@ async def replan(
                 )
                 diff.reassigned.append(change)
                 await conn.execute(
-                    "update assignments set status = 'complete' where id = $1::uuid",
+                    "update assignments set status = 'cancelled' where id = $1::uuid",
                     ctx["assignment_id"],
                 )
+                await close_tasks(conn, ctx["assignment_id"],
+                                  f"Re-tasked by the planner: {change.reason}")
                 await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked)
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CHANGED, actor=actor,
@@ -419,9 +584,11 @@ async def replan(
                     reason="No longer needed there, and nothing else is closer to it.",
                 ))
                 await conn.execute(
-                    "update assignments set status = 'complete' where id = $1::uuid",
+                    "update assignments set status = 'cancelled' where id = $1::uuid",
                     ctx["assignment_id"],
                 )
+                await close_tasks(conn, ctx["assignment_id"],
+                                  "Stood down by the planner: no longer needed there.")
                 await conn.execute(
                     "update resources set status = 'available', updated_at = $2 where id = $1",
                     unit_id, now,
@@ -512,9 +679,10 @@ async def _reroute_if_blocked(
         # plan.
         return None
 
-    exposure = routing.exposure(
-        [[float(c[0]), float(c[1])] for c in path], blocked
-    )
+    # Only the road still ahead counts. A block the unit has already driven past
+    # is not a reason to hand it a new route.
+    ahead = routing.remaining_path(path, float(ctx.get("progress") or 0.0))
+    exposure = routing.exposure(ahead, blocked)
     if not exposure:
         return None
 
@@ -526,6 +694,11 @@ async def _reroute_if_blocked(
     )
     if geometry is None:
         return None
+    # Swap only for a strictly better road. When every way in is exposed the
+    # old code swapped one exposed road for another on every pass, which is the
+    # flicker people saw on the map.
+    if line.passes_near_blocks >= exposure:
+        return None
 
     await conn.execute(
         """
@@ -535,7 +708,10 @@ async def _reroute_if_blocked(
                route_engine = $3,
                eta_minutes = $4,
                distance_km = $5,
-               steps = $6
+               steps = $6,
+               -- The new road starts where the unit is now. Keeping the old
+               -- progress made the unit jump that fraction along the new line.
+               progress = 0
          where id = $1::uuid
         """,
         ctx["assignment_id"],
@@ -561,6 +737,8 @@ async def _reroute_if_blocked(
                 f"{line.minutes} min now."
             ),
             "blocked_points": exposure,
+            "still_exposed": line.passes_near_blocks,
+            "avoidance": line.avoidance,
             "eta_minutes": line.minutes,
             "engine": line.engine,
         },

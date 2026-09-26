@@ -11,7 +11,9 @@ from app.api.v1 import (
     copilot,
     demo,
     geography,
+    mesh,
     operations,
+    ops,
     personas,
     replay,
     reports,
@@ -39,3 +41,5 @@ api_router.include_router(citizen.router)
 api_router.include_router(config.router)
 api_router.include_router(copilot.router)
 api_router.include_router(replay.router)
+api_router.include_router(ops.router)
+api_router.include_router(mesh.router)

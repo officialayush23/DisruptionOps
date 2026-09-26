@@ -93,9 +93,9 @@ async def detect(
                extensions.ST_Distance(i1.location, i2.location) as metres,
                abs(extract(epoch from (i1.created_at - i2.created_at)))/60.0 as minutes,
                (select count(*) from assignments x
-                 where x.incident_id = i1.id and x.status <> 'complete')::int as a_units,
+                 where x.incident_id = i1.id and x.status::text not in ('complete','cancelled'))::int as a_units,
                (select count(*) from assignments x
-                 where x.incident_id = i2.id and x.status <> 'complete')::int as b_units
+                 where x.incident_id = i2.id and x.status::text not in ('complete','cancelled'))::int as b_units
           from incidents i1
           join incidents i2
             on i1.id < i2.id

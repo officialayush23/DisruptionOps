@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     #: accepted and simply not looked at, which is a fine state to ship in.
     vlm_url: str = ""
     vlm_api_key: str = ""
+
+    #: Offline mesh (bitchat). `mesh_hmac_key` signs and verifies IDX1 packets:
+    #: the camera node, the citizen PWA's mesh mode and this API share it. Empty
+    #: means packets are accepted unsigned and scored as such (never auto-
+    #: dispatch on their own). `mesh_gateway_key` is what a gateway phone or the
+    #: bridge script sends as `X-Mesh-Gateway-Key`; empty disables the mesh
+    #: endpoints entirely rather than leaving them open.
+    mesh_hmac_key: str = ""
+    mesh_gateway_key: str = ""
     vlm_model: str = ""
     #: 120s, not 25. A 3B answers a 1024 px image in about six seconds, but the
     #: first call after the model server starts spends up to a minute reading

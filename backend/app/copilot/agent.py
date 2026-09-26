@@ -48,7 +48,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agents import llm
-from app.copilot import execute, strategies as strat, tools
+from app.copilot import execute, memory, strategies as strat, tools
+from app.ops import operations as ops
 from app.core.logging import get_logger
 from app.db import session as db
 from app import taxonomy
@@ -61,6 +62,7 @@ INTENTS = (
     "situation", "rank", "explain", "incident", "resources", "facilities",
     "forecast", "decisions", "alerts", "reports", "timeline", "agencies",
     "policy", "simulate", "surge", "strategies", "apply", "help",
+    "operations", "cancel", "remember", "forget", "memory",
 )
 
 ROUTER_SYSTEM = """You route a question from a city disaster commissioner to one
@@ -86,6 +88,23 @@ Guidance:
 - "what if <ward> gets N more <need>"              -> surge, args {ward, capability, count}
 - "options", "strategies", "what should we do"     -> strategies
 - "apply/do/execute <strategy>"                    -> apply, args {strategy}
+- "what is everyone doing", "operations", "who is on what", "status of <unit>"
+                                                   -> operations, args {unit}
+- "cancel/stop/call off/stand down/recall <unit>", optionally "and send it to
+  <incident> / hold it / stage it in <ward> / send it back to base instead"
+                                                   -> cancel, args {unit, target,
+     instead: replan|redirect|stage|hold|return_to_base, instead_target, ward,
+     minutes, reason}
+- "remember that ...", "note that ...", "from now on ..."
+                                                   -> remember, args {text, scope:
+     standing_order|fact|lesson|preference}
+- "forget ...", "drop the instruction about ..."    -> forget, args {text}
+- "what do you remember", "standing orders"         -> memory
+
+CONVERSATION and MEMORY may follow the question. Use them to resolve "it",
+"that one", "the second one", "same for Baner": put the real name from the
+conversation into args. Never copy a number out of memory into args unless the
+person said it.
 
 Put names in args exactly as the person wrote them. Do not invent ids.""" % (
     ", ".join(INTENTS)
@@ -102,6 +121,9 @@ Rules, in order of importance:
 3. Lead with the thing that needs a decision. If nothing does, say so plainly.
 4. No greetings, no "I hope this helps", no offers to assist further.
 5. If the data is thin or the evidence weak, say that rather than smoothing it.
+6. MEMORY lines are what people said earlier, in words. You may mention a
+   standing order that bears on the answer ("the Commissioner asked that Boat 2
+   stay in Kothrud"). Never take a number from MEMORY; numbers come from DATA.
 """
 
 
@@ -114,12 +136,16 @@ class Answer:
     engine: str = "fallback"
     suggestions: list[str] = field(default_factory=list)
     note: str | None = None
+    #: What was recalled from long-term memory for this answer, shown so an
+    #: officer can see what the Copilot was reminded of.
+    memory: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "text": self.text, "blocks": self.blocks, "intent": self.intent,
             "toolsUsed": self.tools_used, "engine": self.engine,
             "suggestions": self.suggestions, "note": self.note,
+            "memory": self.memory,
         }
 
 
@@ -172,14 +198,14 @@ def _match(text: str | None, table: dict[str, str]) -> str | None:
 
 
 # ------------------------------------------------------------------ router ---
-async def _route(question: str, names: Names) -> tuple[str, dict]:
+async def _route(question: str, names: Names, context: str = "") -> tuple[str, dict]:
     """Model first, rules second. The rules are not a stub — they carry the
     feature on a venue wifi with no model reachable."""
     fallback_intent, fallback_args = _rule_route(question, names)
 
     completion = await llm.complete(
         ROUTER_SYSTEM,
-        f"Question: {question}",
+        f"Question: {question}" + (f"\n\n{context}" if context else ""),
         fallback=json.dumps({"intent": fallback_intent, "args": fallback_args}),
     )
     try:
@@ -196,6 +222,13 @@ async def _route(question: str, names: Names) -> tuple[str, dict]:
 
 
 _RULES: list[tuple[str, str]] = [
+    (r"\bwhat do you remember\b|\bstanding orders?\b|\byour memory\b", "memory"),
+    (r"\b(forget|drop the instruction|withdraw the order)\b", "forget"),
+    (r"\b(remember|note that|from now on|keep in mind)\b", "remember"),
+    (r"\b(cancel|call off|abort|stand down|recall|pull (back|off))\b|\bstop\b.*\b(unit|ambulance|boat|pump|team|truck|tender|it|them)\b",
+     "cancel"),
+    (r"\bwho is (on|doing) what\b|\bwhat is (everyone|every unit|each unit) doing\b|"
+     r"\boperations?\b|\bin progress\b|\bactive jobs?\b|\bongoing\b", "operations"),
     (r"\bwhat if\b.*\b(more|another|extra|additional)\b", "surge"),
     (r"\bwhat if\b|\bsimulate\b|\bif we (move|send|pull|redirect)\b", "simulate"),
     (r"\bapply\b|\bexecute\b|\bdo strategy\b|\bgo with\b", "apply"),
@@ -245,7 +278,55 @@ def _rule_route(question: str, names: Names) -> tuple[str, dict]:
     count = re.search(r"\b(\d{1,4})\b", q)
     if count:
         args["count"] = int(count.group(1))
+    if intent == "cancel":
+        args.update(_parse_instead(q, names))
+    if intent in ("remember", "forget"):
+        args["text"] = re.sub(
+            r"^\s*(please\s+)?(remember|note that|from now on|keep in mind|forget|"
+            r"drop the instruction about|withdraw the order about)\s*(that\s*)?[:,]?\s*",
+            "", question, flags=re.I,
+        ).strip()
+        args["scope"] = (
+            "standing_order"
+            if re.search(r"\b(keep|hold|do not|don't|never|always|until|only)\b", q)
+            else "fact"
+        )
     return intent, args
+
+
+def _parse_instead(q: str, names: Names) -> dict:
+    """What to do instead, from the words after the cancel.
+
+    "cancel Pump 3 and send it to the Baner flooding"  -> redirect
+    "stop Ambulance 4, hold it for 20 minutes"         -> hold
+    "call off Boat 2 and stage it in Kothrud"          -> stage
+    "recall Tender 1 to base"                          -> return_to_base
+    otherwise                                          -> replan
+    """
+    out: dict[str, Any] = {}
+    tail = re.split(r"\binstead\b|\band\b|,|;|\bthen\b", q, maxsplit=1)
+    after = tail[1] if len(tail) > 1 else q
+    if re.search(r"\b(back to base|to base|return(ing)? (it )?(to )?(base|home)|go home)\b", q):
+        out["instead"] = "return_to_base"
+    elif re.search(r"\b(stage|park|position|pre-?position|wait in|stand by in)\b", after):
+        out["instead"] = "stage"
+    elif re.search(r"\b(hold|stand by|keep it|rest|reserve)\b", after):
+        out["instead"] = "hold"
+    elif re.search(r"\b(send|redirect|move|divert|go to|take it to)\b", after):
+        hits = [n for n in names.incidents if n and n in after]
+        if hits:
+            out["instead"] = "redirect"
+            out["instead_target"] = max(hits, key=len)
+    minutes = re.search(r"\b(\d{1,3})\s*(min|minutes|mins)\b", q)
+    if minutes:
+        out["minutes"] = int(minutes.group(1))
+    hours = re.search(r"\b(\d{1,2})\s*(h|hr|hrs|hours?)\b", q)
+    if hours and not minutes:
+        out["minutes"] = int(hours.group(1)) * 60
+    because = re.search(r"\b(because|as|since|reason:?)\s+(.{3,200})$", q)
+    if because:
+        out["reason"] = because.group(2).strip()
+    return out
 
 
 # ---------------------------------------------------------------- handlers ---
@@ -683,6 +764,226 @@ async def _help(args: dict, names: Names, city_id: str) -> tuple[list[dict], lis
     }], []
 
 
+async def _operations(args: dict, names: Names, city_id: str) -> tuple[list[dict], list[str]]:
+    data = await ops.active(city_id)
+    unit = _match(args.get("unit"), names.resources)
+    rows = data["operations"]
+    if unit:
+        rows = [r for r in rows if r["resourceId"] == unit] or rows
+    table_rows = [
+        {
+            "resource_id": r["resourceId"], "incident_id": r["incidentId"],
+            "unit": r["unit"], "doing": r["doing"], "severity": r["severity"],
+            "ward": r["ward"], "status": r["status"].replace("_", " "),
+            "done": f"{int(r['progress'] * 100)}%", "left": f"{r['minutesLeft']} min",
+            "reroutes": r["reroutes"], "set_by": r["setBy"] or "planner",
+            "why": (r["why"] or "")[:140],
+            "orders": "; ".join(o["text"] for o in r["instructions"]) or "—",
+        }
+        for r in rows
+    ]
+    blocks: list[dict] = [
+        {"type": "stats", "title": "Operations", "stats": [
+            {"label": "Units on a job", "value": data["count"]},
+            {"label": "On scene", "value": sum(1 for r in rows if r["status"] == "on_site")},
+            {"label": "Re-routed round a block",
+             "value": sum(1 for r in rows if r["reroutes"])},
+            {"label": "Standing orders", "value": len(data["overrides"]),
+             "tone": "warn" if data["overrides"] else "ok"},
+        ]},
+        _table(
+            "Who is doing what",
+            [("unit", "Unit"), ("doing", "Doing"), ("severity", "Sev"),
+             ("ward", "Ward"), ("status", "Status"), ("done", "Done"),
+             ("left", "Left"), ("reroutes", "Re-routed"), ("set_by", "Set by"),
+             ("why", "Why"), ("orders", "Standing orders")],
+            table_rows,
+            "Say \"cancel <unit>\" and what it should do instead — send it "
+            "elsewhere, hold it, stage it in a ward, or send it home.",
+        ),
+    ]
+    if data["overrides"]:
+        blocks.append(_table(
+            "Standing orders the planner is obeying",
+            [("text", "Order"), ("reason", "Why"), ("createdBy", "By"),
+             ("expiresAt", "Lapses")],
+            data["overrides"],
+            "These expire on their own. Lift one early from the dispatch screen.",
+        ))
+    return blocks, ["get_operations"]
+
+
+async def _cancel(args: dict, names: Names, city_id: str) -> tuple[list[dict], list[str]]:
+    unit = _match(args.get("unit") or args.get("resource"), names.resources)
+    if unit is None and args.get("_refs"):
+        ids = args["_refs"].get("resource_ids") or []
+        unit = ids[0] if ids else None
+    if unit is None:
+        target = _match(args.get("target") or args.get("incident"), names.incidents)
+        if target:
+            live = [o for o in (await ops.active(city_id))["operations"]
+                    if o["incidentId"] == target]
+            if len(live) == 1:
+                unit = live[0]["resourceId"]
+    if unit is None:
+        blocks, used = await _operations({}, names, city_id)
+        blocks.insert(0, {"type": "text", "body":
+            "Which unit? Name it as it appears below and say what it should do "
+            "instead, for example \"cancel Pump 3 and hold it for 20 minutes\"."})
+        return blocks, used
+
+    kind = str(args.get("instead") or "replan").lower().replace(" ", "_")
+    if kind not in ops.INSTEAD:
+        kind = "replan"
+    instead: dict[str, Any] = {"kind": kind}
+    if args.get("minutes"):
+        instead["minutes"] = int(args["minutes"])
+    if kind == "redirect":
+        dest = _match(args.get("instead_target") or args.get("target"), names.incidents)
+        if dest is None:
+            kind, instead = "replan", {"kind": "replan"}
+        else:
+            instead["incident_id"] = dest
+            instead["incident_title"] = next(
+                (k for k, v in names.incidents.items() if v == dest), dest).title()
+    if kind == "stage":
+        ward = _match(args.get("ward") or args.get("instead_target"), names.wards)
+        if ward is None:
+            kind, instead = "hold", {"kind": "hold", "minutes": instead.get("minutes") or 30}
+        else:
+            instead["ward_id"] = ward
+            instead["ward_name"] = next(
+                (k for k, v in names.wards.items() if v == ward), ward).title()
+
+    try:
+        pv = await ops.preview(unit, instead, city_id)
+    except ops.CannotCancel as exc:
+        return [{"type": "text", "body": str(exc)}], ["get_operations"]
+
+    reason = str(args.get("reason") or "Cancelled from the Copilot.")
+    label = pv["unit"]
+    cur = pv["current"]
+
+    def option(title: str, inst: dict, note: str = "") -> dict:
+        return {
+            "type": "actions", "title": title,
+            "actions": [{
+                "actionKey": "cancel_assignment",
+                "action": f"Cancel {label} on \"{cur['doing']}\". "
+                          f"{ops.describe_instead(inst, {'incident': inst.get('incident_title'), 'ward': inst.get('ward_name')})}",
+                "target": label, "severity": int(cur.get("severity") or 3),
+                "rationale": reason, "confidence": 0.9,
+                "params": {"resource_id": unit, "incident_id": cur.get("incidentId"),
+                           "reason": reason, "instead": inst},
+            }],
+            "note": note,
+        }
+
+    blocks: list[dict] = [
+        {"type": "evidence", "title": f"{label}, right now", "items": [
+            {"label": "Doing", "value": cur["doing"] or "—"},
+            {"label": "Status", "value": cur["status"].replace("_", " ")},
+            {"label": "Severity", "value": cur.get("severity") or "—"},
+            {"label": "If cancelled", "value": pv["insteadText"]},
+        ], "note": "Cancelling writes a standing order so the next re-plan does "
+                   "not send it straight back, and takes the job off the crew's phone."},
+        {"type": "comparison",
+         "title": ("With this unit redirected" if kind == "redirect"
+                   else "With this unit taken off the job"),
+         "rows": pv["comparison"]["rows"], "wards": pv["comparison"]["wards"],
+         "note": pv["comparison"].get("note") or
+                 "Re-solved on a copy of the live plan. Nothing has changed yet.",
+         "engine": pv["comparison"].get("engine")},
+        option("What you asked for", instead,
+               "Put to the policy gate as cancel_assignment. Nothing has happened yet."),
+    ]
+    # Say what to do instead, from rows rather than prose.
+    for alt in pv["alternatives"][:2]:
+        if kind == "redirect" and alt["incidentId"] == instead.get("incident_id"):
+            continue
+        blocks.append(option(
+            f"Or send it to {alt['title']} (sev {alt['severity']}, {alt['km']} km, "
+            f"short {alt['short']} {alt['capability'].replace('_', ' ')})",
+            {"kind": "redirect", "incident_id": alt["incidentId"],
+             "incident_title": alt["title"]},
+        ))
+    if kind != "hold":
+        blocks.append(option("Or hold it where it is for 30 minutes",
+                             {"kind": "hold", "minutes": 30}))
+    return blocks, ["get_operations", "simulate_withdrawal"]
+
+
+async def _remember(args: dict, names: Names, city_id: str) -> tuple[list[dict], list[str]]:
+    text = str(args.get("text") or "").strip()
+    scope = args.get("scope") if args.get("scope") in memory.SCOPES else "fact"
+    if len(text) < 3:
+        return [{"type": "text", "body": "Tell me what to remember, in a sentence."}], []
+    ward = _match(text, names.wards)
+    unit = _match(text, names.resources)
+    mid = await memory.remember(
+        scope=scope, content=text, created_by=args.get("_actor") or "officer",
+        city_id=city_id, ward_id=ward,
+        subject_type="resource" if unit else None, subject_id=unit,
+        importance=5 if scope == "standing_order" else 3,
+        data={"resource_id": unit, "ward_id": ward},
+    )
+    if mid is None:
+        return [{"type": "text", "body":
+                 "Memory is unavailable right now, so I could not keep that. "
+                 "Nothing else is affected."}], ["remember"]
+    blocks: list[dict] = [{"type": "evidence", "title": "Remembered", "items": [
+        {"label": "Kind", "value": scope.replace("_", " ")},
+        {"label": "What", "value": text},
+        {"label": "Ward", "value": ward or "—"},
+        {"label": "Unit", "value": unit or "—"},
+    ], "note": "Kept in words. I will bring it up when it bears on a question; "
+               "it never replaces a number the planner computes."}]
+    # A standing order about a unit only binds the planner once the gate agrees.
+    if scope == "standing_order" and unit and re.search(
+            r"\b(keep|hold|reserve|do not move|don't move)\b", text.lower()):
+        blocks.append({
+            "type": "actions", "title": "Make the planner obey it",
+            "actions": [{
+                "actionKey": "cancel_assignment" if await _has_job(unit) else "hold_unit",
+                "action": f"Hold {unit} out of the plan: {text}",
+                "target": unit, "severity": 3, "rationale": text, "confidence": 0.9,
+                "params": {"resource_id": unit, "reason": text,
+                           "instead": {"kind": "hold", "minutes": 240}},
+            }],
+            "note": "Remembering it is words. This makes it binding, through the gate.",
+        })
+    return blocks, ["remember"]
+
+
+async def _has_job(resource_id: str) -> bool:
+    return bool(await db.fetchval(
+        "select 1 from assignments where resource_id = $1 and sim_run_id is null "
+        "and status::text in ('proposed','approved','en_route','on_site') limit 1",
+        resource_id,
+    ))
+
+
+async def _forget(args: dict, names: Names, city_id: str) -> tuple[list[dict], list[str]]:
+    n = await memory.forget(text=str(args.get("text") or ""),
+                            actor=args.get("_actor") or "officer", city_id=city_id)
+    return [{"type": "text", "body":
+             f"Withdrew {n} memor{'y' if n == 1 else 'ies'}. They stay in the "
+             "record as withdrawn, with your name." if n else
+             "Nothing I remember matches that."}], ["forget"]
+
+
+async def _memory(args: dict, names: Names, city_id: str) -> tuple[list[dict], list[str]]:
+    rows = await memory.list_memory(city_id=city_id)
+    return [_table(
+        "What I remember",
+        [("scope", "Kind"), ("content", "What"), ("by", "Said by"),
+         ("at", "When"), ("expires", "Lapses")],
+        rows,
+        "Say \"forget ...\" to withdraw one. Standing orders the planner "
+        "enforces are on the dispatch screen.",
+    )], ["list_memory"]
+
+
 _HANDLERS = {
     "situation": _situation, "rank": _rank, "explain": _explain,
     "incident": _incident, "resources": _resources, "facilities": _facilities,
@@ -690,6 +991,8 @@ _HANDLERS = {
     "reports": _reports, "timeline": _timeline, "agencies": _agencies,
     "policy": _policy, "simulate": _simulate, "surge": _surge,
     "strategies": _strategies, "apply": _apply, "help": _help,
+    "operations": _operations, "cancel": _cancel, "remember": _remember,
+    "forget": _forget, "memory": _memory,
 }
 
 SUGGESTIONS = {
@@ -701,6 +1004,10 @@ SUGGESTIONS = {
     "simulate": ["Apply it", "What else would that slow down?"],
     "forecast": ["Should we preposition?", "Which facility fills first?"],
     "decisions": ["Why did that one need me?", "Who holds that delegation?"],
+    "operations": ["Cancel the first one and let the planner cover it",
+                   "Which units were re-routed round a block?"],
+    "cancel": ["Put it to the gate", "What is everyone doing now?"],
+    "remember": ["What do you remember?", "What is everyone doing?"],
 }
 
 
@@ -731,11 +1038,13 @@ def _shrink(blocks: list[dict], limit: int = 2400) -> str:
     return text[:limit]
 
 
-async def _narrate(question: str, intent: str, blocks: list[dict]) -> tuple[str, str]:
+async def _narrate(question: str, intent: str, blocks: list[dict],
+                  context: str = "") -> tuple[str, str]:
     fallback = _fallback_text(intent, blocks)
     completion = await llm.complete(
         NARRATOR_SYSTEM,
-        f"QUESTION: {question}\n\nINTENT: {intent}\n\nDATA: {_shrink(blocks)}",
+        f"QUESTION: {question}\n\nINTENT: {intent}\n\nDATA: {_shrink(blocks)}"
+        + (f"\n\n{context}" if context else ""),
         fallback=fallback,
     )
     return completion.text.strip(), completion.engine
@@ -779,14 +1088,39 @@ def _fallback_text(intent: str, blocks: list[dict]) -> str:
 
 
 # --------------------------------------------------------------------- ask ---
-async def ask(question: str, *, city_id: str = "pune") -> Answer:
-    """One question in, one rendered answer out."""
+_PRONOUN = re.compile(r"\b(it|that one|this one|that unit|them|the same|same one)\b", re.I)
+
+
+async def ask(question: str, *, city_id: str = "pune", session_id: str | None = None,
+              actor: str = "officer") -> Answer:
+    """One question in, one rendered answer out.
+
+    With a `session_id` the conversation so far and relevant long-term memory
+    are read first and given to the router, so follow-ups resolve; the turn and
+    the ids it was about are written after. Without one, it behaves exactly as
+    it always did.
+    """
     question = (question or "").strip()
     if not question:
         return Answer(text="Ask me anything about what is happening.", intent="help")
 
     names = await _names(city_id)
-    intent, args = await _route(question, names)
+    turns = await memory.recent_turns(session_id)
+    recalled = await memory.recall(question, city_id=city_id)
+    context = memory.context_for_prompt(turns, recalled)
+    intent, args = await _route(question, names, context)
+    args["_actor"] = actor
+    # "cancel it", "apply that": point at what the last answer was about.
+    last_refs = next((t["refs"] for t in reversed(turns)
+                      if t["role"] == "assistant" and t.get("refs")), {})
+    if last_refs and _PRONOUN.search(question):
+        args["_refs"] = last_refs
+        if intent == "apply" and not args.get("strategy") and last_refs.get("strategy_ids"):
+            m = re.search(r"\b(first|second|third|1st|2nd|3rd|one|two|three)\b", question.lower())
+            idx = {"first": 0, "1st": 0, "one": 0, "second": 1, "2nd": 1, "two": 1,
+                   "third": 2, "3rd": 2, "three": 2}.get(m.group(1), 0) if m else 0
+            ids = last_refs["strategy_ids"]
+            args["strategy"] = ids[min(idx, len(ids) - 1)]
     handler = _HANDLERS.get(intent, _situation)
 
     try:
@@ -799,11 +1133,25 @@ async def ask(question: str, *, city_id: str = "pune") -> Answer:
             intent=intent, note=str(exc)[:200],
         )
 
-    text, engine = await _narrate(question, intent, blocks)
-    return Answer(
+    text, engine = await _narrate(question, intent, blocks, context)
+    public_args = {k: v for k, v in args.items() if not k.startswith("_")}
+    await memory.record_turn(session_id, "user", question, actor=actor,
+                             city_id=city_id, intent=intent, args=public_args)
+    await memory.record_turn(session_id, "assistant", text, actor="agent:copilot",
+                             city_id=city_id, intent=intent,
+                             refs=memory.refs_from_blocks(blocks))
+    note = None
+    if session_id and not memory.available():
+        note = "memory: unavailable"
+    answer = Answer(
         text=text, blocks=blocks, intent=intent, tools_used=used, engine=engine,
-        suggestions=SUGGESTIONS.get(intent, SUGGESTIONS["situation"]),
+        suggestions=SUGGESTIONS.get(intent, SUGGESTIONS["situation"]), note=note,
     )
+    answer.memory = [
+        {"scope": m["scope"], "content": m["content"], "by": m["by"]}
+        for m in recalled[:4]
+    ]
+    return answer
 
 
 # ------------------------------------------------------------------- apply ---

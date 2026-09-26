@@ -10,6 +10,15 @@ rather than only existing in one hosted database.
 | `002_convert_taxonomy_enums_to_fks.sql` | converts the taxonomy enum columns to text foreign keys and drops the old enums |
 | `003_cities_agencies_events_simruns.sql` | city scoping, agencies, simulation runs, the append-only event log, RLS |
 
+Later migrations, all applied to the same project:
+
+| File | What it does |
+|---|---|
+| `004`–`019` | indexes, streets and routes, relief logistics, copilot params and delegations, reporter outcomes, tenancy, shelters, removal of the unused mesh column, RLS hardening, reporter key, photo evidence, return to service, fire category, keywords as data |
+| `020_agent_memory.sql` | `copilot_turns`, `agent_memory`, `recall_memory()`; optional `embedding vector(768)` (applied 26 Sep 2026) |
+| `021_operations_and_overrides.sql` | `cancelled` added to `task_status` **and** `assignment_status` (the latter was already being written by the executor), `operator_overrides`, cancel/hold/pin under clause pol-2 (applied 26 Sep 2026) |
+| `022_mesh_transport.sql` | `mesh_messages`, `mesh_outbox`, `mesh_nodes`, `mesh_state` (applied 26 Sep 2026) |
+
 Run 001 to 003 in order against a fresh database. They are written to be safe to
 re-run: every create is `if not exists` and every seed is `on conflict do nothing`.
 002 is the exception, since dropping a type is not idempotent; it is written to

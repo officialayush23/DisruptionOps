@@ -483,6 +483,18 @@ async def _gate_for_incident(
     ) if incident_id else None
     severity = int(severity or 3)
 
+    # A serious incident wakes the Incident Commander, which decides for itself
+    # what to look at (debounced per ward; no model, no episode).
+    if severity >= 4 and incident_id:
+        from app.agents import commander
+
+        commander.nudge(
+            "incident.opened",
+            f"Severity {severity} {category.replace('_', ' ')} in {ward['name']}, "
+            f"trust {trust:.0%}",
+            key=f"ward:{ward['id']}", incidentId=incident_id, wardId=ward["id"],
+        )
+
     for action_key, action in ACTION_FOR.get(category, []):
         key = (action_key, ward["id"])
         if key in state.gated:
@@ -609,6 +621,12 @@ async def _move_units() -> None:
     fact; a vehicle that turns around is an argument.
     """
     # 1. Anyone close enough is on scene.
+    #
+    # "Close enough" is either within ARRIVAL_METRES of the incident or at the
+    # end of the road it was given. The router snaps a destination to the
+    # nearest street, which can be more than ARRIVAL_METRES from an incident
+    # dropped inside a block, and before this such a unit drove to the end of
+    # its route and sat there en route for ever.
     arrived = await db.fetch(
         """
         with near as (
@@ -618,7 +636,8 @@ async def _move_units() -> None:
             join incidents i on i.id = a.incident_id
            where a.status in ('proposed','approved','en_route')
              and a.sim_run_id is null
-             and extensions.ST_Distance(r.location, i.location) <= $1
+             and (extensions.ST_Distance(r.location, i.location) <= $1
+                  or (a.route is not null and a.progress >= 0.999))
         ),
         upd_a as (
           update assignments set status = 'on_site'
@@ -640,6 +659,38 @@ async def _move_units() -> None:
             f"{r['label']} is on scene at {r['title']}.",
             resourceId=r["rid"],
         )
+
+    # A staged unit (prepositioned, or sent to stand by after a cancellation)
+    # has no incident, so the join above never saw it arrive. At the end of its
+    # road it is staged: the assignment is done and the unit is available from
+    # where it now stands, which is the whole point of staging it.
+    staged = await db.fetch(
+        """
+        with done as (
+          update assignments a set status = 'complete'
+           where a.incident_id is null
+             and a.status in ('proposed','approved','en_route')
+             and a.sim_run_id is null
+             and (a.route is null or a.progress >= 0.999)
+          returning a.id, a.resource_id, a.purpose
+        ),
+        freed as (
+          update resources r set status = 'available', updated_at = now()
+            from done where r.id = done.resource_id
+          returning r.id, r.label
+        )
+        select freed.id rid, freed.label, done.purpose, done.id::text aid
+          from freed join done on done.resource_id = freed.id
+        """
+    )
+    for r in staged:
+        await db.execute(
+            "update field_tasks set status = 'on_site' where assignment_id = $1::uuid "
+            "and status::text in ('queued','accepted')",
+            r["aid"],
+        )
+        state.beat("arrive", f"{r['label']} is staged: {r['purpose']}.",
+                   resourceId=r["rid"])
 
     # 2. Everyone else advances along the road they were given.
     #
@@ -1327,20 +1378,34 @@ async def _report_road_block() -> None:
     `field_reports` for the crew's statement, `road_blocks` for the geometry
     everything routes around.
     """
+    # The block goes on the road a moving unit is about to drive: half-way
+    # between where it is and where it is going, and at least 300 m from the
+    # incident. The old version dropped it within ~170 m of the incident, which
+    # is inside the incident's own clearance zone, so no route could ever go
+    # round it and the re-planner redrew the same exposed road on every pass.
     row = await db.fetchrow(
         """
-        select i.id::text incident_id, i.ward_id, i.title,
-               extensions.ST_X(i.location::extensions.geometry) lng,
-               extensions.ST_Y(i.location::extensions.geometry) lat,
-               r.id resource_id, r.label, r.operator
-          from incidents i
-          join assignments a on a.incident_id = i.id
-                            and a.status in ('en_route','on_site')
-          join resources r on r.id = a.resource_id
-         where i.city_id = $1 and i.status <> 'resolved'
+        with cand as (
+          select i.id::text incident_id, i.ward_id, i.title, i.location ilocation,
+                 r.id resource_id, r.label, r.operator,
+                 extensions.ST_LineInterpolatePoint(
+                   a.route, least(0.9, a.progress + (1 - a.progress) * 0.5)
+                 )::extensions.geography p
+            from assignments a
+            join incidents i on i.id = a.incident_id
+            join resources r on r.id = a.resource_id
+           where i.city_id = $1 and i.status <> 'resolved'
+             and a.status = 'en_route' and a.sim_run_id is null
+             and a.route is not null and a.progress < 0.5
+        )
+        select incident_id, ward_id, title, resource_id, label, operator,
+               extensions.ST_X(p::extensions.geometry) lng,
+               extensions.ST_Y(p::extensions.geometry) lat
+          from cand
+         where extensions.ST_Distance(p, ilocation) > 300
            and not exists (
              select 1 from road_blocks b
-              where extensions.ST_DWithin(b.location, i.location, 300)
+              where b.active and extensions.ST_DWithin(b.location, cand.p, 300)
            )
          order by random()
          limit 1
@@ -1351,11 +1416,7 @@ async def _report_road_block() -> None:
         return
 
     reason = BLOCK_REASONS[_rng.randrange(len(BLOCK_REASONS))]
-    # Offset a little so the block sits on the approach rather than exactly on
-    # the incident: a road closed *at* the job is a different situation from a
-    # road closed on the way to it, and this is the second one.
-    lng = float(row["lng"]) + _rng.uniform(-0.0016, 0.0016)
-    lat = float(row["lat"]) + _rng.uniform(-0.0016, 0.0016)
+    lng, lat = float(row["lng"]), float(row["lat"])
 
     try:
         async with db.transaction() as conn:
@@ -1402,6 +1463,14 @@ async def _report_road_block() -> None:
         "It is out of the graph now, for crews and for residents.",
         wardId=row["ward_id"], incidentId=row["incident_id"],
         resourceId=row["resource_id"],
+    )
+    from app.agents import commander
+
+    commander.nudge(
+        "road.blocked",
+        f"{row['label']} reports its road to {row['title']} closed: {reason}",
+        key=f"block:{row['incident_id']}", resourceId=row["resource_id"],
+        incidentId=row["incident_id"],
     )
     # A street leaving the network is exactly the kind of change the re-planner
     # exists for, and residents being routed down it need a new line drawn.
@@ -1555,6 +1624,11 @@ async def force_replan() -> None:
 #: are configuration; `wards`, `lifelines` and `resources`, which are the city
 #: and are restored in place below rather than deleted.
 _RESET_ORDER = (
+    # Standing orders name incidents and units of this run; a fresh run starts
+    # with none. The outbox is this run's broadcasts. (Memory, `agent_memory`,
+    # is deliberately kept: lessons are supposed to outlive a run.)
+    "operator_overrides",
+    "mesh_outbox",
     "report_links",
     "agent_steps",
     "alerts",

@@ -56,6 +56,26 @@ report → understand → score the zone → check authority → solve → dispa
 Everything writes to an append-only event log carrying the id of the event that
 caused it.
 
+### New on 26 Sep 2026
+
+- **Incident Commander**: an agent woken by severe incidents, camera alerts and
+  blocked crews. It chooses its own read and simulate calls (at most 6), then
+  proposes one action to the policy gate or says why nothing is needed. Shown
+  step by step in the Copilot. [`docs/AGENTIC_ARCHITECTURE.md`](docs/AGENTIC_ARCHITECTURE.md)
+- **Operations control**: cancel any unit's job and say what it should do
+  instead (let the planner cover it, redirect, stage, hold, return to base),
+  from the dispatch screen or by asking the Copilot. The planner obeys these
+  standing orders on every solve. [`docs/OPERATIONS_AND_MEMORY.md`](docs/OPERATIONS_AND_MEMORY.md)
+- **Copilot memory in Supabase**: conversation (so "cancel it" works) and
+  long-term standing orders, facts, lessons and episodes. Words, never numbers.
+- **Stable re-routing**: seven causes of re-route flicker and job thrash fixed,
+  Mapbox point exclusion and OSRM detours round closures. [`docs/CHANGELOG_2026-09-26.md`](docs/CHANGELOG_2026-09-26.md)
+- **Two-way offline mesh**: when there is no signal, reports (with GPS) and
+  camera detections travel phone to phone over bitchat, and alerts, dispatches
+  and road closures come back the same way. [`docs/OFFLINE_MESH.md`](docs/OFFLINE_MESH.md)
+- **Scenario library**: eight scripted cases that run the real pipeline and
+  check the outcome (`POST /api/v1/demo/scenarios/{name}/run`).
+
 ---
 
 ## The two design rules everything else follows
@@ -290,7 +310,9 @@ npm run dev
 | `SARVAM_API_KEY` | no | speech to text |
 | `VLM_URL` | no | vision service — **the bare root is fine**, the client finds the path |
 | `VLM_MODEL` | no | exact model id, e.g. `Qwen/Qwen2.5-VL-7B-Instruct` |
-| `GEMINI_API_KEY` | no | prose only |
+| `GEMINI_API_KEY` | no | prose, the Copilot router and the Incident Commander. Without it the Commander does not run; everything else does |
+| `MESH_GATEWAY_KEY` | no | enables `/mesh/*` and `/ingest/sensor` for gateway phones, the bridge script and camera nodes. Unset = those endpoints answer 403 |
+| `MESH_HMAC_KEY` | no | signs and verifies IDX1 mesh packets (camera node, bridge). Unsigned packets are accepted and scored lower |
 
 Frontend: `VITE_API_URL` must include the `/api/v1` suffix.
 
@@ -370,16 +392,20 @@ numbers on the After-Action screen rather than left in a README.
 ```
 backend/
   app/
-    agents/        orchestrator · forecast · prepositioning · gate · replan · policy
+    agents/        orchestrator · forecast · prepositioning · gate · replan · policy · commander
     api/v1/        personas (citizen & field) · demo (console) · reports · config · copilot · runs
-    copilot/       19 tools in three tiers — read, analyse, act
+    copilot/       22 tools in three tiers — read, analyse, act · memory (Supabase)
+    ops/           operations: cancel, do-instead, standing orders
+    mesh/          IDX1 envelope · inbound/outbound mesh service
     core/          config · security · caching · rate limiting · errors · logging
     db/            asyncpg pool, transactions, query repository
     hazards/       per-hazard adapters — flood, heat, fire, air, seismic
     incidents/     intake · parsing · trust · clustering · duplicates · vision · speech
     solver/        CP-SAT allocation · routing
     world/         clock (wall and simulated) · append-only events
-  migrations/      numbered SQL, applied in order
+  migrations/      numbered SQL, applied in order (001–022)
+  scripts/         mesh_bridge.py (phone↔API bridge and simulator) · benchmarks
+  tests/           unit tests: python -m unittest discover -s tests
 frontend/indradhanu/
   src/routes/      citizen · field · admin console · demo
   src/components/  map (Mapbox GL) · copilot · ui (shadcn)
@@ -407,7 +433,12 @@ docs/              architecture spec · pitch brief · VLM setup · deck
 Kept honest and current in [`docs/`](docs/):
 
 - Ward boundary drawing in the configuration UI still submits `boundary: null`.
-- No automated tests on the intake path.
+- No automated tests on the intake path. Routing geometry, the mesh envelope,
+  commitment mapping, Copilot cancel parsing and the Commander's guards have
+  unit tests (`backend/tests`); the scenario library checks behaviour against a
+  live database.
+- The bitchat gateway (Kotlin) and the Incident Commander have not yet been run
+  end to end; see the changelog for what was and was not verified.
 - `/api/v1/health` is not implemented; Render health-checks another route.
 - 19 of 420 reports have never clustered into an incident — expected behaviour,
   but the reason has not been reviewed case by case.

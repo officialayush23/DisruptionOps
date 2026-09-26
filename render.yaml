@@ -131,6 +131,15 @@ services:
       - key: VLM_API_KEY
         sync: false
 
+      # ---- offline mesh ------------------------------------------------
+      # Gateway phones / the bridge script / camera nodes send the first as
+      # X-Mesh-Gateway-Key; unset disables the mesh endpoints. The second
+      # signs IDX1 packets. See docs/OFFLINE_MESH.md.
+      - key: MESH_GATEWAY_KEY
+        sync: false
+      - key: MESH_HMAC_KEY
+        sync: false
+
       # ---- upstream feeds ----------------------------------------------
       - key: OPEN_METEO_FORECAST_URL
         value: https://api.open-meteo.com/v1/forecast

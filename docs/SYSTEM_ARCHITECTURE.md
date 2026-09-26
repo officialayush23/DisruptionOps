@@ -1,5 +1,11 @@
 # DisruptionOps — System Architecture (to draw)
 
+> Updated 26 Sep 2026: the agents, tools, Incident Commander, memory, operations
+> control and the two-way offline mesh are described in
+> [`AGENTIC_ARCHITECTURE.md`](AGENTIC_ARCHITECTURE.md) and
+> [`OFFLINE_MESH.md`](OFFLINE_MESH.md). The bands below are still correct; add a
+> mesh gateway box to intake and an Incident Commander box beside the decide band.
+
 PS20: *multi-agent disaster-response coordination — ingest reports from affected
 zones, model resource availability and needs, allocate and re-allocate as
 conditions change, coordinate across agencies.*

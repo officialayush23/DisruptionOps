@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import Field
 
-from app.copilot import agent, execute, simulate, strategies as strat, tools
+from app.copilot import agent, execute, memory, simulate, strategies as strat, tools
 from app.core.errors import BadRequest, NotFound
 from app.core.logging import get_logger
 from app.core.security import StaffPrincipal
@@ -37,6 +37,17 @@ router = APIRouter(tags=["copilot"])
 class AskIn(Camel):
     question: str = Field(min_length=1, max_length=800)
     city_id: str = "pune"
+    #: One per browser tab. Lets "cancel it" and "apply the second one" resolve
+    #: against what was just discussed. Optional: without it, no memory is used.
+    session_id: str | None = Field(default=None, max_length=80)
+
+
+class RememberIn(Camel):
+    content: str = Field(min_length=3, max_length=2000)
+    scope: str = "fact"
+    ward_id: str | None = None
+    city_id: str = "pune"
+    importance: int = Field(default=3, ge=1, le=5)
 
 
 class SimulateIn(Camel):
@@ -59,10 +70,72 @@ class ApplyIn(Camel):
 
 
 @router.post("/copilot/ask")
-async def copilot_ask(body: AskIn, _: StaffPrincipal) -> dict:
+async def copilot_ask(body: AskIn, principal: StaffPrincipal) -> dict:
     """Ask anything. The answer is blocks, not prose with numbers in it."""
-    answer = await agent.ask(body.question, city_id=body.city_id)
+    answer = await agent.ask(
+        body.question, city_id=body.city_id, session_id=body.session_id,
+        actor=principal.full_name or str(principal.role),
+    )
     return answer.as_dict()
+
+
+@router.get("/copilot/commander")
+async def commander_recent(_: StaffPrincipal) -> dict:
+    """The Incident Commander's recent episodes: trigger, each thought and
+    tool call with its result, and how it ended."""
+    from app.agents import commander
+
+    return {"episodes": [e.as_dict() for e in commander.RECENT],
+            "maxSteps": commander.MAX_STEPS}
+
+
+class WakeIn(Camel):
+    summary: str = Field(min_length=3, max_length=400)
+    city_id: str = "pune"
+
+
+@router.post("/copilot/commander/wake")
+async def commander_wake(body: WakeIn, principal: StaffPrincipal) -> dict:
+    """Wake the Commander by hand (for a demo, or to ask it to look again)."""
+    from app.agents import commander
+
+    ep = await commander.run(
+        {"kind": "officer.request", "summary": body.summary,
+         "by": principal.full_name or str(principal.role)},
+        city_id=body.city_id,
+    )
+    return ep.as_dict()
+
+
+@router.get("/copilot/memory")
+async def copilot_memory(_: StaffPrincipal, city_id: str = "pune",
+                         scope: str | None = None) -> dict:
+    """What the Copilot remembers, standing orders first."""
+    return {"memory": await memory.list_memory(city_id=city_id, scope=scope),
+            "available": memory.available()}
+
+
+@router.post("/copilot/memory")
+async def copilot_remember(body: RememberIn, principal: StaffPrincipal) -> dict:
+    if body.scope not in memory.SCOPES:
+        raise BadRequest(f"scope must be one of {', '.join(memory.SCOPES)}")
+    mid = await memory.remember(
+        scope=body.scope, content=body.content, ward_id=body.ward_id,
+        created_by=principal.full_name or str(principal.role),
+        city_id=body.city_id, importance=body.importance, source="console",
+    )
+    if mid is None:
+        raise BadRequest("Memory is unavailable right now.")
+    return {"id": mid}
+
+
+@router.delete("/copilot/memory/{memory_id}")
+async def copilot_forget(memory_id: str, principal: StaffPrincipal) -> dict:
+    n = await memory.forget(memory_id=memory_id,
+                            actor=principal.full_name or str(principal.role))
+    if not n:
+        raise NotFound("Nothing active with that id.")
+    return {"withdrawn": n}
 
 
 @router.get("/copilot/tools")

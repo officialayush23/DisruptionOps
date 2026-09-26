@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
 
-from app.agents.replan import _blocked_points, _fleet, _open_demands
+from app.agents.replan import _blocked_points, _fleet, _open_demands, map_commitments
 from app.core.logging import get_logger
 from app.db import session as db
 from app.solver import routing
@@ -62,6 +62,13 @@ class Inputs:
     ward_points: dict[str, tuple[float, float]]
     incidents: dict[str, dict]
     now: datetime
+    #: unit id -> demand id it is serving, in the solver's terms. `current` is
+    #: unit -> incident, which is what a crew experiences and what `_switches`
+    #: counts; the solver needs the demand-level one, exactly as the live
+    #: planner builds it. Passing the incident-level map to the solver priced
+    #: every committed unit as switching, so the "Now" column of every
+    #: comparison was a different plan from the one actually running.
+    commit: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -120,6 +127,7 @@ async def inputs(city_id: str = "pune") -> Inputs:
         demands=demands, units=units, current=current, progress=progress,
         context=context, blocked=blocked, wards=wards, ward_points=ward_points,
         incidents=incidents, now=now,
+        commit=map_commitments(units, current, demands, progress),
     )
 
 
@@ -192,7 +200,7 @@ def _switches(after: Scenario, current: dict[str, str]) -> int:
 async def baseline(world: Inputs, label: str = "Now") -> Scenario:
     scenario = await _solve(
         label, world.demands, world.units, world.blocked,
-        current=world.current, progress=world.progress,
+        current=world.commit, progress=world.progress,
     )
     scenario.switches = 0
     return scenario
@@ -278,7 +286,7 @@ async def compare(
     # A pinned unit is no longer available to keep its old commitment, so it must
     # not appear in `current` either — otherwise the solver is told to preserve
     # something it cannot.
-    current = {u: d for u, d in world.current.items() if u not in forced}
+    current = {u: d for u, d in world.commit.items() if u not in forced}
     progress = {u: p for u, p in world.progress.items() if u not in forced}
 
     proposed = await _solve(

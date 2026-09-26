@@ -531,6 +531,37 @@ async def propose_action(action_key: str, action: str, target: str,
 
 
 # ------------------------------------------------------------------ runner ---
+@tool("get_operations", "read",
+      "Every unit on a job: what it is doing, how far along, who set it, why, "
+      "how often it was re-routed round a block, and any standing order on it.",
+      city_id="City")
+async def get_operations(city_id: str = "pune") -> dict:
+    from app.ops import operations as ops
+
+    return await ops.active(city_id)
+
+
+@tool("preview_cancel", "analyse",
+      "What taking a unit off its job would do: re-solves the plan without it "
+      "(or with it redirected) and lists what it could usefully do instead.",
+      resource_id="Unit", instead="replan | redirect | stage | hold | return_to_base")
+async def preview_cancel(resource_id: str, instead: dict | None = None,
+                         city_id: str = "pune") -> dict:
+    from app.ops import operations as ops
+
+    return await ops.preview(resource_id, instead or {"kind": "replan"}, city_id)
+
+
+@tool("recall_memory", "read",
+      "Standing orders, facts, lessons and past episodes relevant to a question. "
+      "Words only; never a source of numbers.",
+      query="What to recall")
+async def recall_memory(query: str, city_id: str = "pune") -> list[dict]:
+    from app.copilot import memory
+
+    return await memory.recall(query, city_id=city_id)
+
+
 async def call(name: str, **kwargs: Any) -> Any:
     """Invoke one tool by name, dropping arguments it does not take.
 

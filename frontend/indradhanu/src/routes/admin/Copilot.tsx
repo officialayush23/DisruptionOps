@@ -5,6 +5,7 @@ import {
 import { request } from "@/api/httpClient"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { BlockView, type Block } from "@/components/copilot/blocks"
+import { CommanderPanel } from "@/components/copilot/CommanderPanel"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -40,6 +41,8 @@ type Answer = {
   engine: string
   suggestions: string[]
   note: string | null
+  /** What long-term memory the Copilot was reminded of for this answer. */
+  memory?: { scope: string; content: string; by: string }[]
 }
 
 type Turn = {
@@ -54,6 +57,7 @@ const OPENERS = [
   "Which wards need me first?",
   "Give me mitigation options for the next three hours.",
   "What is waiting for my approval?",
+  "Who is on what right now?",
   "What is the forecast for the next few hours?",
   "Who authorises an evacuation?",
 ]
@@ -81,6 +85,25 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
   const [showTools, setShowTools] = useState(false)
   const [tools, setTools] = useState<any[] | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
+  /** One conversation per browser tab, so "cancel it" and "apply the second
+   *  one" resolve against what was just said. The turns themselves are kept
+   *  server-side in Supabase (`copilot_turns`), not in the browser. */
+  const sessionId = useMemo(() => {
+    const fresh = () =>
+      (typeof crypto !== "undefined" && "randomUUID" in crypto)
+        ? crypto.randomUUID()
+        : `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      let v = sessionStorage.getItem("indradhanu.copilotSession")
+      if (!v) {
+        v = fresh()
+        sessionStorage.setItem("indradhanu.copilotSession", v)
+      }
+      return v
+    } catch {
+      return fresh()
+    }
+  }, [])
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" })
@@ -104,7 +127,7 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
     try {
       const answer = await request<Answer>("/copilot/ask", {
         method: "POST",
-        body: { question: q, cityId: "pune" },
+        body: { question: q, cityId: "pune", sessionId },
       })
       setTurns((t) => t.map((x) => (x.id === id ? { ...x, answer } : x)))
     } catch (e) {
@@ -194,6 +217,7 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
             )}
           </div>
         )}
+        <CommanderPanel />
       </aside>
       )}
 
@@ -243,6 +267,17 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
               {t.answer && (
                 <div className="space-y-3">
                   <p className="text-sm leading-relaxed">{t.answer.text}</p>
+                  {(t.answer.memory?.length ?? 0) > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {t.answer.memory!.map((m, i) => (
+                        <span key={i}
+                              className="rounded-md border border-dashed px-2 py-0.5 text-[11px] text-muted-foreground"
+                              title={`Remembered from ${m.by}. Words only; every number above is from a live tool call.`}>
+                          remembered · {m.scope.replace(/_/g, " ")}: {m.content.slice(0, 90)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {t.answer.blocks.map((b, i) => (
                     <BlockView key={i} block={b} onPropose={propose} />
                   ))}

@@ -37,7 +37,22 @@ EVENT_SPEED_KMH = 18.0
 #: Extra minutes added when a route passes near a blocked point.
 BLOCKED_DETOUR_MINUTES = 11.0
 #: A route within this distance of a blockage is treated as affected.
-BLOCK_RADIUS_KM = 0.35
+#:
+#: Was 0.35 km. At that radius a single block covered every parallel street in a
+#: dense ward, so no alternative the router offered could ever avoid it, every
+#: route stayed "exposed", and the re-planner redrew the same road on every
+#: pass. A closed road closes that road and its junctions; 150 m is that.
+BLOCK_RADIUS_KM = 0.15
+#: A block this close to either end of a trip is not something the trip can go
+#: round: it is at the job, or at the depot. It is still a hazard on the map;
+#: it just does not count against this route. Without this every unit sent to
+#: a flooded road was "routed through a block" — the block was the incident.
+ENDPOINT_CLEARANCE_KM = 0.25
+#: Mapbox Directions accepts at most 50 excluded points per request.
+MAX_EXCLUDE_POINTS = 50
+#: How far to the side of a block a detour waypoint is placed when the router
+#: cannot exclude points itself (OSRM).
+DETOUR_OFFSET_KM = 0.6
 #: Mapbox Matrix allows 25 coordinates per request on the standard profile.
 MATRIX_LIMIT = 25
 
@@ -48,6 +63,46 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     dlon, dlat = lon2 - lon1, lat2 - lat1
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+
+
+def _xy_km(p: tuple[float, float], ref_lat: float) -> tuple[float, float]:
+    """Equirectangular projection. Exact enough inside one city."""
+    k = math.pi / 180.0 * EARTH_RADIUS_KM
+    return (p[0] * k * math.cos(math.radians(ref_lat)), p[1] * k)
+
+
+def point_segment_km(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    """Shortest distance from a point to a segment, in km.
+
+    The old exposure test sampled every third vertex of a route, so a block
+    sitting between two sampled vertices on a long straight road was simply not
+    seen, and the same road could be "clear" on one pass and "blocked" on the
+    next depending on where the router put its vertices.
+    """
+    ref = (a[1] + b[1] + p[1]) / 3.0
+    px, py = _xy_km(p, ref)
+    ax, ay = _xy_km(a, ref)
+    bx, by = _xy_km(b, ref)
+    dx, dy = bx - ax, by - ay
+    seg = dx * dx + dy * dy
+    t = 0.0 if seg == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg))
+    cx, cy = ax + t * dx, ay + t * dy
+    return math.hypot(px - cx, py - cy)
+
+
+def relevant_blocks(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    blocked: Sequence[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """The blocks a trip from origin to destination could actually go round."""
+    return [
+        b for b in blocked
+        if haversine_km(b, origin) > ENDPOINT_CLEARANCE_KM
+        and haversine_km(b, destination) > ENDPOINT_CLEARANCE_KM
+    ]
 
 
 def _coords(pairs: Sequence[tuple[float, float]]) -> str:
@@ -90,12 +145,13 @@ def _segment_is_blocked(
     """
     if not blocked:
         return False
-    for t in (0.25, 0.5, 0.75):
-        point = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-        for block in blocked:
-            if haversine_km(point, block) <= BLOCK_RADIUS_KM:
-                return True
-    return False
+    # A straight segment is a proxy for the road here, so the corridor is
+    # wider than BLOCK_RADIUS_KM: the real road wanders either side of it.
+    corridor = BLOCK_RADIUS_KM * 2.5
+    return any(
+        point_segment_km(block, a, b) <= corridor
+        for block in relevant_blocks(a, b, blocked)
+    )
 
 
 def _fallback_matrix(
@@ -245,34 +301,89 @@ class RouteLine:
     steps: list[Step] = field(default_factory=list)
     #: How many alternatives were compared to pick this one.
     considered: int = 1
+    #: Blocked points the router was told to keep out of the path, or that a
+    #: detour waypoint was placed to go round.
+    avoided: int = 0
+    #: How the avoidance was done: "exclude" (Mapbox excluded the points),
+    #: "detour" (a via point to one side), "alternatives" (picked the least
+    #: exposed of the router's own alternatives) or "" when nothing was blocked.
+    avoidance: str = ""
 
     @property
     def is_real_road(self) -> bool:
         return self.engine in ("mapbox", "osrm")
 
 
-def _exposure(coords: list[list[float]], blocked: Sequence[tuple[float, float]]) -> int:
-    if not blocked:
+def _exposed_blocks(
+    coords: Sequence[Sequence[float]], blocked: Sequence[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """The distinct blocks a polyline passes within BLOCK_RADIUS_KM of."""
+    if not blocked or len(coords) < 2:
+        return []
+    pts = [(float(c[0]), float(c[1])) for c in coords]
+    hit: list[tuple[float, float]] = []
+    for b in blocked:
+        for a, c in zip(pts, pts[1:]):
+            if point_segment_km(b, a, c) <= BLOCK_RADIUS_KM:
+                hit.append(b)
+                break
+    return hit
+
+
+def _exposure(coords: Sequence[Sequence[float]], blocked: Sequence[tuple[float, float]]) -> int:
+    if len(coords) < 2:
         return 0
-    return sum(
-        1
-        for c in coords[::3]  # every third vertex is enough to judge a route
-        for b in blocked
-        if haversine_km((float(c[0]), float(c[1])), b) < BLOCK_RADIUS_KM
+    relevant = relevant_blocks(
+        (float(coords[0][0]), float(coords[0][1])),
+        (float(coords[-1][0]), float(coords[-1][1])),
+        blocked,
     )
+    return len(_exposed_blocks(coords, relevant))
 
 
 def exposure(
     coords: list[list[float]], blocked: Sequence[tuple[float, float]]
 ) -> int:
-    """How many blocked points a path still passes close to.
+    """How many distinct blocked points a path still passes close to.
 
     Public because the replanner asks it of a road a unit is *already* driving,
     not only of a candidate. Same question, same answer, one implementation —
     a second copy of this would be a second opinion about whether a street is
     passable.
+
+    Counts distinct blocks, not vertices near blocks. The old count grew with
+    how finely the router happened to draw the road, so the same street could
+    score 2 on one pass and 5 on the next and look like it had got worse.
     """
     return _exposure(coords, blocked)
+
+
+def remaining_path(
+    coords: Sequence[Sequence[float]], progress: float
+) -> list[list[float]]:
+    """The part of a stored route a unit has not driven yet.
+
+    A block behind a unit is not a reason to re-route it. Judging the whole
+    stored route did exactly that: a crew that had already passed a junction
+    got a new road every time somebody reported the junction closed.
+    """
+    pts = [[float(c[0]), float(c[1])] for c in coords]
+    if len(pts) < 2 or progress <= 0:
+        return pts
+    if progress >= 1:
+        return pts[-1:] * 2
+    lengths = [haversine_km(tuple(a), tuple(b)) for a, b in zip(pts, pts[1:])]
+    total = sum(lengths) or 1e-9
+    target = total * progress
+    run = 0.0
+    for i, seg in enumerate(lengths):
+        if run + seg >= target:
+            t = (target - run) / seg if seg else 0.0
+            a, b = pts[i], pts[i + 1]
+            cut = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+            return [cut] + pts[i + 1:]
+        run += seg
+    return pts[-1:] * 2
 
 
 def _mapbox_steps(route: dict) -> list[Step]:
@@ -353,44 +464,136 @@ def _pick(routes: list[dict], blocked: Sequence[tuple[float, float]]) -> tuple[d
     return scored[0][3], scored[0][0]
 
 
+def _exclude_param(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    relevant: Sequence[tuple[float, float]],
+) -> str:
+    """Mapbox `exclude=point(lon lat),...`, nearest the direct corridor first.
+
+    This is the fix for "rerouting is not stable". Picking the least exposed of
+    the two or three alternatives a router volunteers only works when one of
+    them happens to miss the block; in a dense grid none of them does, so the
+    least-bad one was chosen, stayed exposed, and was redrawn on every re-plan.
+    Excluding the point makes the router itself find a path that avoids it.
+    """
+    ranked = sorted(relevant, key=lambda b: point_segment_km(b, origin, destination))
+    return ",".join(f"point({b[0]:.5f} {b[1]:.5f})" for b in ranked[:MAX_EXCLUDE_POINTS])
+
+
+def _detour_waypoints(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    block: tuple[float, float],
+) -> list[tuple[float, float]]:
+    """Two points either side of a block, perpendicular to the trip."""
+    ref = (origin[1] + destination[1]) / 2.0
+    ox, oy = _xy_km(origin, ref)
+    dx, dy = _xy_km(destination, ref)
+    vx, vy = dx - ox, dy - oy
+    norm = math.hypot(vx, vy) or 1.0
+    nx, ny = -vy / norm, vx / norm
+    k = math.pi / 180.0 * EARTH_RADIUS_KM
+    out = []
+    for side in (1, -1):
+        east = nx * DETOUR_OFFSET_KM * side
+        north = ny * DETOUR_OFFSET_KM * side
+        out.append((
+            block[0] + east / (k * math.cos(math.radians(ref))),
+            block[1] + north / k,
+        ))
+    return out
+
+
+def _line_from(route: dict, engine: str, exposure_count: int, steps: list[Step],
+               considered: int, avoided: int, avoidance: str) -> RouteLine:
+    coords = (route.get("geometry") or {}).get("coordinates") or []
+    return RouteLine(
+        coordinates=[[float(c[0]), float(c[1])] for c in coords],
+        km=round(float(route.get("distance") or 0.0) / 1000.0, 2),
+        minutes=max(1, round(float(route.get("duration") or 0.0) / 60.0))
+        + (int(BLOCKED_DETOUR_MINUTES) if exposure_count else 0),
+        engine=engine,
+        passes_near_blocks=exposure_count,
+        steps=steps,
+        considered=considered,
+        avoided=avoided,
+        avoidance=avoidance if avoided else "",
+    )
+
+
+async def _mapbox_routes(o: str, d: str, exclude: str = "") -> list[dict]:
+    params = {
+        "access_token": settings.mapbox_token,
+        "geometries": "geojson",
+        "overview": "full",
+        "alternatives": "true",
+        "steps": "true",
+        "language": "en",
+    }
+    if exclude:
+        params["exclude"] = exclude
+    payload = _data(
+        await get_json(
+            f"{settings.mapbox_directions_url}/driving/{o};{d}",
+            params,
+            cache_key=f"mbx:route:{o}:{d}:{hash(exclude)}",
+        )
+    )
+    return (payload or {}).get("routes") or []
+
+
+async def _osrm_routes(coords: str) -> list[dict]:
+    payload = _data(
+        await get_json(
+            f"{settings.osrm_url}/route/v1/driving/{coords}",
+            {"overview": "full", "geometries": "geojson", "alternatives": "true",
+             # Without steps OSRM returns geometry and no instructions, and the
+             # citizen app has nothing to say after "here is a line".
+             "steps": "true"},
+            cache_key=f"osrm:route:{coords}",
+        )
+    )
+    return (payload or {}).get("routes") or []
+
+
 async def route_line(
     origin: tuple[float, float],
     destination: tuple[float, float],
     blocked: Sequence[tuple[float, float]] = (),
 ) -> RouteLine:
-    """Street geometry from A to B, chosen against the hazards people reported."""
+    """Street geometry from A to B, going round the hazards people reported.
+
+    Order of attempts, each only when the previous left the path exposed:
+
+      1. Mapbox with the blocks *excluded*, so the router itself avoids them.
+      2. Mapbox without exclusion (an excluded point can make a trip
+         impossible), least exposed of its alternatives.
+      3. OSRM, least exposed alternative; if still exposed, a via point placed
+         either side of the first block it crosses.
+      4. A straight line, labelled as one.
+
+    Blocks at either end of the trip are ignored for this trip only (see
+    `relevant_blocks`).
+    """
     o = f"{origin[0]:.5f},{origin[1]:.5f}"
     d = f"{destination[0]:.5f},{destination[1]:.5f}"
+    relevant = relevant_blocks(origin, destination, blocked)
 
     if settings.mapbox_token:
-        payload = _data(
-            await get_json(
-                f"{settings.mapbox_directions_url}/driving/{o};{d}",
-                {
-                    "access_token": settings.mapbox_token,
-                    "geometries": "geojson",
-                    "overview": "full",
-                    "alternatives": "true",
-                    "steps": "true",
-                    "language": "en",
-                },
-                cache_key=f"mbx:route:{o}:{d}",
-            )
-        )
-        routes = (payload or {}).get("routes") or []
+        if relevant:
+            routes = await _mapbox_routes(o, d, _exclude_param(origin, destination, relevant))
+            if routes:
+                best, exp = _pick(routes, blocked)
+                return _line_from(best, "mapbox", exp, _mapbox_steps(best),
+                                  len(routes), len(relevant), "exclude")
+            log.info("mapbox_exclude_no_route", origin=o, destination=d,
+                     excluded=len(relevant))
+        routes = await _mapbox_routes(o, d)
         if routes:
-            best, exposure = _pick(routes, blocked)
-            coords = (best.get("geometry") or {}).get("coordinates") or []
-            return RouteLine(
-                coordinates=[[float(c[0]), float(c[1])] for c in coords],
-                km=round(float(best.get("distance") or 0.0) / 1000.0, 2),
-                minutes=max(1, round(float(best.get("duration") or 0.0) / 60.0))
-                + (BLOCKED_DETOUR_MINUTES if exposure else 0),
-                engine="mapbox",
-                passes_near_blocks=exposure,
-                steps=_mapbox_steps(best),
-                considered=len(routes),
-            )
+            best, exp = _pick(routes, blocked)
+            return _line_from(best, "mapbox", exp, _mapbox_steps(best), len(routes),
+                              len(relevant) - exp if relevant else 0, "alternatives")
         # A token is set and Mapbox still gave us nothing. `get_json` never
         # raises, so this used to fall through to OSRM in complete silence and
         # the only visible symptom was directions that named no streets. A bad
@@ -399,31 +602,25 @@ async def route_line(
                     note="falling back to OSRM; check the token's scopes and "
                          "URL restrictions")
 
-    payload = _data(
-        await get_json(
-            f"{settings.osrm_url}/route/v1/driving/{o};{d}",
-            {"overview": "full", "geometries": "geojson", "alternatives": "true",
-             # Asked for now. Without it OSRM returns geometry and no
-             # instructions, and the citizen app has nothing to say after
-             # "here is a line".
-             "steps": "true"},
-            cache_key=f"osrm:route:{o}:{d}",
-        )
-    )
-    routes = (payload or {}).get("routes") or []
+    routes = await _osrm_routes(f"{o};{d}")
     if routes:
-        best, exposure = _pick(routes, blocked)
-        coords = (best.get("geometry") or {}).get("coordinates") or []
-        return RouteLine(
-            coordinates=[[float(c[0]), float(c[1])] for c in coords],
-            km=round(float(best.get("distance") or 0.0) / 1000.0, 2),
-            minutes=max(1, round(float(best.get("duration") or 0.0) / 60.0))
-            + (BLOCKED_DETOUR_MINUTES if exposure else 0),
-            engine="osrm",
-            passes_near_blocks=exposure,
-            steps=_osrm_steps(best),
-            considered=len(routes),
-        )
+        best, exp = _pick(routes, blocked)
+        considered = len(routes)
+        avoidance = "alternatives"
+        if exp and relevant:
+            coords = (best.get("geometry") or {}).get("coordinates") or []
+            first = _exposed_blocks(coords, relevant)
+            candidates = [best]
+            if first:
+                for via in _detour_waypoints(origin, destination, first[0]):
+                    v = f"{via[0]:.5f},{via[1]:.5f}"
+                    candidates.extend(await _osrm_routes(f"{o};{v};{d}"))
+            considered = len(routes) + len(candidates) - 1
+            chosen, chosen_exp = _pick(candidates, blocked)
+            if chosen_exp < exp:
+                best, exp, avoidance = chosen, chosen_exp, "detour"
+        return _line_from(best, "osrm", exp, _osrm_steps(best), considered,
+                          len(relevant) - exp if relevant else 0, avoidance)
 
     km = haversine_km(origin, destination)
     detour = BLOCKED_DETOUR_MINUTES if _segment_is_blocked(origin, destination, blocked) else 0.0

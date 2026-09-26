@@ -95,21 +95,31 @@ async def _reallocate_unit(conn: Any, params: dict, *, actor: str, caused_by: in
     if unit is None or incident is None:
         raise NotExecutable("That unit or incident is no longer in the world.")
 
+    # Round the same blocks the planner avoids. This passed an empty list, so a
+    # commissioner's move was the one route in the system that drove straight
+    # through a reported closure.
+    from app.agents.replan import _blocked_points, close_tasks
+
+    blocked = await _blocked_points(conn, "pune", None)
     line = await routing.route_line(
         (float(unit["lng"]), float(unit["lat"])),
         (float(incident["lng"]), float(incident["lat"])),
-        [],
+        blocked,
     )
 
-    # Whatever it was doing, it is not doing it any more.
-    await conn.execute(
+    # Whatever it was doing, it is not doing it any more — including on the
+    # crew's phone, which used to keep showing the old job.
+    old = await conn.fetch(
         """
         update assignments set status = 'cancelled'
          where resource_id = $1 and sim_run_id is null
-           and status in ('proposed','approved','en_route')
+           and status in ('proposed','approved','en_route','on_site')
+        returning id::text
         """,
         resource_id,
     )
+    for o in old:
+        await close_tasks(conn, o["id"], f"Re-tasked to {incident['title']} by an officer.")
     row = await conn.fetchrow(
         """
         insert into assignments
@@ -128,8 +138,31 @@ async def _reallocate_unit(conn: Any, params: dict, *, actor: str, caused_by: in
         _geometry(line), line.engine, _steps(line),
     )
     await conn.execute(
+        """
+        insert into field_tasks
+          (assignment_id, resource_id, operator, title, instruction, location,
+           ward_id, priority)
+        values ($1::uuid, $2, $3, $4, $5,
+                extensions.ST_SetSRID(extensions.ST_MakePoint($6,$7),4326)::extensions.geography,
+                $8, $9)
+        """,
+        row["id"], resource_id, unit["operator"], incident["title"],
+        f"{incident['title']}. Directed by the control room, {int(line.minutes)} "
+        "minutes out. Confirm on arrival and record what you found.",
+        float(incident["lng"]), float(incident["lat"]), incident["ward_id"],
+        int(incident["severity"] or 3),
+    )
+    await conn.execute(
         "update resources set status = 'en_route', updated_at = now() where id = $1",
         resource_id,
+    )
+    # Pin it, or the next re-plan prices this unit as free and undoes the order.
+    from app.ops.operations import PIN_MINUTES, _add_override
+
+    await _add_override(
+        conn, city_id="pune", kind="pin", resource_id=resource_id,
+        incident_id=incident_id, reason=params.get("reason") or "Directed by an officer.",
+        actor=actor, minutes=PIN_MINUTES,
     )
     await ev.append(
         clock=clocks.WALL, kind=ev.Kind.ASSIGNMENT_CHANGED, actor=actor,
@@ -143,7 +176,7 @@ async def _reallocate_unit(conn: Any, params: dict, *, actor: str, caused_by: in
     return {
         "assignmentId": row["id"], "resource": unit["label"],
         "incident": incident["title"], "etaMinutes": int(line.minutes),
-        "engine": line.engine,
+        "engine": line.engine, "avoided": line.avoided,
     }
 
 
@@ -298,8 +331,55 @@ async def _activate_shelter(conn: Any, params: dict, *, actor: str, caused_by: i
 #: against the first one and the note says what it really is.
 _ANY_WARD = "w-1"
 
+async def _cancel_assignment(conn: Any, params: dict, *, actor: str, caused_by: int | None) -> dict:
+    """Stop a unit's job and do what the officer said instead. See app.ops."""
+    from app.ops.operations import execute_cancel
+
+    return await execute_cancel(conn, params, actor=actor, caused_by=caused_by)
+
+
+async def _standing_order(kind: str, conn: Any, params: dict, *, actor: str,
+                          caused_by: int | None) -> dict:
+    """Hold a free unit out of the plan, or pin a committed one to its job."""
+    from app.ops.operations import HOLD_MINUTES, PIN_MINUTES, _add_override
+
+    resource_id = params.get("resource_id")
+    if not resource_id:
+        raise NotExecutable("A standing order needs a unit.")
+    instead = params.get("instead") or {}
+    minutes = int(params.get("minutes") or instead.get("minutes")
+                  or (HOLD_MINUTES if kind == "hold" else PIN_MINUTES))
+    oid = await _add_override(
+        conn, city_id="pune", kind=kind, resource_id=resource_id,
+        incident_id=params.get("incident_id"),
+        reason=params.get("reason") or f"{kind} set by an officer", actor=actor,
+        minutes=minutes,
+    )
+    if oid is None:
+        raise NotExecutable("Standing orders need migration 021.")
+    await ev.append(
+        clock=clocks.WALL, kind=f"override.{kind}", actor=actor,
+        subject_type="resource", subject_id=resource_id,
+        payload={"override_id": oid, "minutes": minutes,
+                 "reason": params.get("reason") or ""},
+        caused_by=caused_by, conn=conn,
+    )
+    return {"override": oid, "kind": kind, "minutes": minutes}
+
+
+async def _hold_unit(conn: Any, params: dict, *, actor: str, caused_by: int | None) -> dict:
+    return await _standing_order("hold", conn, params, actor=actor, caused_by=caused_by)
+
+
+async def _pin_unit(conn: Any, params: dict, *, actor: str, caused_by: int | None) -> dict:
+    return await _standing_order("pin", conn, params, actor=actor, caused_by=caused_by)
+
+
 _EXECUTORS: dict[str, Callable[..., Awaitable[dict]]] = {
+    "hold_unit": _hold_unit,
+    "pin_unit": _pin_unit,
     "reallocate_unit": _reallocate_unit,
+    "cancel_assignment": _cancel_assignment,
     "preposition_equipment": _preposition,
     "request_mutual_aid": _mutual_aid,
     "activate_shelter": _activate_shelter,

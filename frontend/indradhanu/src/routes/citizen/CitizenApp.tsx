@@ -8,6 +8,7 @@ import { apiBaseUrl, deviceId, request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
 import { MapStage } from "@/components/map/MapStage"
 import { OfflineBar } from "@/components/common/OfflineBar"
+import { MeshPanel } from "@/components/common/MeshPanel"
 import { DemoCredentials } from "@/auth/DemoCredentials"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 import { Button } from "@/components/ui/button"
@@ -171,6 +172,20 @@ export default function CitizenApp() {
   const [pos, setPos] = useState<{ lng: number; lat: number }>({ lng: ALANDI[0], lat: ALANDI[1] })
   const [state, setState] = useState<State | null>(null)
   const [guide, setGuide] = useState<Guidance | null>(null)
+  /** The last route this phone was given, kept across a reload so mesh mode
+   *  can check it against closures heard while offline. Per-phone convenience
+   *  only; the live route always wins when the server is reachable. */
+  const [savedGuide, setSavedGuide] = useState<Guidance | null>(() => {
+    try {
+      const raw = localStorage.getItem("indradhanu.lastGuide")
+      return raw ? (JSON.parse(raw) as Guidance) : null
+    } catch { return null }
+  })
+  useEffect(() => {
+    if (!guide?.route?.length) return
+    setSavedGuide(guide)
+    try { localStorage.setItem("indradhanu.lastGuide", JSON.stringify(guide)) } catch { /* private mode */ }
+  }, [guide])
   const [recording, setRecording] = useState(false)
   const [heard, setHeard] = useState<VoiceResult | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
@@ -1077,6 +1092,19 @@ export default function CitizenApp() {
       )}
 
       <OfflineBar manifest="/manifest.webmanifest" />
+
+      {/* Online nothing changes. With the server out of reach, reports and
+          alerts go through bitchat on this phone instead. */}
+      {unreachable && (
+        <MeshPanel
+          pos={pos}
+          text={text}
+          onSent={() => setText("")}
+          facilities={state?.facilities ?? []}
+          savedRoute={(guide ?? savedGuide)?.route ?? null}
+          savedDestination={(guide ?? savedGuide)?.destination?.name ?? null}
+        />
+      )}
 
       {staleSince !== null && (
         <Alert className="border-amber-500/40 bg-amber-500/10 py-2">

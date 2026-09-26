@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -21,7 +20,7 @@ from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.security import CurrentPrincipal, StaffPrincipal
 from app.db import session as db
 from app.copilot import execute
-from app.demo import runner
+from app.demo import runner, scenarios
 from app.agents import forecast as forecasting
 from app.incidents import duplicates
 from app import taxonomy
@@ -356,6 +355,29 @@ async def _duplicates_cached(city_id: str) -> list:
     return found
 
 
+@router.get("/demo/scenarios")
+async def list_scenarios(_: StaffPrincipal) -> dict:
+    """Named, scripted cases, each with the checks it makes afterwards."""
+    return {"scenarios": scenarios.catalogue(),
+            "last": scenarios.LAST.as_dict() if scenarios.LAST else None}
+
+
+@router.post("/demo/scenarios/{name}/run")
+async def run_scenario(name: str, _: StaffPrincipal) -> dict:
+    if scenarios.LAST is not None and scenarios.LAST.running:
+        raise Conflict(f"{scenarios.LAST.name} is still running.")
+    try:
+        started = scenarios.start(name)
+    except KeyError as exc:
+        raise NotFound(f"No scenario called {name!r}.") from exc
+    return started.as_dict()
+
+
+@router.get("/demo/scenarios/last")
+async def last_scenario(_: StaffPrincipal) -> dict:
+    return scenarios.LAST.as_dict() if scenarios.LAST else {}
+
+
 @router.get("/demo/state")
 async def demo_state(
     _: CurrentPrincipal,
@@ -467,11 +489,14 @@ select r.id, r.kind, r.label, r.operator, r.agency_id, r.capacity,
 _ROUTES_SQL = """
 select a.id::text, a.resource_id, a.incident_id::text incident_id,
        a.eta_minutes, a.distance_km, a.status::text status,
-       a.route_engine, a.progress, a.steps, r.label, r.kind, i.title,
+       a.route_engine, a.progress, a.steps, r.label, r.kind,
+       coalesce(i.title, a.purpose) title,
        extensions.ST_AsGeoJSON(a.route)::json -> 'coordinates' as path
   from assignments a
   join resources r on r.id = a.resource_id
-  join incidents i on i.id = a.incident_id
+  -- left: a unit staging in a ward or returning to base has a road and no
+  -- incident, and "what is going on" has to include it.
+  left join incidents i on i.id = a.incident_id
  where a.sim_run_id is null
    and a.status in ('proposed','approved','en_route','on_site')
    and a.route is not null
