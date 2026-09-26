@@ -57,6 +57,9 @@ VOCAB: dict[str, list[str]] = {
     "person_stranded": [
         "stranded", "stuck", "trapped", "cannot get out", "cant get out",
         "rescue", "help us", "on the roof", "on terrace", "अडकले", "फसले",
+        # A plain call for help is a person at risk until someone has looked.
+        "need help", "needs help", "help me", "please help", "help right now",
+        "sos", "save us", "मदत करा", "मदद करो",
         "बचाव", "फंसे", "मदद", "drowning", "swept",
         # Medical emergencies during a flood still need someone to physically
         # reach the person, which is the same capability.

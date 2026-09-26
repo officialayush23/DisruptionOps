@@ -360,6 +360,36 @@ async def _blocked_points(
     return [(float(r["lng"]), float(r["lat"])) for r in rows]
 
 
+class _Preview(Exception):
+    """Raised inside the transaction to roll a dry run back, carrying its diff."""
+
+    def __init__(self, diff: PlanDiff) -> None:
+        super().__init__("preview")
+        self.diff = diff
+
+
+async def preview(
+    *,
+    city_id: str = "pune",
+    clock: Clock = WALL,
+    trigger: str = "preview",
+    caused_by: int | None = None,
+    actor: str = "agent:langgraph",
+) -> PlanDiff:
+    """The plan `replan` would make right now, with nothing written.
+
+    Runs the real solve inside the real transaction, then rolls it back. Used by
+    the agent graph so the policy gate (and, if needed, an officer) sees the
+    exact re-tasking before it happens, rather than a separate estimate that
+    could drift from what the solver actually does.
+    """
+    try:
+        return await replan(city_id=city_id, clock=clock, trigger=trigger,
+                            caused_by=caused_by, actor=actor, dry_run=True)
+    except _Preview as p:
+        return p.diff
+
+
 # ------------------------------------------------------------------ replan ---
 async def replan(
     *,
@@ -368,8 +398,13 @@ async def replan(
     trigger: str = "manual",
     caused_by: int | None = None,
     actor: str = "agent:allocation_planner",
+    dry_run: bool = False,
 ) -> PlanDiff:
-    """Re-solve against the current world and return what changed."""
+    """Re-solve against the current world and return what changed.
+
+    With `dry_run` the whole solve and every write happen, then the transaction
+    is rolled back by raising `_Preview`; call `preview()` rather than this.
+    """
     now = clock.now()
     sim_run_id = clock.sim_run_id
 
@@ -638,6 +673,9 @@ async def replan(
                 payload={"capability": u.demand.capability, "reason": u.reason},
                 caused_by=plan_event.id, conn=conn,
             )
+
+        if dry_run:
+            raise _Preview(diff)     # rolls the transaction back
 
     log.info(
         "replan_complete", trigger=trigger, engine=result.engine,

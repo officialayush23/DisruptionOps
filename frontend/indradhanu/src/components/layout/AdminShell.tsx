@@ -6,9 +6,11 @@ import {
   BrainCircuit,
   ClipboardCheck,
   Gauge,
+  GitBranch,
   Handshake,
   History,
   Inbox,
+  LayoutDashboard,
   ListChecks,
   Network,
   Radar,
@@ -83,6 +85,8 @@ const NAV: {
   // who opened this console found sixteen and could not tell which four those
   // were, which is the whole of the "too cluttered" complaint — not density on
   // any one screen, but no answer to "where do I start".
+  // The overview: a screen per active zone across the top, analytics below.
+  { group: "Operations", to: "/admin/wall", label: "Command wall", icon: LayoutDashboard },
   { group: "Operations", to: "/admin/console", label: "Live map", icon: Radar },
   // Every report and mesh packet as it lands, from the app, the mesh, cameras
   // and crews, with what the pipeline did with each.
@@ -112,6 +116,8 @@ const NAV: {
   // Promoted out of Analysis. It now leads with what got attached to what,
   // which is a live operational question rather than an after-the-fact one.
   { group: "Operations", to: "/admin/agent", label: "Agent log", icon: Activity },
+  // The LangGraph cycle the router runs, and plans paused for an officer.
+  { group: "Operations", to: "/admin/graph", label: "Agent graph", icon: GitBranch },
 
   // Analysis: real work, none of it urgent. Collapsed by default, so the rail
   // reads as four things rather than sixteen and everything is still one click

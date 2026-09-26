@@ -52,7 +52,8 @@ REPLAN_KINDS = {
 REPLAN_PREFIXES = ("field.", "override.")
 #: Written by the planner, or by the demo runner about its own simulated world
 #: (it re-plans that itself): reacting to them would loop or double-plan.
-PLANNER_ACTORS = ("agent:allocation_planner", "agent:event_router", "agent:replan", "agent:demo:")
+PLANNER_ACTORS = ("agent:allocation_planner", "agent:event_router", "agent:replan", "agent:demo:",
+                  "agent:langgraph")
 IGNORED_KINDS = {
     "plan.generated", "assignment.created", "assignment.changed",
     "assignment.rerouted", "demand.uncovered", "task.created", "task.updated",
@@ -233,8 +234,15 @@ async def _replan_loop() -> None:
                     state.replans_handed_to_demo += 1
                     continue
                 async with _lock:
-                    await replanner.replan(city_id=city, trigger=trigger,
-                                           actor="agent:allocation_planner")
+                    from app.agents import graph as agent_graph
+
+                    if agent_graph.enabled():
+                        # The LangGraph cycle: sense -> assess -> preview ->
+                        # validate -> policy gate -> (officer) -> dispatch.
+                        await agent_graph.run_cycle(city_id=city, trigger=trigger)
+                    else:
+                        await replanner.replan(city_id=city, trigger=trigger,
+                                               actor="agent:allocation_planner")
                 state.replans_run += 1
             except asyncio.CancelledError:
                 raise

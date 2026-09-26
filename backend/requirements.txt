@@ -42,8 +42,8 @@ boto3>=1.35              # `import boto3`              — llm.py:93
 # --- config ---
 python-dotenv>=1.0
 
-# Removed: langchain, langchain-core, langgraph, langchain-google-genai,
-# langchain-aws.
+# Removed: langchain, langchain-core, langchain-google-genai, (langgraph is back:
+# see the end of this file), langchain-aws.
 #
 # Verified against all 66 Python files in app/: zero occurrences of any kind,
 # imports or otherwise. The orchestrator is deterministic on purpose — a fixed
@@ -58,3 +58,12 @@ python-dotenv>=1.0
 # deliberately: trimming them buys nothing before the demo, and getting it wrong
 # costs a failed deploy — which is precisely what happened when tenacity was
 # removed on the strength of an incomplete search.
+
+# --- agent graph (app/agents/graph.py) ---
+# Back, and this time imported: the event router runs every re-plan through the
+# LangGraph cycle. Guarded at import, so a missing package falls back to the
+# direct re-plan instead of failing the boot. The Postgres checkpointer is
+# optional (AGENT_GRAPH_CHECKPOINTER=postgres).
+langgraph>=0.4
+langgraph-checkpoint-postgres>=2.0
+psycopg[binary]>=3.2

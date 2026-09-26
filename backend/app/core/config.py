@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     # demo runner. Off only for tests that want a silent database.
     event_router_enabled: bool = True
     event_router_poll_s: float = 1.5
+    #: Run the router's re-plans through the LangGraph agent graph
+    #: (app/agents/graph.py). Falls back to a direct re-plan when langgraph is
+    #: not installed.
+    agent_graph_enabled: bool = True
+    #: Ask an officer before a plan pulls a unit off an incident of this
+    #: severity or worse. 0 disables the human-approval step.
+    agent_graph_approval_severity: int = 4
+    #: Seconds an approval may wait before the graph proceeds on the safe
+    #: default (keep current assignments).
+    agent_graph_approval_timeout_s: int = 300
+    #: memory | postgres. Postgres needs langgraph-checkpoint-postgres.
+    agent_graph_checkpointer: str = "memory"
 
     # ---- llm ----
     llm_provider: LLMProvider = "gemini"

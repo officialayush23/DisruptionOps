@@ -700,12 +700,18 @@ def _narrate(kind: str, actor: str, payload: dict) -> str:
     who = actor.split(":", 1)[-1].replace("_", " ") if actor else "the system"
     match kind:
         case "incident.opened":
-            return f"Incident opened at {float(p.get('trust', 0)):.0%} confidence."
+            conf = p.get("confidence", p.get("trust"))
+            needs = p.get("needs") or {}
+            what = ", ".join(f"{q} × {c.replace('_', ' ')}" for c, q in needs.items()) or "no unit yet"
+            head = (f"Incident opened at {float(conf):.0%} confidence"
+                    if conf is not None else "Incident opened")
+            return f"{head}, severity {p.get('severity', '?')}; needs {what}."
         case "report.received":
             return f"Report accepted, trust {float(p.get('trust', 0)):.0%}."
         case "report.linked":
-            return (f"Report merged into this incident at "
-                    f"{float(p.get('score', 0)):.0%} match.")
+            score = p.get("link_score", p.get("score"))
+            return ("Report merged into this incident"
+                    + (f" at {float(score):.0%} match." if score is not None else "."))
         case "report.rejected":
             return f"Report held back: {p.get('reason', 'below the trust floor')}."
         case "incident.resolved":

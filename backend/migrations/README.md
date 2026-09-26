@@ -18,6 +18,7 @@ Later migrations, all applied to the same project:
 | `020_agent_memory.sql` | `copilot_turns`, `agent_memory`, `recall_memory()`; optional `embedding vector(768)` (applied 26 Sep 2026) |
 | `021_operations_and_overrides.sql` | `cancelled` added to `task_status` **and** `assignment_status` (the latter was already being written by the executor), `operator_overrides`, cancel/hold/pin under clause pol-2 (applied 26 Sep 2026) |
 | `022_mesh_transport.sql` | `mesh_messages`, `mesh_outbox`, `mesh_nodes`, `mesh_state` (applied 26 Sep 2026) |
+| `023_help_requests_get_a_responder.sql` | `field_assessment` capability; unknown reports get one responder; plain calls for help classify as person_stranded (applied 27 Sep 2026) |
 
 Run 001 to 003 in order against a fresh database. They are written to be safe to
 re-run: every create is `if not exists` and every seed is `on conflict do nothing`.

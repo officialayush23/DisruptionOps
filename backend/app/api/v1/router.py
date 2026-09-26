@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    agent_graph,
     auth,
     config,
     citizen,
@@ -43,3 +44,4 @@ api_router.include_router(copilot.router)
 api_router.include_router(replay.router)
 api_router.include_router(ops.router)
 api_router.include_router(mesh.router)
+api_router.include_router(agent_graph.router)

@@ -23,6 +23,8 @@ import AfterAction from "@/routes/admin/AfterAction"
 import Replay from "@/routes/admin/Replay"
 import Architecture from "@/routes/admin/Architecture"
 import LiveFeed from "@/routes/admin/LiveFeed"
+import CommandWall from "@/routes/admin/CommandWall"
+import AgentGraph from "@/routes/admin/AgentGraph"
 import IncidentResponse from "@/routes/admin/IncidentResponse"
 import MeshDevices from "@/routes/admin/MeshDevices"
 
@@ -59,6 +61,7 @@ export function App() {
           <RequireRole need="staff">
             <AdminShell>
               <Routes>
+                <Route path="wall" element={<CommandWall />} />
                 <Route path="console" element={<DemoConsole />} />
                 <Route path="copilot" element={<Copilot />} />
                 {/* Who is going where. It was only on the map, which answers
@@ -75,6 +78,7 @@ export function App() {
                 <Route path="handoff" element={<AgencyHandoff />} />
                 <Route path="decisions" element={<DecisionGate />} />
                 <Route path="agent" element={<AgentTrace />} />
+                <Route path="graph" element={<AgentGraph />} />
                 <Route path="resources" element={<ResourcesPage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
@@ -85,7 +89,7 @@ export function App() {
                     One console now; both old paths land on it. */}
                 <Route path="live" element={<Navigate to="/admin/console" replace />} />
                 <Route path="demo" element={<Navigate to="/admin/console" replace />} />
-                <Route path="*" element={<Navigate to="/admin/console" replace />} />
+                <Route path="*" element={<Navigate to="/admin/wall" replace />} />
               </Routes>
             </AdminShell>
           </RequireRole>

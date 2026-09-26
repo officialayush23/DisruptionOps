@@ -402,8 +402,8 @@ async def receive(
                 select count(distinct coalesce(reporter_id::text, device_id, id::text))
                   from citizen_reports
                  where incident_id = $1::uuid
-                   and coalesce(reporter_id::text, '') is distinct from coalesce($2::text, '')
-                   and coalesce(device_id, '') is distinct from coalesce($3::text, '')
+                   and ($2::text is null or reporter_id::text is distinct from $2::text)
+                   and ($3::text is null or device_id is distinct from $3::text)
                 """,
                 decision.candidate.incident_id, reporter_id, device_id,
             ) or 0
