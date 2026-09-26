@@ -20,6 +20,7 @@ Later migrations, all applied to the same project:
 | `022_mesh_transport.sql` | `mesh_messages`, `mesh_outbox`, `mesh_nodes`, `mesh_state` (applied 26 Sep 2026) |
 | `023_help_requests_get_a_responder.sql` | `field_assessment` capability; unknown reports get one responder; plain calls for help classify as person_stranded (applied 27 Sep 2026) |
 | `024_severity_reading_and_agent_memory_scopes.sql` | report `assessed_severity`; `agent_memory.namespace`; `agent_memory_ledger` (applied 27 Sep 2026) |
+| `025_control_state.sql` | `control_state` (emergency stop flag) (applied 27 Sep 2026) |
 
 Run 001 to 003 in order against a fresh database. They are written to be safe to
 re-run: every create is `if not exists` and every seed is `on conflict do nothing`.

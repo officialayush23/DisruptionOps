@@ -93,3 +93,27 @@ export function zoomFor(z: Zone, big = false): number {
   const base = z.radiusKm < 0.8 ? 14.6 : z.radiusKm < 1.6 ? 13.8 : z.radiusKm < 3 ? 13 : 12.2
   return big ? base + 0.6 : base
 }
+
+/** The world as seen from one zone: what the analytics under the wall show
+ *  when that zone's screen is selected. `null` is the whole city. */
+export function scopeState(state: DemoState, z: Zone | null): DemoState {
+  if (!z) return state
+  const incidents = state.incidents.filter((i) => i.wardId === z.id)
+  const ids = new Set(incidents.map((i) => i.id))
+  const near = (loc: [number, number]) => km(z.center, loc) <= Math.max(3, z.radiusKm * 2)
+  const inZone = (params: Record<string, unknown> | undefined) =>
+    !!params && (params.ward_id === z.id || (typeof params.incident_id === "string" && ids.has(params.incident_id)))
+  return {
+    ...state,
+    incidents,
+    reports: state.reports.filter((r) => r.wardId === z.id || (r.incidentId != null && ids.has(r.incidentId))),
+    resources: state.resources.filter((r) => (r.incidentId && ids.has(r.incidentId)) || near(r.location)),
+    needs: state.needs.filter((n) => ids.has(n.incidentId)),
+    decisions: state.decisions.filter((d) => d.wardId === z.id || inZone(d.params as Record<string, unknown> | undefined)),
+    alerts: state.alerts.filter((a) => a.wardId === z.id),
+    facilities: state.facilities.filter((f) => f.wardId === z.id || near(f.location)),
+    wards: state.wards.filter((w) => w.id === z.id),
+    roadBlocks: state.roadBlocks.filter((b) => near(b.location)),
+    routes: state.routes.filter((r) => ids.has(r.incidentId)),
+  }
+}

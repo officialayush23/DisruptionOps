@@ -174,6 +174,13 @@ async def run(trigger: dict, *, city_id: str = "pune",
     RECENT.insert(0, ep)
     del RECENT[10:]
 
+    from app.ops import autonomy
+
+    if autonomy.paused():
+        ep.outcome = "skipped"
+        ep.result = {"reason": "Automation is paused by an officer (emergency stop)."}
+        return ep
+
     if llm.current_engine() == "fallback":
         ep.outcome = "skipped"
         ep.result = {"reason": "No model reachable; the deterministic planner has acted."}

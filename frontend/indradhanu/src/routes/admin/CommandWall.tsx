@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
-  ChevronLeft, ChevronRight, Maximize2, MonitorPlay, Siren, Truck, Users, X,
+  ChevronLeft, ChevronRight, Database, Maximize2, MonitorPlay, Siren, Truck, Users, X,
 } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import type { DemoState } from "@/routes/demo/useDemo"
@@ -9,46 +9,98 @@ import { LiveMap } from "@/components/map/LiveMap"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import WallAnalytics from "./WallAnalytics"
-import { zoneLayers, zonesOf, zoomFor, type Zone } from "./zones"
+import { WardPanel } from "./WardPanel"
+import { scopeState, zoneLayers, zonesOf, zoomFor, type Zone } from "./zones"
 
 /** The command wall.
  *
  *  A Liquid Galaxy style row of screens across the top. The first, wider screen
  *  is the whole city. Every ward with an open incident gets its own screen,
  *  zoomed in on just that area, added the moment the first incident opens there
- *  and removed when the last one closes. Expanding a screen takes the whole
- *  display, zoomed further, with the zone's incidents beside it and arrows to
- *  step to the neighbouring screens, the way a galaxy rig pans between displays.
+ *  and removed when the last one closes — the row grows and shrinks with the
+ *  disaster. Every screen can be resized by its corner handle (or all at once
+ *  with S / M / L), and remembers its size. Expanding a screen takes the whole
+ *  display with ← → to step between screens. Clicking a ward on any screen
+ *  opens that ward's numbers and its approvals.
  *
- *  Below the strip, the analytics: every number the system has, each chart with
- *  a jump to the page that acts on it.
+ *  Speed: maps are built once and kept (scrolling past a screen does not tear
+ *  it down), each screen shows its last picture from the local cache until the
+ *  live map has painted, the world itself is cached so the wall draws before
+ *  the server answers, and the small screens refresh their data every few
+ *  seconds rather than every poll.
  */
 
 const SEV_BAR: Record<number, string> = {
   5: "bg-[#d03b3b]", 4: "bg-[#ec835a]", 3: "bg-[#fab219]", 2: "bg-zinc-400", 1: "bg-zinc-300",
 }
 
-/** Mount a map only while its screen is on (or near) the viewport. Nine WebGL
- *  contexts at once is fine; forty is not, and a busy day has forty wards. */
-function useOnScreen<T extends Element>(margin = "300px") {
+type Size = { w: number; h: number }
+const PRESETS: Record<"S" | "M" | "L", Size> = {
+  S: { w: 280, h: 210 }, M: { w: 360, h: 290 }, L: { w: 520, h: 390 },
+}
+const SIZE_KEY = "wall:sizes:v1"
+const PRESET_KEY = "wall:preset:v1"
+
+function load<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+function save(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    /* private mode: sizes just are not remembered */
+  }
+}
+
+/** Build a screen's map the first time it comes near the viewport, then keep
+ *  it. Rebuilding on every scroll was the slowest thing on this page. */
+function useSeenOnce<T extends Element>(margin = "400px") {
   const ref = useRef<T | null>(null)
   const [seen, setSeen] = useState(false)
   useEffect(() => {
     const el = ref.current
-    if (!el) return
-    const io = new IntersectionObserver(([e]) => setSeen(e.isIntersecting), { rootMargin: margin })
+    if (!el || seen) return
+    const io = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) {
+        setSeen(true)
+        io.disconnect()
+      }
+    }, { rootMargin: margin })
     io.observe(el)
     return () => io.disconnect()
-  }, [margin])
+  }, [margin, seen])
   return [ref, seen] as const
 }
 
-function ScreenMap({ state, zone, big, className }: {
+/** The world, refreshed at most every `ms`. Small screens do not need the
+ *  once-a-second poll, and re-feeding ten maps every second is what made them
+ *  stutter. */
+function useThrottledState(state: DemoState, ms: number): DemoState {
+  const latest = useRef(state)
+  const [slow, setSlow] = useState(state)
+  useEffect(() => {
+    latest.current = state
+  }, [state])
+  useEffect(() => {
+    const id = setInterval(() => setSlow(latest.current), ms)
+    return () => clearInterval(id)
+  }, [ms])
+  return slow
+}
+
+function ScreenMap({ state, zone, big, className, onPickWard, snapshotKey }: {
   state: DemoState; zone: Zone | null; big?: boolean; className: string
+  onPickWard?: (id: string) => void; snapshotKey: string
 }) {
   const navigate = useNavigate()
   const pick = useCallback((id: string) => navigate(`/admin/response?incident=${id}`), [navigate])
-  if (!zone) {
+  const layers = useMemo(() => (zone ? zoneLayers(state, zone) : null), [state, zone])
+  if (!zone || !layers) {
     return (
       <LiveMap
         className={className}
@@ -60,44 +112,89 @@ function ScreenMap({ state, zone, big, className }: {
         needs={state.needs}
         routes={state.routes}
         onPickIncident={pick}
+        onPickWard={onPickWard}
+        snapshotKey={snapshotKey}
         zoom={big ? 11.8 : 10.9}
       />
     )
   }
-  const l = zoneLayers(state, zone)
   return (
     <LiveMap
-      // Keyed by zone: a screen's camera is set when it is created, so a new
-      // zone in the same slot gets a fresh, correctly centred map.
       key={`${zone.id}-${big ? "big" : "tile"}`}
       className={className}
-      wards={l.wards}
-      incidents={l.incidents}
-      resources={l.resources}
-      facilities={l.facilities}
-      blocks={l.blocks}
-      needs={l.needs}
-      routes={l.routes}
+      wards={layers.wards}
+      incidents={layers.incidents}
+      resources={layers.resources}
+      facilities={layers.facilities}
+      blocks={layers.blocks}
+      needs={layers.needs}
+      routes={layers.routes}
       onPickIncident={pick}
+      onPickWard={onPickWard}
+      snapshotKey={snapshotKey}
       center={zone.center}
       zoom={zoomFor(zone, big)}
     />
   )
 }
 
-function Screen({ state, zone, onExpand, main, fresh }: {
+function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, onSelect }: {
   state: DemoState; zone: Zone | null; onExpand: () => void; main?: boolean; fresh?: boolean
+  size: Size; onResize: (s: Size) => void; selected: boolean; onSelect: () => void
 }) {
-  const [ref, onScreen] = useOnScreen<HTMLDivElement>()
+  const [box, seen] = useSeenOnce<HTMLDivElement>()
+  // A click selects the screen; a drag (panning the map, resizing the box)
+  // does not. Only the icon expands.
+  const down = useRef<{ x: number; y: number } | null>(null)
   const openCount = state.incidents.filter((i) => !/resolved|closed|cancel/i.test(i.status)).length
+
+  // Remember a size the user dragged to (debounced; the observer fires per frame).
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    let t: ReturnType<typeof setTimeout> | undefined
+    const ro = new ResizeObserver(() => {
+      clearTimeout(t)
+      t = setTimeout(() => {
+        const w = Math.round(el.offsetWidth)
+        const h = Math.round(el.offsetHeight)
+        if (Math.abs(w - size.w) > 4 || Math.abs(h - size.h) > 4) onResize({ w, h })
+      }, 400)
+    })
+    ro.observe(el)
+    return () => {
+      clearTimeout(t)
+      ro.disconnect()
+    }
+  }, [box, size.w, size.h, onResize])
+
   return (
     <div
-      ref={ref}
-      className={`group relative shrink-0 snap-start overflow-hidden rounded-lg border-2 bg-black shadow-lg ${
-        main ? "w-[520px] border-sky-500/70" : "w-[340px] border-zinc-700"
-      } ${fresh ? "ring-4 ring-amber-400/70 animate-pulse" : ""}`}
+      ref={box}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      title={zone ? `Show ${zone.name} in the analytics` : "Show the whole city in the analytics"}
+      onPointerDown={(e) => {
+        down.current = { x: e.clientX, y: e.clientY }
+      }}
+      onClick={(e) => {
+        const d = down.current
+        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return
+        onSelect()
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault()
+          onSelect()
+        }
+      }}
+      style={{ width: size.w, height: size.h, resize: "both", minWidth: 220, minHeight: 170, maxWidth: 1400, maxHeight: 900 }}
+      className={`group relative shrink-0 cursor-pointer snap-start overflow-hidden rounded-lg border-2 bg-black shadow-lg ${
+        selected ? "border-sky-400 ring-4 ring-sky-400/60" : main ? "border-sky-500/40" : "border-zinc-700"
+      } ${fresh && !selected ? "ring-4 ring-amber-400/70" : ""}`}
     >
-      <div className="absolute inset-x-0 top-0 z-10 flex items-center gap-2 bg-gradient-to-b from-black/90 to-black/0 px-2.5 py-1.5 text-white">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2 bg-gradient-to-b from-black/90 to-black/0 px-2.5 py-1.5 text-white">
         {zone ? (
           <span className={`h-3 w-1.5 rounded-sm ${SEV_BAR[zone.severity] ?? "bg-zinc-400"}`} />
         ) : (
@@ -123,14 +220,23 @@ function Screen({ state, zone, onExpand, main, fresh }: {
           )}
         </span>
       </div>
-      {onScreen ? (
-        <ScreenMap state={state} zone={zone} className={main ? "h-[300px] w-full" : "h-[300px] w-full"} />
+      {seen ? (
+        <ScreenMap state={state} zone={zone} className="h-full w-full"
+                   snapshotKey={`wall:${zone ? zone.id : "city"}`} />
       ) : (
-        <div className="h-[300px] w-full bg-zinc-900" />
+        <div className="h-full w-full bg-zinc-900" />
+      )}
+      {selected && (
+        <span className="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-sky-500 px-1.5 text-[10px] font-semibold text-black">
+          ANALYTICS
+        </span>
       )}
       <button
-        onClick={onExpand}
-        className="absolute right-2 bottom-2 z-10 rounded-md bg-black/70 p-1.5 text-white opacity-80 transition group-hover:opacity-100 hover:bg-black"
+        onClick={(e) => {
+          e.stopPropagation()
+          onExpand()
+        }}
+        className="absolute right-6 bottom-2 z-10 rounded-md bg-black/70 p-1.5 text-white opacity-80 transition group-hover:opacity-100 hover:bg-black"
         aria-label={`Expand ${zone ? zone.name : "city"} screen`}
       >
         <Maximize2 className="size-4" />
@@ -139,8 +245,9 @@ function Screen({ state, zone, onExpand, main, fresh }: {
   )
 }
 
-function Expanded({ state, zones, index, onClose, onStep }: {
+function Expanded({ state, zones, index, onClose, onStep, onPickWard }: {
   state: DemoState; zones: Zone[]; index: number; onClose: () => void; onStep: (d: number) => void
+  onPickWard: (id: string) => void
 }) {
   const navigate = useNavigate()
   const zone = index < 0 ? null : zones[index]
@@ -173,7 +280,7 @@ function Expanded({ state, zones, index, onClose, onStep }: {
             {zone ? zone.name : "All zones · city"}
           </div>
           <div className="text-xs text-zinc-400">
-            Screen {index + 2} of {zones.length + 1} · ← → to move between screens · Esc to close
+            Screen {index + 2} of {zones.length + 1} · ← → between screens · click a ward for its numbers · Esc to close
           </div>
         </div>
         <Button size="icon" variant="ghost" className="text-white hover:bg-zinc-800" onClick={() => onStep(1)} aria-label="Next screen">
@@ -184,7 +291,8 @@ function Expanded({ state, zones, index, onClose, onStep }: {
         </Button>
       </div>
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_360px]">
-        <ScreenMap state={state} zone={zone} big className="h-full min-h-[50vh] w-full" />
+        <ScreenMap state={state} zone={zone} big className="h-full min-h-[50vh] w-full"
+                   onPickWard={onPickWard} snapshotKey={`wall:big:${zone ? zone.id : "city"}`} />
         <aside className="min-h-0 overflow-y-auto border-l border-zinc-800 p-3">
           {zone && (
             <div className="mb-3 grid grid-cols-3 gap-2 text-center">
@@ -192,6 +300,11 @@ function Expanded({ state, zones, index, onClose, onStep }: {
               <Kpi label="Units en route" value={zone.unitsEnRoute} />
               <Kpi label="Reports" value={zone.reports} />
             </div>
+          )}
+          {zone && (
+            <Button size="sm" variant="secondary" className="mb-2 w-full" onClick={() => onPickWard(zone.id)}>
+              Ward numbers and approvals
+            </Button>
           )}
           <ul className="space-y-1.5">
             {list.map((i) => (
@@ -235,26 +348,56 @@ function Kpi({ label, value }: { label: string; value: number }) {
 
 export default function CommandWall() {
   const { state } = useDemo()
-  const zones = useMemo(() => zonesOf(state), [state])
-  // -2 = closed, -1 = the city screen, 0..n-1 = a zone.
+  // Small screens redraw every 4 s; the analytics and the expanded view use the
+  // live snapshot.
+  const wallState = useThrottledState(state, 4000)
+  const zones = useMemo(() => zonesOf(wallState), [wallState])
+  const liveZones = useMemo(() => zonesOf(state), [state])
   const [open, setOpen] = useState(-2)
+  const [ward, setWard] = useState<string | null>(null)
+  // Which screen the analytics follow: null = the whole city.
+  const [scopeId, setScopeId] = useState<string | null>(null)
+  const scope = scopeId ? liveZones.find((z) => z.id === scopeId) ?? null : null
+  const scoped = useMemo(() => scopeState(state, scope), [state, scope])
   const [now, setNow] = useState(() => Date.now())
+  const [preset, setPreset] = useState<keyof typeof PRESETS>(() => load(PRESET_KEY, "M"))
+  const [sizes, setSizes] = useState<Record<string, Size>>(() => load(SIZE_KEY, {}))
+
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(id)
   }, [])
+
+  const sizeOf = (id: string, main: boolean): Size => {
+    if (sizes[id]) return sizes[id]
+    const p = PRESETS[preset]
+    return main ? { w: Math.round(p.w * 1.5), h: p.h } : p
+  }
+  const resize = useCallback((id: string, s: Size) => {
+    setSizes((old) => {
+      const next = { ...old, [id]: s }
+      save(SIZE_KEY, next)
+      return next
+    })
+  }, [])
+  const choosePreset = (p: keyof typeof PRESETS) => {
+    setPreset(p)
+    setSizes({})
+    save(PRESET_KEY, p)
+    save(SIZE_KEY, {})
+  }
+
   const step = useCallback(
     (d: number) => setOpen((i) => {
-      const n = zones.length + 1
+      const n = liveZones.length + 1
       const pos = (((i + 1 + d) % n) + n) % n
       return pos - 1
     }),
-    [zones.length],
+    [liveZones.length],
   )
   const strip = useRef<HTMLDivElement | null>(null)
   const scroll = (d: number) => strip.current?.scrollBy({ left: d * 360, behavior: "smooth" })
-
-  const unattended = zones.reduce((s, z) => s + z.unattended, 0)
+  const unattended = liveZones.reduce((s, z) => s + z.unattended, 0)
 
   return (
     <div className="space-y-5 p-4 md:p-6">
@@ -263,11 +406,22 @@ export default function CommandWall() {
           <MonitorPlay className="size-4" />
           <h2 className="text-sm font-semibold">Live wall</h2>
           <span className="text-muted-foreground text-xs">
-            {zones.length} active zone{zones.length === 1 ? "" : "s"}
+            {liveZones.length} active zone{liveZones.length === 1 ? "" : "s"}
             {unattended > 0 && <> · <b className="text-amber-600 dark:text-amber-400">{unattended} incident{unattended === 1 ? "" : "s"} with nobody assigned</b></>}
-            {" "}· a screen is added for every ward with an open incident
+            {" "}· a screen appears for every ward with an open incident · click a screen to focus the analytics below · ⤢ to expand · drag a corner to resize
           </span>
-          <div className="ml-auto flex gap-1">
+          {state.cachedAt && (
+            <Badge variant="outline" className="gap-1 text-[11px]">
+              <Database className="size-3" /> cached view from {new Date(state.cachedAt).toLocaleTimeString(undefined, { hour12: false })}, connecting…
+            </Badge>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((p) => (
+              <Button key={p} size="sm" variant={preset === p && !Object.keys(sizes).length ? "default" : "outline"}
+                      className="h-8 w-8 px-0" onClick={() => choosePreset(p)} title={`All screens ${p}`}>
+                {p}
+              </Button>
+            ))}
             <Button size="icon" variant="outline" className="size-8" onClick={() => scroll(-1)} aria-label="Scroll left">
               <ChevronLeft className="size-4" />
             </Button>
@@ -278,37 +432,51 @@ export default function CommandWall() {
         </div>
         <div
           ref={strip}
-          className="flex snap-x gap-2 overflow-x-auto rounded-xl bg-zinc-950 p-2 [scrollbar-width:thin]"
+          className="flex snap-x items-start gap-2 overflow-x-auto rounded-xl bg-zinc-950 p-2 [scrollbar-width:thin]"
         >
-          <Screen state={state} zone={null} main onExpand={() => setOpen(-1)} />
-          {zones.map((z, i) => (
+          <Screen state={wallState} zone={null} main onExpand={() => setOpen(-1)}
+                  size={sizeOf("city", true)} onResize={(s) => resize("city", s)}
+                  selected={!scope} onSelect={() => setScopeId(null)} />
+          {zones.map((z) => (
             <Screen
               key={z.id}
-              state={state}
+              state={wallState}
               zone={z}
               fresh={now - z.since < 2 * 60_000}
-              onExpand={() => setOpen(i)}
+              onExpand={() => setOpen(liveZones.findIndex((x) => x.id === z.id))}
+              size={sizeOf(z.id, false)}
+              onResize={(s) => resize(z.id, s)}
+              selected={scope?.id === z.id}
+              onSelect={() => setScopeId((cur) => (cur === z.id ? null : z.id))}
             />
           ))}
           {zones.length === 0 && (
-            <div className="flex w-[340px] shrink-0 items-center justify-center rounded-lg border-2 border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-400">
+            <div className="flex w-[340px] shrink-0 items-center justify-center self-stretch rounded-lg border-2 border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-400">
               <Users className="mr-2 size-4" /> No open incidents. Zone screens appear here as soon as one opens.
             </div>
           )}
         </div>
       </section>
 
-      <WallAnalytics zones={zones} now={now} />
+      <WallAnalytics
+        zones={scope ? [scope] : liveZones}
+        now={now}
+        state={scoped}
+        scope={scope}
+        onClearScope={() => setScopeId(null)}
+      />
 
       {open > -2 && (
         <Expanded
           state={state}
-          zones={zones}
-          index={Math.min(open, zones.length - 1)}
+          zones={liveZones}
+          index={Math.min(open, liveZones.length - 1)}
           onClose={() => setOpen(-2)}
           onStep={step}
+          onPickWard={setWard}
         />
       )}
+      <WardPanel wardId={ward} onClose={() => setWard(null)} />
     </div>
   )
 }

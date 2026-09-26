@@ -21,6 +21,30 @@ from app.schemas.domain import Camel
 router = APIRouter(tags=["operations"])
 
 
+class AutonomyIn(Camel):
+    paused: bool
+    reason: str | None = Field(default=None, max_length=200)
+
+
+@router.get("/ops/autonomy")
+async def autonomy_status(_: StaffPrincipal) -> dict:
+    from app.ops import autonomy
+
+    return autonomy.status()
+
+
+@router.post("/ops/autonomy")
+async def autonomy_set(body: AutonomyIn, who: StaffPrincipal) -> dict:
+    """Emergency stop / resume. Pausing is always allowed to staff; it is the
+    safe direction. It never recalls crews already out."""
+    from app.ops import autonomy
+
+    name = who.full_name or str(getattr(who.role, "value", who.role))
+    if body.paused:
+        return await autonomy.pause(by=name, reason=body.reason)
+    return await autonomy.resume(by=name)
+
+
 class Instead(Camel):
     kind: Literal["replan", "redirect", "stage", "hold", "return_to_base"] = "replan"
     incident_id: str | None = None

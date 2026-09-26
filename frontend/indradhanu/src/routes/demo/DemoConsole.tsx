@@ -5,6 +5,7 @@ import {
 import { useDemo } from "./DemoProvider"
 import type { DemoState } from "./useDemo"
 import { LiveMap } from "@/components/map/LiveMap"
+import { WardPanel } from "@/routes/admin/WardPanel"
 import { MapStage } from "@/components/map/MapStage"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -62,6 +63,7 @@ function BeatFeed({ beats }: { beats: DemoState["beats"] }) {
 
 export default function DemoConsole() {
   const { state, error, activity, selected, setSelected, busy, run } = useDemo()
+  const [ward, setWard] = useState<string | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
   /** Reset throws away the run. It asks once, in place, rather than through a
    *  browser dialog that would block the poll behind it. */
@@ -186,6 +188,8 @@ export default function DemoConsole() {
                     : undefined
                 }
                 onPickIncident={setSelected}
+                onPickWard={setWard}
+                snapshotKey={expanded ? "console:full" : "console"}
               />
             )}
             footer={
@@ -356,6 +360,7 @@ export default function DemoConsole() {
           </details>
         </div>
       </div>
+      <WardPanel wardId={ward} onClose={() => setWard(null)} />
     </div>
   )
 }

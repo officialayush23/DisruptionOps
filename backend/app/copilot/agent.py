@@ -1104,6 +1104,18 @@ async def ask(question: str, *, city_id: str = "pune", session_id: str | None = 
     if not question:
         return Answer(text="Ask me anything about what is happening.", intent="help")
 
+    # "Stop everything" / "resume operations" are matched by rule, before any
+    # model sees the question: an emergency stop must not depend on a model
+    # understanding it, or be something a model can trigger on its own reading.
+    control = _control_intent(question)
+    if control:
+        answer = await _control(control, actor=actor, city_id=city_id)
+        await memory.record_turn(session_id, "user", question, actor=actor,
+                                 city_id=city_id, intent=control, args={})
+        await memory.record_turn(session_id, "assistant", answer.text, actor="agent:copilot",
+                                 city_id=city_id, intent=control)
+        return answer
+
     names = await _names(city_id)
     turns = await memory.recent_turns(session_id)
     recalled = await memory.recall(question, city_id=city_id)
@@ -1152,6 +1164,75 @@ async def ask(question: str, *, city_id: str = "pune", session_id: str | None = 
         for m in recalled[:4]
     ]
     return answer
+
+
+# ------------------------------------------------------------ emergency stop ---
+_NEGATED = re.compile(r"\b(don'?t|do not|never|should (we|i)|what (if|happens)|how (do|would))\b", re.I)
+_RESUME = re.compile(
+    r"\b(resume|unpause|un-pause|restart|restore|re-?enable)\b.{0,25}"
+    r"\b(everything|all|automation|autonomy|operations|the system|agents|dispatch(ing)?|planning)\b"
+    r"|\b(lift|end|cancel|release|undo)\b.{0,12}\b(the )?(emergency )?(stop|pause|freeze)\b",
+    re.I,
+)
+_HALT = re.compile(
+    r"\b(stop|halt|pause|freeze|suspend)\b.{0,25}"
+    r"\b(everything|it all|all automation|automation|autonomy|the system|all agents|agents|"
+    r"all operations|operations|all dispatch(ing)?|dispatch(ing)?|planning)\b"
+    r"|\bstop (it )?all\b|\bemergency stop\b|\bkill ?switch\b|\bstand everything down\b",
+    re.I,
+)
+
+
+def _control_intent(question: str) -> str | None:
+    if _NEGATED.search(question):
+        return None
+    if _RESUME.search(question):
+        return "resume"
+    if _HALT.search(question):
+        return "halt"
+    return None
+
+
+async def _control(intent: str, *, actor: str, city_id: str) -> Answer:
+    from app.ops import autonomy
+
+    try:
+        out_now = await db.fetchval(
+            """select count(*) from assignments
+                where sim_run_id is null and status in ('en_route', 'on_site')""")
+    except Exception:  # noqa: BLE001
+        out_now = None
+    if intent == "halt":
+        st = await autonomy.pause(by=actor, reason=f"Copilot: emergency stop by {actor}", city_id=city_id)
+        rows = [
+            {"what": "Automatic re-planning", "now": "paused (changes are counted, not acted on)"},
+            {"what": "Automatic alerts and decisions", "now": "held for an officer"},
+            {"what": "LangGraph cycle and the LLM Commander", "now": "not running"},
+            {"what": "Simulation", "now": "stopped" if st.get("stoppedDemo") else "was not running"},
+            {"what": "Crews already en route or on scene",
+             "now": f"{out_now if out_now is not None else 'all'} carry on — not recalled"},
+        ]
+        return Answer(
+            text=("Emergency stop is on. Nothing moves a unit or tells the public anything on its "
+                  "own until you resume. Crews already on the road or on scene carry on: pulling "
+                  "them back is a decision, so say \"recall <unit>\" for any you want back. "
+                  "Say \"resume operations\" to restart; one catch-up re-plan will run."
+                  + (" (It was already on.)" if st.get("alreadyPaused") else "")),
+            blocks=[{"type": "table", "title": "What stopped",
+                     "columns": [{"key": "what", "label": ""}, {"key": "now", "label": "Now"}],
+                     "rows": rows, "note": f"Paused by {actor}."}],
+            intent="halt", tools_used=["autonomy.pause"], engine="rules",
+            suggestions=["What is everyone doing?", "Recall the first one", "Resume operations"],
+        )
+    st = await autonomy.resume(by=actor, city_id=city_id)
+    if not st.get("wasPaused"):
+        text = "Nothing was paused; the system is running normally."
+    else:
+        text = (f"Resumed. While paused, {st.get('heldReplans', 0)} change(s) arrived that would "
+                "have triggered a re-plan; one catch-up re-plan is running now against the world "
+                "as it is. Decisions held during the pause are still in Approvals.")
+    return Answer(text=text, intent="resume", tools_used=["autonomy.resume"], engine="rules",
+                  suggestions=["What changed?", "What is waiting for my approval?"])
 
 
 # ------------------------------------------------------------------- apply ---

@@ -28,6 +28,15 @@
 const VERSION = "indradhanu-v1"
 const SHELL = `${VERSION}-shell`
 const DATA = `${VERSION}-data`
+const MAPBOX = `${VERSION}-mapbox`
+
+/* Mapbox's style JSON, sprites and font glyphs: the same few hundred files on
+ * every visit, and on a cold load they are what the map waits for before it can
+ * draw anything. Served from cache immediately and refreshed in the background.
+ * Vector tiles are left to Mapbox GL's own tile cache and the HTTP cache, which
+ * honour Mapbox's cache headers. */
+const MAPBOX_STATIC = [/^\/styles\/v1\//, /^\/fonts\/v1\//, /\/sprite(@2x)?\.(json|png)$/]
+const MAX_MAPBOX_ENTRIES = 600
 
 /* Enough to boot. Vite's hashed assets are picked up by the runtime cache
  * below rather than listed here, because their names change every build. */
@@ -275,6 +284,11 @@ self.addEventListener("fetch", (event) => {
 
   if (request.method !== "GET") return
 
+  if (url.hostname === "api.mapbox.com" && MAPBOX_STATIC.some((re) => re.test(url.pathname))) {
+    event.respondWith(staleWhileRevalidate(request))
+    return
+  }
+
   // Never serve a control room or configuration screen from cache.
   if (url.pathname.includes("/demo/") || url.pathname.includes("/config/")) return
 
@@ -346,6 +360,22 @@ async function networkFirst(request) {
       status: cached.status, statusText: cached.statusText, headers,
     })
   }
+}
+
+async function staleWhileRevalidate(request) {
+  const cache = await caches.open(MAPBOX)
+  const cached = await cache.match(request)
+  const refresh = fetch(request)
+    .then(async (response) => {
+      if (response.ok) {
+        await cache.put(request, response.clone())
+        const keys = await cache.keys()
+        for (let i = 0; i < keys.length - MAX_MAPBOX_ENTRIES; i++) await cache.delete(keys[i])
+      }
+      return response
+    })
+    .catch(() => cached)
+  return cached || refresh
 }
 
 async function cacheFirst(request) {

@@ -47,6 +47,7 @@ import { PersonaSwitcher } from "./PersonaSwitcher"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { DemoProvider, useDemo } from "@/routes/demo/DemoProvider"
+import { AutonomyControl } from "@/routes/admin/AutonomyControl"
 
 /** What each nav badge counts, and how loudly to say it.
  *
@@ -463,7 +464,12 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 overflow-auto">{children}</main>
+        <main className="min-w-0 flex-1 overflow-auto">
+          <div className="px-4 pt-2 md:px-6">
+            <AutonomyControl />
+          </div>
+          {children}
+        </main>
       </SidebarInset>
     </SidebarProvider>
   )

@@ -5,7 +5,7 @@ import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts"
-import { useDemo } from "@/routes/demo/DemoProvider"
+import type { DemoState } from "@/routes/demo/useDemo"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useMeshStatus } from "./meshApi"
 import { isOpen, type Zone } from "./zones"
@@ -80,8 +80,12 @@ const Empty = ({ text }: { text: string }) => (
 
 const pretty = (s: string) => s.replace(/_/g, " ")
 
-export default function WallAnalytics({ zones, now }: { zones: Zone[]; now: number }) {
-  const { state } = useDemo()
+export default function WallAnalytics({ zones, now, state, scope, onClearScope }: {
+  zones: Zone[]; now: number; state: DemoState
+  /** The zone whose screen is selected, or null for the whole city. */
+  scope: Zone | null
+  onClearScope: () => void
+}) {
   const { data: mesh } = useMeshStatus(5000)
 
   const d = useMemo(() => {
@@ -202,7 +206,23 @@ export default function WallAnalytics({ zones, now }: { zones: Zone[]; now: numb
 
   return (
     <section className="space-y-3">
-      <h2 className="text-sm font-semibold">Analytics</h2>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold">Analytics</h2>
+        {scope ? (
+          <>
+            <span className="rounded-md bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-800 dark:text-sky-300">
+              {scope.name} only
+            </span>
+            <button onClick={onClearScope} className="text-primary text-xs hover:underline">
+              show the whole city
+            </button>
+          </>
+        ) : (
+          <span className="text-muted-foreground text-xs">
+            Whole city · click a zone screen above to see just that area
+          </span>
+        )}
+      </div>
 
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
         <Stat label="Open incidents" value={d.open.length} sub={`${zones.length} zones`} to="/admin/response" />

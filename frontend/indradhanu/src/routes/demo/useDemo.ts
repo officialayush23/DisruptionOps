@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { request } from "@/api/httpClient"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
+import * as localCache from "@/lib/localCache"
+
+const SNAPSHOT_KEY = "demo:snapshot:v1"
+const GEOMETRY_KEY = "demo:geometry:v1"
 
 export type Ward = {
   id: string; name: string; number: string; centroid: [number, number]
@@ -166,6 +170,9 @@ export type Plan = {
 }
 export type DemoState = {
   running: boolean; tick: number; simNow: string | null; error: string | null
+  /** Set only while showing the copy cached on this browser, before the first
+   *  live snapshot has arrived. Never set on live data. */
+  cachedAt?: string | null
   citizen: {
     lng: number; lat: number; wardId: string | null
     wardName: string; inside: boolean; note?: string
@@ -207,7 +214,12 @@ export const EMPTY_DEMO: DemoState = {
  *  merged back in here from a ref.
  */
 export function useDemoPoll(pollMs = 1000) {
-  const [state, setState] = useState<DemoState>(EMPTY_DEMO)
+  // Start from the last world this browser saw, marked as cached, so the wall
+  // and the maps draw at once instead of waiting on a cold server.
+  const [state, setState] = useState<DemoState>(() => {
+    const cached = localCache.peek<DemoState & { savedAt: string }>(SNAPSHOT_KEY)
+    return cached ? { ...cached, cachedAt: cached.savedAt } : EMPTY_DEMO
+  })
   const [error, setError] = useState<string | null>(null)
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
   const inFlight = useRef(false)
@@ -227,13 +239,19 @@ export function useDemoPoll(pollMs = 1000) {
       if (mine !== seq.current) return
       if (withGeometry) {
         for (const w of next.wards) geometry.current.set(w.id, w.boundary)
+        void localCache.set(GEOMETRY_KEY, [...geometry.current.entries()])
       } else {
+        // A ward we have no boundary for (added since the cache was written):
+        // ask for geometry again next poll.
+        if (next.wards.some((w) => !geometry.current.has(w.id))) geometry.current.clear()
         next.wards = next.wards.map((w) => ({
           ...w,
           boundary: geometry.current.get(w.id) ?? null,
         }))
       }
       setState(next)
+      // Keep a copy for the next cold start: every 15 s is plenty.
+      localCache.setThrottled(SNAPSHOT_KEY, { ...next, savedAt: new Date().toISOString() }, 15_000)
       setError(null)
       setLatencyMs(Math.round(performance.now() - started))
     } catch (e) {
@@ -252,9 +270,27 @@ export function useDemoPoll(pollMs = 1000) {
   )
 
   useEffect(() => {
-    void refresh()
-    const id = setInterval(() => void refresh(), pollInterval(live, pollMs))
-    return () => clearInterval(id)
+    let alive = true
+    let id: ReturnType<typeof setInterval> | undefined
+    // Ward boundaries and the last snapshot from IndexedDB first (milliseconds),
+    // so the first request can skip the geometry, which is most of its bytes.
+    void (async () => {
+      if (geometry.current.size === 0) {
+        const geo = await localCache.get<[string, [number, number][] | null][]>(GEOMETRY_KEY)
+        if (geo?.length) geometry.current = new Map(geo)
+      }
+      if (seq.current === 0) {
+        const cached = await localCache.get<DemoState & { savedAt: string }>(SNAPSHOT_KEY)
+        if (alive && cached && seq.current === 0) setState({ ...cached, cachedAt: cached.savedAt })
+      }
+      if (!alive) return
+      void refresh()
+      id = setInterval(() => void refresh(), pollInterval(live, pollMs))
+    })()
+    return () => {
+      alive = false
+      if (id) clearInterval(id)
+    }
   }, [refresh, pollMs, live])
 
   const act = useCallback(

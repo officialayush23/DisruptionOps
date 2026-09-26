@@ -42,6 +42,10 @@ async def lifespan(_: FastAPI):
         hazards=len(taxonomy.cache.hazards),
         resource_kinds=len(taxonomy.cache.resource_kinds),
     )
+    # An emergency stop survives a restart: read it before anything can act.
+    from app.ops import autonomy
+
+    await autonomy.load()
     # Listen to the event log from now on, demo or no demo.
     await event_router.start()
     try:

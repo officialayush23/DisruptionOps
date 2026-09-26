@@ -87,6 +87,11 @@ def gate(authority: Authority, confidence: float) -> DecisionStatus:
     Authority is the hard one: no amount of model confidence promotes an action
     the delegation matrix reserves to the Commissioner.
     """
+    from app.ops import autonomy
+
+    # Emergency stop: nothing issues on its own, whatever the delegation.
+    if autonomy.paused():
+        return DecisionStatus.AWAITING_APPROVAL
     if authority.within_delegation and confidence >= CONFIDENCE_FLOOR:
         return DecisionStatus.AUTO_ISSUED
     return DecisionStatus.AWAITING_APPROVAL
@@ -94,6 +99,11 @@ def gate(authority: Authority, confidence: float) -> DecisionStatus:
 
 def gate_reason(authority: Authority, confidence: float) -> str:
     """Plain-language explanation, shown next to the decision in the console."""
+    from app.ops import autonomy
+
+    if autonomy.paused():
+        return (f"Automation is paused ({autonomy.state.reason or 'emergency stop'}, by "
+                f"{autonomy.state.by or 'an officer'}), so every decision waits for a person.")
     if not authority.within_delegation:
         return (
             f"{authority.clause} reserves this to the {authority.delegated_to}, "

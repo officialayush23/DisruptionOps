@@ -183,6 +183,12 @@ async def _poll_once() -> None:
         state.cursor = max(state.cursor, int(ev["id"]))
         state.events_seen += 1
         decision = route(ev)
+        from app.ops import autonomy
+
+        if autonomy.paused():
+            if decision.replan:
+                autonomy.state.held_replans += 1
+            continue
         if decision.replan:
             request_replan(decision.replan, ev.get("city_id") or "pune")
         if decision.nudge:
@@ -219,6 +225,12 @@ async def _replan_loop() -> None:
         _wake.clear()
         batch, state.pending = state.pending, []
         if not batch:
+            continue
+        from app.ops import autonomy
+
+        if autonomy.paused():
+            # Emergency stop: keep listening, count, do not re-plan.
+            autonomy.state.held_replans += len(batch)
             continue
         by_city: dict[str, list[str]] = {}
         for city, why in batch:

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
 import type { Feature, FeatureCollection } from "geojson"
 import { imageName, registerIcons } from "./icons"
+import * as localCache from "@/lib/localCache"
 import "mapbox-gl/dist/mapbox-gl.css"
 
 /** The map, on Mapbox.
@@ -98,9 +99,25 @@ type Props = {
    *  do this by handing us a new object with the same coordinates in it, which
    *  worked only because the effect below compared object identity. */
   recentreKey?: number
+  /** Called with a ward id when the ward itself (not an incident) is clicked. */
+  onPickWard?: (id: string) => void
+  /** Keep a picture of this map under this key and show it instantly next
+   *  time, until the live map has painted. One key per screen. */
+  snapshotKey?: string
 }
 
 const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
+
+// Start Mapbox's web workers before the first map is built, so the first
+// screen does not pay for spinning them up. Harmless if called again.
+try {
+  ;(mapboxgl as unknown as { prewarm?: () => void }).prewarm?.()
+} catch {
+  /* older builds without prewarm */
+}
+
+/** How often a screen's picture is refreshed while it is on. */
+const SNAPSHOT_EVERY_MS = 15_000
 
 /** Mapbox's own popup stylesheet is a white card with a white arrow, which on
  *  the dark basemap rendered as near-white text on near-white and read as
@@ -328,11 +345,32 @@ export function LiveMap({
   needs = [], activity, routes = [],
   route, routeLabel, me, center = [73.88, 18.58], zoom = 11.6, className,
   onPickIncident, followMe = false, recentreKey = 0, onUserMove,
+  onPickWard, snapshotKey,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<mapboxgl.Map | null>(null)
   const popup = useRef<mapboxgl.Popup | null>(null)
   const [ready, setReady] = useState(false)
+  // The latest callbacks, for handlers registered once at mount.
+  const pickWard = useRef(onPickWard)
+  useEffect(() => {
+    pickWard.current = onPickWard
+  }, [onPickWard])
+  const snapKey = snapshotKey ? `snap:${snapshotKey}` : null
+  const [snapshot, setSnapshot] = useState<string | undefined>(() =>
+    snapKey ? localCache.peek<string>(snapKey) : undefined
+  )
+  const [painted, setPainted] = useState(false)
+  useEffect(() => {
+    if (!snapKey || snapshot) return
+    let alive = true
+    void localCache.get<string>(snapKey).then((v) => {
+      if (alive && v) setSnapshot(v)
+    })
+    return () => {
+      alive = false
+    }
+  }, [snapKey, snapshot])
   const [, setIconsReady] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
 
@@ -346,11 +384,22 @@ export function LiveMap({
     mapboxgl.accessToken = TOKEN
     const dark = document.documentElement.classList.contains("dark")
     try {
-      const m = new mapboxgl.Map({
+      const options = {
         container: container.current,
         style: dark ? BASEMAP.dark : BASEMAP.light,
         center, zoom, attributionControl: true,
-      })
+        // Speed over polish: no tile fade-in, no re-fetching tiles that are
+        // merely past their HTTP expiry, a larger in-memory tile cache, flat
+        // mercator (the globe view is slower and useless at city scale), and
+        // no antialiasing pass.
+        fadeDuration: 0,
+        refreshExpiredTiles: false,
+        maxTileCacheSize: 400,
+        antialias: false,
+        projection: "mercator",
+        performanceMetricsCollection: false,
+      } as mapboxgl.MapOptions
+      const m = new mapboxgl.Map(options)
       map.current = m
       m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right")
       popup.current = new mapboxgl.Popup({
@@ -606,10 +655,37 @@ export function LiveMap({
         // hazard icon itself or the ring at the end of a route pointing at it.
         m.on("click", (e) => {
           const layers = ["incident-dot", "endpoint-ring"].filter((id) => m.getLayer(id))
-          if (!layers.length) return
-          const hits = m.queryRenderedFeatures(e.point, { layers })
+          const hits = layers.length ? m.queryRenderedFeatures(e.point, { layers }) : []
           const id = hits.length ? propsOf(hits[0]).incidentId ?? propsOf(hits[0]).id : null
-          if (id && onPickIncident) onPickIncident(String(id))
+          if (id && onPickIncident) {
+            onPickIncident(String(id))
+            return
+          }
+          // Nothing more specific under the cursor: the ward itself.
+          if (pickWard.current && m.getLayer("ward-fill")) {
+            const ward = m.queryRenderedFeatures(e.point, { layers: ["ward-fill"] })
+            const wid = ward.length ? propsOf(ward[0]).id : null
+            if (wid) pickWard.current(String(wid))
+          }
+        })
+
+        // A picture of the painted map, kept for next time. Taken inside a
+        // render callback, the one moment the WebGL buffer is still readable
+        // without preserveDrawingBuffer (which would slow every frame).
+        let lastShot = 0
+        m.on("idle", () => {
+          setPainted(true)
+          if (!snapKey || Date.now() - lastShot < SNAPSHOT_EVERY_MS) return
+          lastShot = Date.now()
+          m.once("render", () => {
+            try {
+              const url = m.getCanvas().toDataURL("image/jpeg", 0.55)
+              if (url.length > 2000) void localCache.set(snapKey, url)
+            } catch {
+              /* a tainted or lost context: skip this one */
+            }
+          })
+          m.triggerRepaint()
         })
 
         setReady(true)
@@ -1000,5 +1076,17 @@ export function LiveMap({
     )
   }
 
-  return <div ref={container} className={className ?? "h-[520px] w-full rounded-lg border"} />
+  return (
+    <div className={`relative overflow-hidden ${className ?? "h-[520px] w-full rounded-lg border"}`}>
+      <div ref={container} className="h-full w-full" />
+      {snapshot && !painted && (
+        <img
+          src={snapshot}
+          alt=""
+          aria-hidden
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+        />
+      )}
+    </div>
+  )
 }

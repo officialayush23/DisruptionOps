@@ -287,6 +287,33 @@ class AgentGraph(unittest.TestCase):
         self.assertIn("write", ops)
 
 
+class EmergencyStop(unittest.TestCase):
+    def test_paused_gate_holds_and_policy_waits(self):
+        import importlib
+        from app.ops import autonomy
+        from app.agents import policy
+        autonomy.state.paused = True
+        try:
+            auth = type("A", (), {"within_delegation": True, "clause": "c", "delegated_to": "x"})()
+            self.assertEqual(str(policy.gate(auth, 0.99)), "awaiting_approval")
+            t = AgentGraph()
+            g = t.setup(diff=Diff(assigned=[Change("assigned", "u1")]))
+            run = asyncio.run(g.run_cycle(trigger="x"))
+            self.assertEqual(run.outcome, "held")
+            self.assertEqual(t.rp.commits, 0)
+            t.tearDown()
+        finally:
+            autonomy.state.paused = False
+
+    def test_copilot_control_phrases(self):
+        from app.copilot.agent import _control_intent as ci
+        self.assertEqual(ci("stop everything"), "halt")
+        self.assertEqual(ci("emergency stop"), "halt")
+        self.assertEqual(ci("resume operations"), "resume")
+        self.assertIsNone(ci("stop Ambulance 4"))
+        self.assertIsNone(ci("what if we stop everything"))
+
+
 class Guardrails(unittest.TestCase):
     def test_pii_redacted_and_injection_flagged(self):
         from app.agents import guardrails as gr

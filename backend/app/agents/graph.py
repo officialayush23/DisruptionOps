@@ -457,7 +457,13 @@ async def policy_gate(view, mem: ScopedMemory) -> dict[str, Any]:
     guardrail, or repeats something an officer just rejected."""
     from app.db import session as db
 
+    from app.ops import autonomy
+
     p = view.get("proposal") or {}
+    if autonomy.paused():
+        reason = f"Automation paused by {autonomy.state.by or 'an officer'}; nothing is written."
+        return {"needs_officer": False, "held": True, "gate_reason": reason,
+                "trace": _step("policy_gate", reason)}
     if not p.get("changed"):
         return {"needs_officer": False, "held": False, "gate_reason": "no change",
                 "trace": _step("policy_gate", "Nothing changes; nothing to authorise.")}
@@ -543,7 +549,10 @@ def rejected(view, _mem) -> dict[str, Any]:
 async def dispatch(view, _mem) -> dict[str, Any]:
     """Commit. Re-solves against the world as it is now and writes it."""
     from app.agents import replan as replanner
+    from app.ops import autonomy
 
+    if autonomy.paused():   # an approval answered after an emergency stop
+        return {"outcome": "held", "trace": _step("dispatch", "Automation paused; not written.")}
     diff = await replanner.replan(city_id=view["city_id"], trigger=view["trigger"], actor=ACTOR)
     d = _diff_dict(diff)
     return {"dispatched": d, "outcome": "dispatched",

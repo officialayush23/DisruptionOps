@@ -45,6 +45,10 @@ async def agent_graph_diagram(_: StaffPrincipal) -> dict:
 async def agent_graph_run(body: RunIn, _: StaffPrincipal) -> dict:
     if not graph.enabled():
         return {"ok": False, "reason": graph.IMPORT_ERROR or "AGENT_GRAPH_ENABLED is off"}
+    from app.ops import autonomy
+
+    if autonomy.paused():
+        return {"ok": False, "reason": "Automation is paused (emergency stop). Resume it first."}
     run = await graph.run_cycle(city_id=body.city_id, trigger=body.trigger)
     return {"ok": True, "run": run.as_dict()}
 
