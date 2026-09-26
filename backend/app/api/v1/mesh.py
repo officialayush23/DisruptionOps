@@ -9,6 +9,7 @@ device, not a person:
     GET  /mesh/outbox        what to broadcast next
     POST /mesh/outbox/ack    what was broadcast
     POST /mesh/civ-sync      a bitchat phone's whole "back online" bundle
+    POST /mesh/gateway/heartbeat   "this phone is linked", every ~10 s
 
 Plus `POST /ingest/sensor` for a camera node that has internet and can skip the
 mesh, and `GET /mesh/status` for the console.
@@ -115,6 +116,31 @@ async def civ_sync(body: CivBundleIn,
     _gateway(x_mesh_gateway_key)
     return await service.receive_civ_bundle(body.model_dump(), gateway_id=body.gateway_id,
                                             city_id=body.city_id)
+
+
+class HeartbeatIn(Camel):
+    """A gateway phone saying it is alive and linked, with what it can see."""
+
+    gateway_id: str = Field(min_length=1, max_length=80)
+    city_id: str = "pune"
+    label: str | None = Field(default=None, max_length=80)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    peers: int | None = Field(default=None, ge=0, le=10_000)
+    queued: int | None = Field(default=None, ge=0, le=100_000)
+    battery: int | None = Field(default=None, ge=0, le=100)
+    app_version: str | None = Field(default=None, max_length=40)
+    listen: bool | None = None
+
+
+@router.post("/mesh/gateway/heartbeat")
+async def gateway_heartbeat(body: HeartbeatIn,
+                            x_mesh_gateway_key: str | None = Header(default=None)) -> dict:
+    """Marks the phone as a live gateway so the console's Mesh screen shows it
+    even before it has carried a single packet. Also the phone's "Sync now"
+    check: a 200 here proves the URL and the key are right."""
+    _gateway(x_mesh_gateway_key)
+    return await service.gateway_heartbeat(body.model_dump())
 
 
 @router.post("/ingest/sensor")

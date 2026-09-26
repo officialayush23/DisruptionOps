@@ -47,6 +47,11 @@ SENSOR_CATEGORY = {
     "object_left": "unknown_report",
     "water_level": "waterlogging",
     "flood": "flooded_road",
+    # Classes the VLM names from a scene description (see the phone's
+    # SyncBundleBuilder.hazardKind and the camera's indradhanu_bridge.scene_kind).
+    "collapse": "unknown_report",
+    "medical": "unknown_report",
+    "assault": "unknown_report",
 }
 
 OUTBOUND_KINDS = (
@@ -56,6 +61,16 @@ OUTBOUND_KINDS = (
 
 
 # ----------------------------------------------------------------- helpers ---
+def _json(v: Any) -> Any:
+    """asyncpg hands jsonb back as text unless a codec is set; accept both."""
+    if isinstance(v, (str, bytes)):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return {}
+    return v if v is not None else {}
+
+
 async def ward_at(lng: float, lat: float, city_id: str = "pune") -> str | None:
     return await db.fetchval(
         """
@@ -552,19 +567,46 @@ async def ack(ids: list[str]) -> int:
     return int(str(status).split()[-1] or 0)
 
 
+async def gateway_heartbeat(hb: dict[str, Any]) -> dict:
+    """Upsert the gateway phone in mesh_nodes with what it reports about itself."""
+    gid = str(hb["gateway_id"])[:80]
+    meta = {k: hb.get(k) for k in ("peers", "queued", "battery", "app_version", "listen",
+                                   "city_id") if hb.get(k) is not None}
+    meta["linked_at"] = datetime.now(UTC).isoformat()
+    await db.execute(
+        """
+        insert into mesh_nodes (id, kind, label, lat, lon, last_seen, meta)
+        values ($1, 'gateway', $2, $3, $4, now(), $5::jsonb)
+        on conflict (id) do update
+           set kind = 'gateway', last_seen = now(),
+               label = coalesce(excluded.label, mesh_nodes.label),
+               lat = coalesce(excluded.lat, mesh_nodes.lat),
+               lon = coalesce(excluded.lon, mesh_nodes.lon),
+               meta = mesh_nodes.meta || excluded.meta
+        """,
+        gid, hb.get("label"), hb.get("lat"), hb.get("lon"), meta,
+    )
+    pending = await db.fetchval(
+        "select count(*) from mesh_outbox where status = 'pending' and city_id = $1",
+        hb.get("city_id") or "pune",
+    )
+    return {"ok": True, "gateway_id": gid, "server_time": datetime.now(UTC).isoformat(),
+            "outbox_pending": int(pending or 0), "signing": bool(settings.mesh_hmac_key)}
+
+
 async def status(city_id: str = "pune") -> dict:
     nodes = await db.fetch(
         """
-        select id, kind, label, lat, lon, ward_id, last_seen,
+        select id, kind, label, lat, lon, ward_id, last_seen, meta,
                extract(epoch from now() - last_seen)::int age_s
-          from mesh_nodes order by last_seen desc limit 50
+          from mesh_nodes order by last_seen desc limit 100
         """
     )
     recent = await db.fetch(
         """
-        select packet_id, type, node_id, gateway_id, verified, outcome, outcome_ref,
+        select id, packet_id, type, node_id, gateway_id, verified, outcome, outcome_ref,
                received_at, body
-          from mesh_messages order by id desc limit 30
+          from mesh_messages order by id desc limit 60
         """
     )
     box = await db.fetchrow(
@@ -578,8 +620,10 @@ async def status(city_id: str = "pune") -> dict:
         city_id,
     )
     return {
-        "nodes": [dict(n) | {"last_seen": n["last_seen"].isoformat()} for n in nodes],
-        "recent": [dict(m) | {"received_at": m["received_at"].isoformat()} for m in recent],
+        "nodes": [dict(n) | {"last_seen": n["last_seen"].isoformat(),
+                             "meta": _json(n["meta"])} for n in nodes],
+        "recent": [dict(m) | {"received_at": m["received_at"].isoformat(),
+                              "body": _json(m["body"])} for m in recent],
         "outbox": dict(box) if box else {},
         "signing": bool(settings.mesh_hmac_key),
         "enabled": bool(settings.mesh_gateway_key),

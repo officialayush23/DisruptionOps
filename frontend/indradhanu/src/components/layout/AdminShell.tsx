@@ -2,12 +2,14 @@ import { useState } from "react"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
+  Bluetooth,
   BrainCircuit,
   ClipboardCheck,
   Gauge,
   Handshake,
   History,
   Inbox,
+  ListChecks,
   Network,
   Radar,
   Radio,
@@ -18,6 +20,7 @@ import {
   TrendingUp,
   Truck,
   Waypoints,
+  Zap,
 } from "lucide-react"
 import {
   Sidebar,
@@ -81,6 +84,16 @@ const NAV: {
   // were, which is the whole of the "too cluttered" complaint — not density on
   // any one screen, but no answer to "where do I start".
   { group: "Operations", to: "/admin/console", label: "Live map", icon: Radar },
+  // Every report and mesh packet as it lands, from the app, the mesh, cameras
+  // and crews, with what the pipeline did with each.
+  { group: "Operations", to: "/admin/feed", label: "Live feed", icon: Zap },
+  // Per incident: which reports opened it, and what is being done about it.
+  {
+    group: "Operations", to: "/admin/response", label: "Incidents & response", icon: ListChecks,
+    count: (c) => (c.unattended ? { n: c.unattended, tone: "gap", what: "open with nobody on the way" } : null),
+  },
+  // The bitchat gateway phones linked to this control room, and what they carried.
+  { group: "Operations", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
   // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
   // authorises, and this is the ledger of what it did — which is what an
   // officer was missing, not a second way to move a vehicle by hand.

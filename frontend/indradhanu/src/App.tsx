@@ -22,6 +22,9 @@ import AlertsPage from "@/routes/admin/AlertsPage"
 import AfterAction from "@/routes/admin/AfterAction"
 import Replay from "@/routes/admin/Replay"
 import Architecture from "@/routes/admin/Architecture"
+import LiveFeed from "@/routes/admin/LiveFeed"
+import IncidentResponse from "@/routes/admin/IncidentResponse"
+import MeshDevices from "@/routes/admin/MeshDevices"
 
 /** Three interfaces, three URLs.
  *
@@ -62,6 +65,9 @@ export function App() {
                     "where" and not "why that unit". */}
                 <Route path="dispatch" element={<Dispatch />} />
                 <Route path="intake" element={<IntakeInbox />} />
+                <Route path="feed" element={<LiveFeed />} />
+                <Route path="response" element={<IncidentResponse />} />
+                <Route path="mesh" element={<MeshDevices />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="forecast" element={<Forecast />} />
                 <Route path="incidents" element={<IncidentQueue />} />
