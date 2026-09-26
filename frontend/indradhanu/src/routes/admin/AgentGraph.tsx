@@ -18,7 +18,14 @@ type Run = {
 type Status = {
   available: boolean; enabled: boolean; importError: string | null
   checkpointer: string; approvalSeverity: number
+  guardrails?: Record<string, number>
+  contracts?: { node: string; reads: string[]; writes: string[]; agent: string | null }[]
+  memoryAccess?: Record<string, { read: string[]; write: string[] }>
   waiting: Run[]; runs: Run[]
+}
+type Memory = {
+  ledger: { at: number; agent: string; op: string; namespace: string; detail: string; runId: string | null }[]
+  orders: { id: string; content: string; created_by?: string }[]
 }
 
 const NODES = [
@@ -43,6 +50,8 @@ export default function AgentGraph() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [open, setOpen] = useState<string | null>(null)
+  const [mem, setMem] = useState<Memory | null>(null)
+  const [order, setOrder] = useState("")
   const inFlight = useRef(false)
 
   // Polled; after an action the next poll (≤2.5 s) shows the result.
@@ -53,9 +62,13 @@ export default function AgentGraph() {
       if (inFlight.current) return
       inFlight.current = true
       try {
-        const s = await request<Status>("/agent-graph")
+        const [s, m] = await Promise.all([
+          request<Status>("/agent-graph"),
+          request<Memory>("/agent-graph/memory").catch(() => null),
+        ])
         if (alive) {
           setData(s)
+          if (m) setMem(m)
           setError(null)
         }
       } catch (e) {
@@ -90,6 +103,21 @@ export default function AgentGraph() {
         method: "POST", body: { approved },
         toast: { loading: approved ? "Approving…" : "Rejecting…", success: approved ? "Approved; dispatching." : "Rejected; current assignments stand." },
       })
+      setRefresh((n) => n + 1)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function addOrder() {
+    if (order.trim().length < 3) return
+    setBusy("order")
+    try {
+      await request("/agent-graph/orders", {
+        method: "POST", body: { text: order.trim() },
+        toast: { loading: "Saving standing order…", success: "Standing order saved; every agent will read it." },
+      })
+      setOrder("")
       setRefresh((n) => n + 1)
     } finally {
       setBusy(null)
@@ -209,6 +237,91 @@ export default function AgentGraph() {
           )}
         </CardContent>
       </Card>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">State contracts</CardTitle>
+            <CardDescription>
+              Each node sees only what it reads and may change only what it writes; anything else fails
+              the step. Guardrails: at most {data?.guardrails?.maxRetaskPerCycle ?? 8} units moved per cycle
+              without an officer, coverage may not drop more than{" "}
+              {Math.round((data?.guardrails?.coverageDropTolerance ?? 0.05) * 100)}%, run timeout{" "}
+              {data?.guardrails?.runTimeoutS ?? 90}s, ≤{data?.guardrails?.maxAttempts ?? 3} solver attempts.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground text-left">
+                <tr><th className="py-1">Node</th><th>Reads</th><th>Writes</th><th>Memory</th></tr>
+              </thead>
+              <tbody>
+                {(data?.contracts ?? []).map((c) => (
+                  <tr key={c.node} className="border-t align-top">
+                    <td className="py-1 font-mono">{c.node}</td>
+                    <td className="text-muted-foreground">{c.reads.join(", ") || "—"}</td>
+                    <td>{c.writes.join(", ") || "trace only"}</td>
+                    <td>{c.agent ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Agent memory</CardTitle>
+            <CardDescription>
+              One namespace per agent. Standing orders are written only by officers and read by every agent;
+              “police” is readable by none. Every read, write and refusal is in the ledger.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-xs">
+            <div className="flex gap-2">
+              <input
+                value={order}
+                onChange={(e) => setOrder(e.target.value)}
+                placeholder="Standing order, e.g. Keep boat 3 at Sangam bridge until 18:00"
+                className="bg-background flex-1 rounded-md border px-2 py-1.5"
+                maxLength={300}
+              />
+              <Button size="sm" onClick={() => void addOrder()} disabled={busy === "order" || order.trim().length < 3}>
+                Add order
+              </Button>
+            </div>
+            {!!mem?.orders.length && (
+              <ul className="space-y-1">
+                {mem.orders.map((o) => <li key={o.id}>📌 {o.content}</li>)}
+              </ul>
+            )}
+            <div className="grid grid-cols-[auto_1fr_1fr] gap-x-3 gap-y-0.5">
+              <span className="text-muted-foreground">Agent</span>
+              <span className="text-muted-foreground">Reads</span>
+              <span className="text-muted-foreground">Writes</span>
+              {Object.entries(data?.memoryAccess ?? {}).map(([a, r]) => (
+                <div key={a} className="contents">
+                  <span className="font-mono">{a}</span>
+                  <span>{r.read.join(", ")}</span>
+                  <span>{r.write.join(", ")}</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div className="text-muted-foreground mb-1">Ledger (latest)</div>
+              <ul className="max-h-56 space-y-0.5 overflow-y-auto">
+                {(mem?.ledger ?? []).slice(0, 60).map((e, i) => (
+                  <li key={i} className={e.op === "denied" ? "text-destructive" : ""}>
+                    <span className="text-muted-foreground tabular-nums">{clock(e.at)}</span>{" "}
+                    <b className="font-mono">{e.agent}</b> {e.op} <span className="font-mono">{e.namespace}</span>
+                    {e.detail ? ` — ${e.detail}` : ""}
+                  </li>
+                ))}
+                {!mem?.ledger.length && <li className="text-muted-foreground">Nothing yet.</li>}
+              </ul>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

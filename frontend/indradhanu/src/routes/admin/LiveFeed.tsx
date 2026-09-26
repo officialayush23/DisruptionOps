@@ -54,6 +54,7 @@ function fromReport(r: RawReport): Item {
   const tone: Item["tone"] = r.opened ? "open" : r.incidentId ? "merge" : "held"
   const meta = [r.source]
   if (r.trust != null) meta.push(`trust ${Math.round(r.trust * 100)}%`)
+  if (r.assessedSeverity) meta.push(`read as S${r.assessedSeverity}${r.severityRead ? ` (${r.severityRead.method})` : ""}`)
   if (r.hasPhoto) meta.push("photo")
   if (r.reporter) meta.push(r.reporter)
   return {

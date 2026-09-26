@@ -362,6 +362,19 @@ function ReportRow({ r, label }: { r: RawReport; label: string }) {
           )}
         </div>
         <p className="mt-1 text-xs">{r.text}</p>
+        {r.severityRead && (
+          <p className="mt-0.5 text-xs">
+            <span className={`mr-1 rounded px-1 font-semibold ${sevTone(r.severityRead.severity)}`}>
+              read as S{r.severityRead.severity}
+            </span>
+            <span className="text-muted-foreground">
+              by {r.severityRead.method}: {r.severityRead.reason}
+              {r.severityRead.life_threat ? " · life threat" : ""}
+              {r.severityRead.injection ? " · instruction-like text, not sent to a model" : ""}
+              {r.severityRead.redacted?.length ? ` · redacted ${r.severityRead.redacted.join(", ")}` : ""}
+            </span>
+          </p>
+        )}
         {r.linkReason && label !== "Opened it" && (
           <p className="text-muted-foreground mt-0.5 text-xs">why merged: {r.linkReason}</p>
         )}

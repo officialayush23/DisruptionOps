@@ -251,12 +251,15 @@ async def _recompute_incident(conn: Any, incident_id: str, clock: Clock) -> dict
                count(distinct coalesce(r.reporter_id::text, r.device_id, r.id::text))::int as independent,
                avg(coalesce(r.trust_score, 0.5))     as avg_trust,
                max(coalesce(r.trust_score, 0.5))     as max_trust,
-               min(r.created_at)                     as first_at
+               min(r.created_at)                     as first_at,
+               -- The worst reading of any report trusted enough to act on.
+               max(r.assessed_severity) filter (
+                 where coalesce(r.trust_score, 0.5) >= $2)  as assessed
           from citizen_reports r
          where r.incident_id = $1::uuid
            and r.verification_status <> 'rejected'
         """,
-        incident_id,
+        incident_id, trust.QUARANTINE,
     )
     n = row["n"] or 0
     independent = row["independent"] or 0
@@ -268,7 +271,13 @@ async def _recompute_incident(conn: Any, incident_id: str, clock: Clock) -> dict
     cat = await conn.fetchval("select category from incidents where id = $1::uuid", incident_id)
     ref = taxonomy.categories.get(cat)
     base = ref.base_severity if ref else 3
-    severity = min(5, base + (1 if independent >= 3 else 0) + (1 if independent >= 6 else 0))
+    rule = min(5, base + (1 if independent >= 3 else 0) + (1 if independent >= 6 else 0))
+    # The text's own reading (bounded in severity.py) can lower an unclassified
+    # "wassup" to 2 or raise "he is unconscious" to 5; corroboration can only
+    # raise it further.
+    assessed = row["assessed"]
+    floor = rule if (independent >= 3 or getattr(ref, "life_safety", False)) else rule - 1
+    severity = rule if assessed is None else max(1, min(5, max(int(assessed), floor)))
 
     await conn.execute(
         """
@@ -286,6 +295,23 @@ async def _recompute_incident(conn: Any, incident_id: str, clock: Clock) -> dict
     )
     return {"report_count": n, "independent": independent,
             "confidence": round(confidence, 4), "severity": severity}
+
+
+async def _assess_severity(note: str, *, category: str, source: str, simulated: bool):
+    from app.core.config import settings
+    from app.incidents import parse as parser
+    from app.incidents import severity as sev
+
+    ref = taxonomy.categories.get(category)
+    base = ref.base_severity if ref else 3
+    try:
+        boost = parser.parse(note).urgency_boost if note else 0
+    except Exception:  # noqa: BLE001
+        boost = 0
+    use_models = bool(getattr(settings, "severity_models_enabled", True)) and not simulated \
+        and source not in ("sim", "field", "agency")
+    return await sev.assess(note or "", base=base, urgency_boost=boost, use_models=use_models,
+                            life_safety=bool(getattr(ref, "life_safety", False)))
 
 
 async def _write_needs(conn: Any, incident_id: str, category: str, clock: Clock) -> dict[str, int]:
@@ -382,6 +408,12 @@ async def receive(
         has_photo=bool(photo_url), source=source,
     )
 
+    # How bad is it, from the words: keywords, then a classifier, then the LLM,
+    # all bounded (see app/incidents/severity.py). Outside the transaction: a
+    # slow model must not hold row locks. Simulated reports skip the models.
+    severity_read = await _assess_severity(note, category=category, source=source,
+                                           simulated=clock.sim_run_id is not None)
+
     async with db.transaction() as conn:
         ward_name = await conn.fetchval("select name from wards where id = $1", ward_id) or ward_id
 
@@ -432,11 +464,12 @@ async def receive(
               (ward_id, city_id, category, location, note, photo_path, classified_as,
                reporter_id, reporter_name, source, device_id, occurred_at,
                trust_score, trust_breakdown, verification_status, classification_confidence,
-               sim_run_id, created_at, reporter_key, photo_evidence, photo_agreement)
+               sim_run_id, created_at, reporter_key, photo_evidence, photo_agreement,
+               assessed_severity, severity_assessment)
             values ($1,$2,$3,
                     extensions.ST_SetSRID(extensions.ST_MakePoint($4,$5),4326)::extensions.geography,
                     $6,$7,$3,$8::uuid,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18,$19,
-                    $20::jsonb,$21)
+                    $20::jsonb,$21,$22,$23::jsonb)
             returning id::text, created_at
             """,
             ward_id, city_id, category, lng, lat, note, photo_url,
@@ -444,6 +477,7 @@ async def receive(
             t.score, {"components": t.components, "reasons": t.reasons},
             t.status, t.score, clock.sim_run_id, now, reporter_key,
             json.dumps(photo_evidence) if photo_evidence else None, photo_agreement,
+            severity_read.severity, severity_read.as_dict(),
         )
         report_id = report_row["id"]
 

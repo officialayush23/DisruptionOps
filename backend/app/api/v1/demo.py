@@ -544,6 +544,7 @@ select r.id::text, r.note, r.category, r.classified_as,
        r.classification_confidence, r.source, r.device_id, r.reporter_name,
        r.trust_score, r.trust_breakdown, r.verification_status, r.street,
        r.ward_id, r.created_at, r.photo_path,
+       r.assessed_severity, r.severity_assessment,
        r.incident_id::text incident_id,
        -- The human verdict, and who recorded it. Selected here because the
        -- inbox is where somebody rules on a report, and a screen that offers
@@ -874,6 +875,10 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          ),
          "linkScore": float(r["link_score"]) if r["link_score"] is not None else None,
          "linkReason": r["link_reason"], "linkDecidedBy": r["link_decided_by"],
+         # What the severity reader made of the words (keywords, classifier or
+         # LLM, bounded), and why. None for reports filed before migration 024.
+         "assessedSeverity": r["assessed_severity"],
+         "severityRead": r["severity_assessment"] or None,
          # Exposed as `verdict`, not `outcome`: the inbox already uses
          # "outcome" for what the *system* did with a report (opened, merged,
          # held). Two different meanings under one name on one screen is how

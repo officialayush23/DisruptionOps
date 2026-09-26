@@ -1,65 +1,68 @@
 """The agent graph, on LangGraph.
 
 This is the cycle the event router runs whenever the world changes (a report,
-an incident, a road block, a crew update). Before this module the router called
-the CP-SAT re-planner directly; now it runs this graph, which does the same
-solve but with the steps an officer can see, a human-approval stop for the one
-kind of decision that should not be automatic, and a checkpoint per step.
+an incident, a road block, a crew update). It does the CP-SAT solve with the
+steps visible, a human-approval stop for the decisions that should not be
+automatic, a checkpoint per step, and three kinds of control around every
+agent:
+
+  **Strict state.** Each node is declared with the state keys it may READ and
+  the keys it may WRITE (`@contract`). It is handed a read-only view of only its
+  reads; anything it returns is checked against its writes and validated
+  against the schema (pydantic) before LangGraph merges it. A node that writes a
+  key it does not own, or a value of the wrong shape, fails the step instead of
+  corrupting the run. Fan-out nodes (`sense`, `domain`) get a validated payload
+  and never see the shared state at all.
+
+  **Guardrails** (app/agents/guardrails.py). Input: any text headed for a model
+  is cleaned, PII-redacted and injection-checked. Output: model answers must
+  pass a schema. Action: a plan is checked for double-assigned units, how many
+  units it moves in one cycle, and whether coverage drops; the last two send it
+  to an officer. Run: every run has a timeout and a recursion limit.
+
+  **Per-agent memory** (app/agents/agent_memory.py). Each agent has its own
+  namespace and an access list; officers' standing orders are readable by all
+  and writable by none of them; reads, writes and refusals go to a ledger. The
+  memory is used, not decorative: a domain planner that has been short of the
+  same capability three cycles running says so and flags mutual aid; the gate
+  remembers an officer's rejection and does not ask the same question again for
+  thirty minutes.
 
     START
-      └─ triage ──(severity ≥ 5)──► command (wake the LLM Incident Commander) ─┐
-            │                                                                   │
-            └─────────────────────────────────────────────────────────────────►┤
-                                                                                ▼
-         fan-out (Send) ─► sense[units] · sense[needs] · sense[risk] · sense[facilities]
-                                                                                │
-                                                                                ▼
-                                                                             assess
-         fan-out (Send) ─► domain[rescue] · domain[medical] · domain[logistics]   (only
-                                                                                │  domains
-                                                                                ▼  with a need)
-                                                                            optimise  (CP-SAT, dry run)
-                                                                                │
-                                                                            validate ──fail, <3 tries──► optimise
-                                                                                │
-                                                                           policy_gate
-                                          needs an officer ─► human_approval (interrupt)
-                                                 │ approved        │ rejected
-                                                 ▼                 ▼
-                                              dispatch            END   (current assignments stand)
-                                                 │
-                                              observe ──► END
+      └─ triage ─(S≥5)─► command ─┐
+            └──────────────────────┴─► fanout ─Send×4─► sense ─► assess
+                                                                   │
+                         ┌──────────Send per domain with a need────┘
+                         ▼
+                      domain ─► optimise (CP-SAT dry run) ─► validate ─fail<3─► optimise
+                                                               │fail×3 ─► give_up ─► END
+                                                               ▼
+                                                          policy_gate
+                    ┌────────────────┬───────────────┬─────────┴──────────┐
+                    ▼                ▼               ▼                    ▼
+             human_approval       dispatch         held               observe
+             (interrupt) ─no─► rejected ─► END     └─► END          (nothing changed)
+                    └──yes──► dispatch ─► observe ─► END
 
-LangGraph patterns used, and why:
-
-  * **Conditional branching** — triage decides whether the Commander is woken;
-    the gate decides whether a human is needed.
-  * **Parallel fan-out with `Send`** — the four situation reads and the domain
-    planners run concurrently and merge through reducers.
-  * **Loop** — validate → optimise, at most `MAX_ATTEMPTS` times.
-  * **Human-in-the-loop** — `interrupt()` pauses the graph before a plan that
-    pulls a unit off a severe incident. The run is checkpointed; an officer
-    approves or rejects from the console and the run resumes where it stopped.
-  * **Checkpointing** — every step is saved under the run's thread id
-    (in-memory by default, Postgres with `AGENT_GRAPH_CHECKPOINTER=postgres`).
-  * **Per-domain state** — each domain node sees only its own `Send` payload,
-    not the whole state, and writes back one summary.
-
-Nothing here decides a number. The solver assigns, the policy decides authority,
-the officer decides the exception. When `langgraph` is not installed the router
-falls back to the direct re-plan, so the system never depends on this module to
-function.
+When `langgraph` is not installed the router falls back to the direct re-plan,
+so the system never depends on this module to function.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import operator
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Annotated, Any, TypedDict
+from types import MappingProxyType
+from typing import Annotated, Any, Callable, TypedDict, get_type_hints
 
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+
+from app.agents import guardrails
+from app.agents.agent_memory import MemoryAccessDenied, ScopedMemory
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -82,8 +85,13 @@ except Exception as exc:  # noqa: BLE001 - the app must boot without it
 ACTOR = "agent:langgraph"
 MAX_ATTEMPTS = 3
 SEVERE = 5
+RUN_TIMEOUT_S = 90
+RECURSION_LIMIT = 40
+#: How long an officer's rejection holds the same re-tasking back.
+REJECTION_MEMORY_S = 30 * 60
+#: A domain short of the same capability this many recent cycles flags mutual aid.
+PERSISTENT_SHORTFALL = 3
 
-#: Capability -> domain planner. A capability not listed goes to logistics.
 DOMAINS: dict[str, str] = {
     "water_rescue": "rescue", "search_rescue": "rescue", "field_assessment": "rescue",
     "fire_suppression": "rescue",
@@ -95,39 +103,163 @@ DOMAINS: dict[str, str] = {
 SOURCES = ("units", "needs", "risk", "facilities")
 
 
+# ----------------------------------------------------------------- schemas ---
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Step(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    node: str
+    text: str = Field(max_length=600)
+    at: float
+
+
+class ChangeM(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    kind: str
+    resource_id: str
+    resource_label: str = ""
+    incident_id: str | None = None
+    incident_title: str = ""
+    ward_id: str = ""
+    from_incident_id: str | None = None
+    from_incident_title: str = ""
+    eta_minutes: int = 0
+    reason: str = ""
+
+
+class Proposal(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    plan_id: str | None = None
+    engine: str = ""
+    runtime_ms: int = 0
+    coverage: float = Field(default=1.0, ge=0.0, le=1.0)
+    kept: list[ChangeM] = Field(default_factory=list)
+    assigned: list[ChangeM] = Field(default_factory=list)
+    reassigned: list[ChangeM] = Field(default_factory=list)
+    released: list[ChangeM] = Field(default_factory=list)
+    uncovered: list[dict[str, Any]] = Field(default_factory=list)
+    changed: int = 0
+    headline: str = ""
+    error: str | None = None
+
+
+class Approval(_Strict):
+    """What comes back from the console. Validated strictly: it is outside input."""
+    approved: bool
+    by: str = Field(default="officer", max_length=80)
+    note: str | None = Field(default=None, max_length=300)
+
+
+class SensePayload(_Strict):
+    source: str
+    city_id: str
+    run_id: str
+
+
+class DomainPayload(_Strict):
+    domain: str
+    needs: dict[str, int]
+    units: dict[str, Any] = Field(default_factory=dict)
+    city_id: str
+    run_id: str
+
+
 # ------------------------------------------------------------------- state ---
 class GraphState(TypedDict, total=False):
     run_id: str
     city_id: str
     trigger: str
-    #: Highest open-incident severity, set by triage.
     max_severity: int
     commander_woken: bool
-    #: Parallel reads merge here (reducer: list concatenation).
+    orders_in_force: int
     situation: Annotated[list[dict[str, Any]], operator.add]
-    #: Unmet capability -> count, set by assess.
+    current_coverage: float
     shortfall: dict[str, int]
-    #: One summary per domain planner (reducer: list concatenation).
     domain_plans: Annotated[list[dict[str, Any]], operator.add]
     attempts: int
     proposal: dict[str, Any]
     valid: bool
     validation: str
     needs_officer: bool
+    held: bool
     gate_reason: str
     approval: dict[str, Any]
     dispatched: dict[str, Any]
     outcome: str
-    #: Every node appends one line (reducer: list concatenation).
     trace: Annotated[list[dict[str, Any]], operator.add]
 
 
+_HINTS = get_type_hints(GraphState, include_extras=True)
+_ADAPTERS = {k: TypeAdapter(v) for k, v in _HINTS.items()}
+#: Keys every node may read.
+_ALWAYS = ("run_id", "city_id", "trigger")
+
+
+class StateViolation(RuntimeError):
+    """A node wrote something it does not own, or of the wrong shape."""
+
+
+def _validate_update(node: str, update: Any, writes: frozenset[str]) -> dict[str, Any]:
+    if update is None:
+        return {}
+    if not isinstance(update, dict):
+        raise StateViolation(f"{node} returned {type(update).__name__}, not a state update")
+    extra = set(update) - writes - {"trace"}
+    if extra:
+        raise StateViolation(f"{node} may not write {sorted(extra)}")
+    for k, v in update.items():
+        try:
+            _ADAPTERS[k].validate_python(v)
+            if k == "proposal":
+                Proposal.model_validate(v)
+            elif k == "approval":
+                Approval.model_validate(v)
+            elif k == "trace":
+                TypeAdapter(list[Step]).validate_python(v)
+        except ValidationError as exc:
+            raise StateViolation(f"{node} wrote an invalid {k}: {exc.errors()[:1]}") from None
+    return update
+
+
+def contract(node: str, *, reads: tuple[str, ...] = (), writes: tuple[str, ...] = (),
+             agent: str | None = None, payload: type[BaseModel] | None = None) -> Callable:
+    """Declare what a node may see and change; enforce it on every call.
+
+    The wrapped function is called as `fn(view, memory)`: `view` is a read-only
+    mapping of only the declared reads (or the validated payload for a fan-out
+    node), `memory` the agent's `ScopedMemory` (or None)."""
+    allowed = frozenset(writes)
+
+    def deco(fn: Callable) -> Callable:
+        # No functools.wraps: LangGraph inspects a node's signature for the
+        # parameters it injects, and the inner (view, memory) signature must
+        # not leak through.
+        async def run(inp: dict[str, Any]) -> dict[str, Any]:
+            if payload is not None:
+                view: Any = MappingProxyType(payload.model_validate(inp).model_dump())
+            else:
+                view = MappingProxyType({k: inp[k] for k in (*_ALWAYS, *reads) if k in inp})
+            mem = (ScopedMemory(agent, city_id=view.get("city_id", "pune"), run_id=view.get("run_id"))
+                   if agent else None)
+            out = fn(view, mem)
+            if inspect.isawaitable(out):
+                out = await out
+            return _validate_update(node, out, allowed)
+
+        run.__name__ = run.__qualname__ = fn.__name__
+        run.__doc__ = fn.__doc__
+        run.__contract__ = {"node": node, "reads": reads, "writes": writes, "agent": agent}  # type: ignore[attr-defined]
+        return run
+    return deco
+
+
 def _step(node: str, text: str, **extra: Any) -> list[dict[str, Any]]:
-    return [{"node": node, "text": text, "at": time.time(), **extra}]
+    return [{"node": node, "text": text[:600], "at": time.time(), **extra}]
 
 
 def _diff_dict(diff: Any) -> dict[str, Any]:
-    """PlanDiff -> plain dict, so checkpoints serialise without custom types."""
     if diff is None:
         return {}
     d = asdict(diff) if hasattr(diff, "__dataclass_fields__") else dict(diff)
@@ -136,103 +268,98 @@ def _diff_dict(diff: Any) -> dict[str, Any]:
         d["headline"] = diff.headline
     except Exception:  # noqa: BLE001
         d["headline"] = ""
-    return d
+    return Proposal.model_validate(d).model_dump()
 
 
 # ------------------------------------------------------------------- nodes ---
-async def triage(state: GraphState) -> dict[str, Any]:
+@contract("triage", writes=("max_severity", "attempts", "orders_in_force"), agent="triage")
+async def triage(view, mem: ScopedMemory) -> dict[str, Any]:
     from app.db import session as db
 
-    sev = await db.fetchval(
+    sev = int(await db.fetchval(
         "select coalesce(max(severity), 0) from incidents where city_id = $1 and status <> 'resolved'",
-        state["city_id"],
-    )
-    sev = int(sev or 0)
-    return {
-        "max_severity": sev, "attempts": 0,
-        "trace": _step("triage", f"Trigger: {state['trigger']}. Worst open incident S{sev}."),
-    }
+        view["city_id"],
+    ) or 0)
+    orders = await mem.recall(["orders"], limit=20)
+    await mem.remember("triage", f"Cycle for {view['trigger']}: worst open S{sev}",
+                       data={"severity": sev}, ttl_minutes=60, importance=2)
+    return {"max_severity": sev, "attempts": 0, "orders_in_force": len(orders),
+            "trace": _step("triage", f"Trigger: {view['trigger']}. Worst open incident S{sev}. "
+                                     f"{len(orders)} standing order(s) in force.")}
 
 
 def after_triage(state: GraphState) -> str:
     return "command" if state.get("max_severity", 0) >= SEVERE else "fanout"
 
 
-async def command(state: GraphState) -> dict[str, Any]:
-    """Wake the LLM Incident Commander in the background. It never blocks the plan."""
+@contract("command", reads=("max_severity",), writes=("commander_woken",))
+async def command(view, _mem) -> dict[str, Any]:
     from app.agents import commander
 
-    woke = commander.nudge(
-        "graph.severe", f"Severity {state.get('max_severity')} incident open; {state['trigger']}",
-        key=f"graph:{state['city_id']}", city_id=state["city_id"],
-    )
+    summary = guardrails.clean_input(
+        f"Severity {view.get('max_severity')} incident open; {view['trigger']}", limit=240)
+    woke = commander.nudge("graph.severe", summary.text, key=f"graph:{view['city_id']}",
+                           city_id=view["city_id"])
     return {"commander_woken": bool(woke),
             "trace": _step("command", "Incident Commander woken." if woke
                            else "Incident Commander already working (debounced).")}
 
 
-def fanout(state: GraphState) -> dict[str, Any]:
+@contract("fanout")
+def fanout(view, _mem) -> dict[str, Any]:
     return {"trace": _step("fanout", f"Reading {len(SOURCES)} sources in parallel.")}
 
 
 def to_sensors(state: GraphState) -> list[Any]:
-    return [Send("sense", {"source": s, "city_id": state["city_id"]}) for s in SOURCES]
+    return [Send("sense", {"source": s, "city_id": state["city_id"], "run_id": state["run_id"]})
+            for s in SOURCES]
 
 
-async def sense(payload: dict[str, Any]) -> dict[str, Any]:
-    """One situation read. Runs once per source, concurrently."""
+@contract("sense", writes=("situation",), payload=SensePayload)
+async def sense(view, _mem) -> dict[str, Any]:
     from app.db import session as db
 
-    src, city = payload["source"], payload["city_id"]
+    src, city = view["source"], view["city_id"]
     if src == "units":
         row = await db.fetchrow(
-            """
-            select count(*) total,
-                   count(*) filter (where status::text = 'available') available
-              from resources where city_id = $1
-            """, city)
-        data = dict(row) if row else {}
+            """select count(*) total, count(*) filter (where status::text = 'available') available
+                 from resources where city_id = $1""", city)
+        data = {"total": int(row["total"] or 0), "available": int(row["available"] or 0)} if row else {}
         text = f"{data.get('available', 0)} of {data.get('total', 0)} units available."
     elif src == "needs":
         rows = await db.fetch(
-            """
-            select n.capability_id, sum(n.required) required, sum(coalesce(n.met, 0)) met
-              from incident_needs n join incidents i on i.id = n.incident_id
-             where i.city_id = $1 and i.status <> 'resolved'
-             group by n.capability_id
-            """, city)
+            """select n.capability_id, sum(n.required) required, sum(coalesce(n.met, 0)) met
+                 from incident_needs n join incidents i on i.id = n.incident_id
+                where i.city_id = $1 and i.status <> 'resolved'
+                group by n.capability_id""", city)
         data = {r["capability_id"]: {"required": int(r["required"] or 0), "met": int(r["met"] or 0)}
                 for r in rows}
         text = f"{len(data)} capabilities in demand."
     elif src == "risk":
         rows = await db.fetch(
-            """
-            select distinct on (ward_id) ward_id, severity from ward_risks
-             order by ward_id, created_at desc
-            """)
-        severe = [r["ward_id"] for r in rows if (r["severity"] or 0) >= 4]
-        data = {"severe_wards": severe}
-        text = f"{len(severe)} wards at risk severity 4+."
+            "select distinct on (ward_id) ward_id, severity from ward_risks order by ward_id, created_at desc")
+        data = {"severe_wards": [r["ward_id"] for r in rows if (r["severity"] or 0) >= 4]}
+        text = f"{len(data['severe_wards'])} wards at risk severity 4+."
     else:
         row = await db.fetchrow(
-            """
-            select count(*) filter (where capacity > 0 and occupancy >= capacity) full_,
-                   count(*) total
-              from lifelines where city_id = $1
-            """, city)
+            """select count(*) filter (where capacity > 0 and occupancy >= capacity) full_, count(*) total
+                 from lifelines where city_id = $1""", city)
         data = {"full": int(row["full_"] or 0) if row else 0, "total": int(row["total"] or 0) if row else 0}
         text = f"{data['full']} of {data['total']} facilities full."
-    return {"situation": [{"source": src, "data": data}],
-            "trace": _step("sense", text, source=src)}
+    return {"situation": [{"source": src, "data": data}], "trace": _step("sense", text, source=src)}
 
 
-def assess(state: GraphState) -> dict[str, Any]:
-    needs = next((s["data"] for s in state.get("situation", []) if s["source"] == "needs"), {})
+@contract("assess", reads=("situation",), writes=("shortfall", "current_coverage"))
+def assess(view, _mem) -> dict[str, Any]:
+    needs = next((s["data"] for s in view.get("situation", []) if s["source"] == "needs"), {})
     short = {cap: v["required"] - min(v["met"], v["required"])
              for cap, v in needs.items() if v["required"] > v["met"]}
+    req = sum(v["required"] for v in needs.values())
+    met = sum(min(v["met"], v["required"]) for v in needs.values())
     text = ("Unmet: " + ", ".join(f"{q}× {c}" for c, q in short.items())) if short else \
         "Every need is covered by the current plan."
-    return {"shortfall": short, "trace": _step("assess", text)}
+    return {"shortfall": short, "current_coverage": (met / req) if req else 1.0,
+            "trace": _step("assess", text)}
 
 
 def to_domains(state: GraphState) -> list[Any] | str:
@@ -243,47 +370,66 @@ def to_domains(state: GraphState) -> list[Any] | str:
     if not by:
         return "optimise"
     units = next((s["data"] for s in state.get("situation", []) if s["source"] == "units"), {})
-    return [Send("domain", {"domain": d, "needs": caps, "units": units}) for d, caps in by.items()]
+    return [Send("domain", {"domain": d, "needs": caps, "units": units,
+                            "city_id": state["city_id"], "run_id": state["run_id"]})
+            for d, caps in by.items()]
 
 
-async def domain(payload: dict[str, Any]) -> dict[str, Any]:
-    """A domain planner. Sees only its own needs: private state by construction."""
-    d, needs = payload["domain"], payload["needs"]
+@contract("domain", writes=("domain_plans",), payload=DomainPayload)
+async def domain(view, _mem) -> dict[str, Any]:
+    """A domain planner. Sees only its payload; remembers in its own namespace."""
+    d, needs = view["domain"], dict(view["needs"])
+    mem = ScopedMemory(d, city_id=view["city_id"], run_id=view["run_id"])
+    recent = await mem.recall([d], limit=20, max_age_s=6 * 3600)
+    persistent = sorted(c for c in needs
+                        if sum(1 for m in recent if c in (m.get("data") or {}).get("needs", {})) + 1
+                        >= PERSISTENT_SHORTFALL)
+    await mem.remember(d, f"{d} short: " + ", ".join(f"{q}× {c}" for c, q in needs.items()),
+                       data={"needs": needs}, ttl_minutes=360, importance=2)
     total = sum(needs.values())
-    avail = int((payload.get("units") or {}).get("available") or 0)
+    avail = int((view.get("units") or {}).get("available") or 0)
     note = (f"{d}: {total} unit(s) short ({', '.join(needs)}); "
             + ("free units exist, the solver can cover some." if avail else
                "no free units: coverage depends on re-tasking."))
-    return {"domain_plans": [{"domain": d, "needs": needs, "note": note}],
+    if persistent:
+        note += f" Short of {', '.join(persistent)} for {PERSISTENT_SHORTFALL}+ cycles: request mutual aid."
+    return {"domain_plans": [{"domain": d, "needs": needs, "note": note, "mutual_aid": persistent}],
             "trace": _step("domain", note, domain=d)}
 
 
-async def optimise(state: GraphState) -> dict[str, Any]:
+@contract("optimise", reads=("attempts",), writes=("attempts", "proposal"), agent="planner")
+async def optimise(view, mem: ScopedMemory) -> dict[str, Any]:
     """CP-SAT, as a dry run: the exact plan, nothing written yet."""
     from app.agents import replan as replanner
 
-    attempt = int(state.get("attempts") or 0) + 1
+    attempt = int(view.get("attempts") or 0) + 1
     try:
-        diff = await replanner.preview(city_id=state["city_id"], trigger=state["trigger"], actor=ACTOR)
+        diff = await replanner.preview(city_id=view["city_id"], trigger=view["trigger"], actor=ACTOR)
         proposal = _diff_dict(diff)
-        text = f"Attempt {attempt}: {proposal.get('headline') or 'plan computed'} (coverage {proposal.get('coverage', 0):.0%})."
+        await mem.remember("planner", f"Plan: {proposal['headline']}",
+                           data={"coverage": proposal["coverage"], "changed": proposal["changed"]},
+                           ttl_minutes=120, importance=1)
+        text = f"Attempt {attempt}: {proposal['headline'] or 'plan computed'} (coverage {proposal['coverage']:.0%})."
         return {"attempts": attempt, "proposal": proposal, "trace": _step("optimise", text)}
     except Exception as exc:  # noqa: BLE001 - validate decides what to do
-        return {"attempts": attempt, "proposal": {"error": str(exc)[:300]},
+        return {"attempts": attempt, "proposal": Proposal(error=str(exc)[:300]).model_dump(),
                 "trace": _step("optimise", f"Attempt {attempt} failed: {str(exc)[:160]}")}
 
 
-def validate(state: GraphState) -> dict[str, Any]:
-    p = state.get("proposal") or {}
+@contract("validate", reads=("proposal", "current_coverage"), writes=("valid", "validation", "needs_officer"))
+def validate(view, _mem) -> dict[str, Any]:
+    p = view.get("proposal") or {}
     if p.get("error"):
         return {"valid": False, "validation": p["error"], "trace": _step("validate", "Solver error.")}
-    # A plan may not assign one unit twice or re-task a unit that is not in the fleet.
-    ids = [c["resource_id"] for k in ("assigned", "reassigned", "kept") for c in p.get(k, [])]
-    if len(ids) != len(set(ids)):
-        return {"valid": False, "validation": "a unit appears twice",
-                "trace": _step("validate", "Rejected: a unit appears twice.")}
-    return {"valid": True, "validation": "ok",
-            "trace": _step("validate", f"Plan valid; {len(p.get('uncovered', []))} need(s) still unmet.")}
+    check = guardrails.check_plan(p, current_coverage=view.get("current_coverage"))
+    if not check.ok:
+        return {"valid": False, "validation": "; ".join(check.reasons),
+                "trace": _step("validate", "Rejected by guardrail: " + "; ".join(check.reasons))}
+    text = f"Plan valid; {len(p.get('uncovered', []))} need(s) still unmet."
+    if check.needs_officer:
+        text += " Guardrail: " + "; ".join(check.reasons) + "."
+    return {"valid": True, "validation": "; ".join(check.reasons) or "ok",
+            "needs_officer": check.needs_officer, "trace": _step("validate", text)}
 
 
 def after_validate(state: GraphState) -> str:
@@ -292,96 +438,140 @@ def after_validate(state: GraphState) -> str:
     return "optimise" if int(state.get("attempts") or 0) < MAX_ATTEMPTS else "give_up"
 
 
-def give_up(state: GraphState) -> dict[str, Any]:
+@contract("give_up", writes=("outcome",))
+def give_up(view, _mem) -> dict[str, Any]:
     return {"outcome": "failed",
             "trace": _step("give_up", f"No valid plan after {MAX_ATTEMPTS} attempts; current assignments stand.")}
 
 
-async def policy_gate(state: GraphState) -> dict[str, Any]:
-    """Automatic unless the plan pulls a unit off a severe incident."""
+def _pulled_from(p: dict[str, Any]) -> list[str]:
+    return sorted({c.get("from_incident_id") or c.get("incident_id")
+                   for c in p.get("reassigned", []) + p.get("released", [])
+                   if c.get("from_incident_id") or c.get("incident_id")})
+
+
+@contract("policy_gate", reads=("proposal", "needs_officer", "validation"),
+          writes=("needs_officer", "held", "gate_reason"), agent="gate")
+async def policy_gate(view, mem: ScopedMemory) -> dict[str, Any]:
+    """Automatic unless the plan pulls a unit off a severe incident, trips a
+    guardrail, or repeats something an officer just rejected."""
     from app.db import session as db
 
-    p = state.get("proposal") or {}
-    threshold = int(settings.agent_graph_approval_severity or 0)
+    p = view.get("proposal") or {}
     if not p.get("changed"):
-        return {"needs_officer": False, "gate_reason": "no change",
+        return {"needs_officer": False, "held": False, "gate_reason": "no change",
                 "trace": _step("policy_gate", "Nothing changes; nothing to authorise.")}
-    pulled = [c for c in p.get("reassigned", []) + p.get("released", []) if c.get("from_incident_id") or c.get("incident_id")]
-    severe: list[str] = []
+    pulled = _pulled_from(p)
+    # Memory: did an officer reject pulling units off these incidents recently?
+    for inc in pulled:
+        hit = await mem.recall(["gate"], about=inc, max_age_s=REJECTION_MEMORY_S, limit=1)
+        if hit and (hit[0].get("data") or {}).get("decision") == "rejected":
+            reason = (f"An officer rejected moving units off this incident "
+                      f"{int((time.time() - float(hit[0].get('at') or time.time())) / 60)} min ago; holding.")
+            return {"needs_officer": False, "held": True, "gate_reason": reason,
+                    "trace": _step("policy_gate", reason)}
+    reasons: list[str] = []
+    threshold = int(settings.agent_graph_approval_severity or 0)
     if threshold and pulled:
-        ids = list({c.get("from_incident_id") or c.get("incident_id") for c in pulled})
         rows = await db.fetch(
-            "select id::text, title, severity from incidents where id::text = any($1::text[])", ids)
+            "select id::text, title, severity from incidents where id::text = any($1::text[])", pulled)
         severe = [f"{r['title']} (S{r['severity']})" for r in rows if int(r["severity"] or 0) >= threshold]
-    if severe:
-        reason = "Re-tasks units away from " + "; ".join(severe[:3])
-        return {"needs_officer": True, "gate_reason": reason,
+        if severe:
+            reasons.append("re-tasks units away from " + "; ".join(severe[:3]))
+    if view.get("needs_officer"):
+        reasons.append(view.get("validation") or "guardrail")
+    if reasons:
+        reason = "; ".join(reasons)
+        reason = reason[:1].upper() + reason[1:]
+        return {"needs_officer": True, "held": False, "gate_reason": reason,
                 "trace": _step("policy_gate", reason + " — an officer must approve.")}
-    return {"needs_officer": False, "gate_reason": "within delegation",
+    return {"needs_officer": False, "held": False, "gate_reason": "within delegation",
             "trace": _step("policy_gate", "Within the planner's delegation; issuing.")}
 
 
 def after_gate(state: GraphState) -> str:
+    if state.get("held"):
+        return "held"
     if state.get("needs_officer"):
         return "human_approval"
     return "dispatch" if (state.get("proposal") or {}).get("changed") else "observe"
 
 
-def human_approval(state: GraphState) -> dict[str, Any]:
+@contract("held", writes=("outcome",))
+def held(view, _mem) -> dict[str, Any]:
+    return {"outcome": "held", "trace": _step("held", "Held by the gate's memory; nothing written.")}
+
+
+@contract("human_approval", reads=("proposal", "gate_reason"), writes=("approval",), agent="gate")
+async def human_approval(view, mem: ScopedMemory) -> dict[str, Any]:
     """Pause the run. The console resumes it with {approved, by, note}."""
-    p = state.get("proposal") or {}
-    answer = interrupt({
+    p = view.get("proposal") or {}
+    raw = interrupt({
         "question": "Approve this re-tasking?",
-        "reason": state.get("gate_reason"),
+        "reason": view.get("gate_reason"),
         "headline": p.get("headline"),
         "reassigned": p.get("reassigned", []),
         "released": p.get("released", []),
         "assigned": p.get("assigned", []),
     })
-    answer = answer if isinstance(answer, dict) else {"approved": bool(answer)}
-    ok = bool(answer.get("approved"))
-    who = str(answer.get("by") or "officer")
-    return {"approval": answer,
-            "trace": _step("human_approval", f"{'Approved' if ok else 'Rejected'} by {who}"
-                           + (f": {answer.get('note')}" if answer.get("note") else "."))}
+    try:
+        answer = Approval.model_validate(raw if isinstance(raw, dict) else {"approved": bool(raw)})
+    except ValidationError:
+        answer = Approval(approved=False, by="guardrail", note="Malformed approval; treated as a rejection.")
+    decision = "approved" if answer.approved else "rejected"
+    await mem.remember(
+        "gate", f"Officer {answer.by} {decision} moving units off {', '.join(_pulled_from(p)) or 'incidents'}"
+                + (f": {answer.note}" if answer.note else ""),
+        data={"decision": decision, "incidents": _pulled_from(p), "by": answer.by},
+        ttl_minutes=REJECTION_MEMORY_S // 60, importance=4,
+    )
+    return {"approval": answer.model_dump(),
+            "trace": _step("human_approval", f"{decision.capitalize()} by {answer.by}"
+                           + (f": {answer.note}" if answer.note else "."))}
 
 
 def after_approval(state: GraphState) -> str:
     return "dispatch" if (state.get("approval") or {}).get("approved") else "rejected"
 
 
-def rejected(state: GraphState) -> dict[str, Any]:
-    return {"outcome": "rejected",
-            "trace": _step("rejected", "Plan rejected; current assignments stand.")}
+@contract("rejected", writes=("outcome",))
+def rejected(view, _mem) -> dict[str, Any]:
+    return {"outcome": "rejected", "trace": _step("rejected", "Plan rejected; current assignments stand.")}
 
 
-async def dispatch(state: GraphState) -> dict[str, Any]:
+@contract("dispatch", writes=("dispatched", "outcome"))
+async def dispatch(view, _mem) -> dict[str, Any]:
     """Commit. Re-solves against the world as it is now and writes it."""
     from app.agents import replan as replanner
 
-    diff = await replanner.replan(city_id=state["city_id"], trigger=state["trigger"], actor=ACTOR)
+    diff = await replanner.replan(city_id=view["city_id"], trigger=view["trigger"], actor=ACTOR)
     d = _diff_dict(diff)
     return {"dispatched": d, "outcome": "dispatched",
             "trace": _step("dispatch", d.get("headline") or "Plan written.")}
 
 
-def observe(state: GraphState) -> dict[str, Any]:
-    d = state.get("dispatched") or state.get("proposal") or {}
+@contract("observe", reads=("dispatched", "proposal", "outcome"), writes=("outcome",))
+def observe(view, _mem) -> dict[str, Any]:
+    d = view.get("dispatched") or view.get("proposal") or {}
     unmet = len(d.get("uncovered", []))
-    return {"outcome": state.get("outcome") or "unchanged",
+    return {"outcome": view.get("outcome") or "unchanged",
             "trace": _step("observe", f"Coverage {float(d.get('coverage') or 1):.0%}; {unmet} unmet. "
                            "The router re-enters this graph on the next change.")}
+
+
+NODES = (
+    ("triage", triage), ("command", command), ("fanout", fanout), ("sense", sense),
+    ("assess", assess), ("domain", domain), ("optimise", optimise), ("validate", validate),
+    ("give_up", give_up), ("policy_gate", policy_gate), ("held", held),
+    ("human_approval", human_approval), ("rejected", rejected), ("dispatch", dispatch),
+    ("observe", observe),
+)
 
 
 # ------------------------------------------------------------------- build ---
 def build(checkpointer: Any = None) -> Any:
     g = StateGraph(GraphState)
-    for name, fn in (
-        ("triage", triage), ("command", command), ("fanout", fanout), ("sense", sense),
-        ("assess", assess), ("domain", domain), ("optimise", optimise), ("validate", validate),
-        ("give_up", give_up), ("policy_gate", policy_gate), ("human_approval", human_approval),
-        ("rejected", rejected), ("dispatch", dispatch), ("observe", observe),
-    ):
+    for name, fn in NODES:
         g.add_node(name, fn)
     g.add_edge(START, "triage")
     g.add_conditional_edges("triage", after_triage, {"command": "command", "fanout": "fanout"})
@@ -395,13 +585,25 @@ def build(checkpointer: Any = None) -> Any:
                             {"policy_gate": "policy_gate", "optimise": "optimise", "give_up": "give_up"})
     g.add_edge("give_up", END)
     g.add_conditional_edges("policy_gate", after_gate,
-                            {"human_approval": "human_approval", "dispatch": "dispatch", "observe": "observe"})
+                            {"human_approval": "human_approval", "dispatch": "dispatch",
+                             "observe": "observe", "held": "held"})
+    g.add_edge("held", END)
     g.add_conditional_edges("human_approval", after_approval,
                             {"dispatch": "dispatch", "rejected": "rejected"})
     g.add_edge("rejected", END)
     g.add_edge("dispatch", "observe")
     g.add_edge("observe", END)
     return g.compile(checkpointer=checkpointer)
+
+
+def contracts() -> list[dict[str, Any]]:
+    """Who reads, writes and remembers what: for the console and the docs."""
+    out = []
+    for name, fn in NODES:
+        c = getattr(fn, "__contract__", {})
+        out.append({"node": name, "reads": list(c.get("reads", ())), "writes": list(c.get("writes", ())),
+                    "agent": c.get("agent") or (name if name == "domain" else None)})
+    return out
 
 
 # ----------------------------------------------------------------- runtime ---
@@ -482,9 +684,9 @@ async def _event(run: Run, kind: str) -> None:
 
 async def _drive(run: Run, payload: Any) -> Run:
     graph = await _compiled()
-    config = {"configurable": {"thread_id": run.run_id}}
+    config = {"configurable": {"thread_id": run.run_id}, "recursion_limit": RECURSION_LIMIT}
     try:
-        await graph.ainvoke(payload, config)
+        await asyncio.wait_for(graph.ainvoke(payload, config), timeout=RUN_TIMEOUT_S)
         snap = await graph.aget_state(config)
         values = dict(snap.values or {})
         run.trace = list(values.get("trace") or [])
@@ -497,9 +699,15 @@ async def _drive(run: Run, payload: Any) -> Run:
             run.pending = None
             run.outcome = values.get("outcome") or "unchanged"
             run.finished_at = time.time()
+    except (StateViolation, MemoryAccessDenied) as exc:
+        run.status, run.outcome, run.error = "failed", "blocked", f"{type(exc).__name__}: {exc}"[:300]
+        run.finished_at = time.time()
+        log.warning("graph_run_blocked", run=run.run_id, error=run.error)
+    except asyncio.TimeoutError:
+        run.status, run.outcome, run.error = "failed", "timeout", f"run exceeded {RUN_TIMEOUT_S}s"
+        run.finished_at = time.time()
     except Exception as exc:  # noqa: BLE001
-        run.status = "failed"
-        run.error = str(exc)[:300]
+        run.status, run.error = "failed", str(exc)[:300]
         run.finished_at = time.time()
         log.warning("graph_run_failed", run=run.run_id, error=run.error)
     await _event(run, "agent.graph_waiting" if run.status == "waiting" else "agent.graph_run")
@@ -510,6 +718,7 @@ async def _drive(run: Run, payload: Any) -> Run:
 
 async def run_cycle(*, city_id: str = "pune", trigger: str = "manual") -> Run:
     """One pass of the graph. Returns when it finishes or pauses for an officer."""
+    trigger = guardrails.clean_input(trigger, limit=240).text or "manual"
     run = Run(run_id=f"g-{uuid.uuid4().hex[:10]}", city_id=city_id, trigger=trigger,
               started_at=time.time())
     _remember(run)
@@ -521,8 +730,10 @@ async def resume(run_id: str, *, approved: bool, by: str = "officer", note: str 
     run = RUNS.get(run_id)
     if run is None or run.status != "waiting":
         raise KeyError(run_id)
+    answer = Approval(approved=approved, by=(by or "officer")[:80],
+                      note=guardrails.clean_input(note, limit=300).text if note else None)
     run.status = "running"
-    return await _drive(run, Command(resume={"approved": approved, "by": by, "note": note}))
+    return await _drive(run, Command(resume=answer.model_dump()))
 
 
 async def _timeout(run_id: str) -> None:
@@ -539,6 +750,8 @@ async def _timeout(run_id: str) -> None:
 
 
 def status() -> dict[str, Any]:
+    from app.agents import agent_memory
+
     runs = [RUNS[r].as_dict() for r in _ORDER if r in RUNS]
     return {
         "available": AVAILABLE,
@@ -546,6 +759,14 @@ def status() -> dict[str, Any]:
         "importError": IMPORT_ERROR,
         "checkpointer": type(_saver).__name__ if _saver is not None else settings.agent_graph_checkpointer,
         "approvalSeverity": settings.agent_graph_approval_severity,
+        "guardrails": {
+            "maxRetaskPerCycle": guardrails.MAX_RETASK_PER_CYCLE,
+            "coverageDropTolerance": guardrails.COVERAGE_DROP_TOLERANCE,
+            "runTimeoutS": RUN_TIMEOUT_S, "recursionLimit": RECURSION_LIMIT,
+            "maxAttempts": MAX_ATTEMPTS, "rejectionMemoryMin": REJECTION_MEMORY_S // 60,
+        },
+        "contracts": contracts(),
+        "memoryAccess": agent_memory.access_map(),
         "waiting": [r for r in runs if r["status"] == "waiting"],
         "runs": runs,
     }

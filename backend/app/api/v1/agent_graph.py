@@ -5,6 +5,8 @@ way to answer them.
     GET  /agent-graph/diagram          the compiled graph as Mermaid
     POST /agent-graph/run              run one cycle now
     POST /agent-graph/runs/{id}/resume approve or reject a paused plan
+    GET  /agent-graph/memory           per-agent access map and the memory ledger
+    POST /agent-graph/orders           an officer's standing order (read by every agent)
 """
 
 from __future__ import annotations
@@ -55,3 +57,35 @@ async def agent_graph_resume(run_id: str, body: ResumeIn, who: StaffPrincipal) -
     except KeyError:
         raise NotFound("No run with that id is waiting for an approval.") from None
     return {"ok": True, "run": run.as_dict()}
+
+
+class OrderIn(BaseModel):
+    text: str = Field(min_length=3, max_length=300)
+    incident_id: str | None = None
+    resource_id: str | None = None
+    hours: int = Field(default=12, ge=1, le=168)
+
+
+@router.get("/agent-graph/memory")
+async def agent_graph_memory(_: StaffPrincipal) -> dict:
+    from app.agents import agent_memory
+
+    orders = await agent_memory.ScopedMemory("officer").recall(["orders"], limit=30)
+    return {"access": agent_memory.access_map(), "ledger": agent_memory.ledger(150),
+            "orders": [{k: (str(v) if k == "at" else v) for k, v in o.items()} for o in orders]}
+
+
+@router.post("/agent-graph/orders")
+async def agent_graph_order(body: OrderIn, who: StaffPrincipal) -> dict:
+    """Standing orders are written by people only; every agent can read them."""
+    from app.agents import agent_memory, guardrails
+
+    clean = guardrails.clean_input(body.text, limit=300)
+    if clean.injection:
+        return {"ok": False, "reason": "The order reads like an instruction to the model; rephrase it."}
+    mem = agent_memory.ScopedMemory("officer")
+    mid = await mem.remember("orders", clean.text,
+                             data={"incident_id": body.incident_id, "resource_id": body.resource_id,
+                                   "by": who.full_name or str(who.user_id or "officer")},
+                             ttl_minutes=body.hours * 60, importance=5)
+    return {"ok": bool(mid), "id": mid}

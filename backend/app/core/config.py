@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     agent_graph_approval_timeout_s: int = 300
     #: memory | postgres. Postgres needs langgraph-checkpoint-postgres.
     agent_graph_checkpointer: str = "memory"
+    #: Read each report's severity from its text with the zero-shot classifier
+    #: and then the LLM (bounded; app/incidents/severity.py). Off = keywords only.
+    severity_models_enabled: bool = True
 
     # ---- llm ----
     llm_provider: LLMProvider = "gemini"

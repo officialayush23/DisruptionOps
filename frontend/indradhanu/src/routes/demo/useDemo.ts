@@ -69,6 +69,10 @@ export type RawReport = {
   reporterReliability: number | null
   reporterHumanVerdicts: number | null
   reporterTotal: number | null
+  /** Severity read from the words (keywords → classifier → LLM, bounded). */
+  assessedSeverity?: number | null
+  severityRead?: { severity: number; method: string; reason: string; life_threat?: boolean
+                   people_at_risk?: number | null; injection?: boolean; redacted?: string[] } | null
 }
 export type Need = {
   incidentId: string; capability: string; required: number; met: number
