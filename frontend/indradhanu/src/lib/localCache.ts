@@ -68,12 +68,27 @@ export async function set(key: string, value: unknown): Promise<void> {
   }
 }
 
-/** `set`, at most once per `everyMs` per key. For values written every poll. */
+/** `set`, at most once per `everyMs` per key, for values produced every poll.
+ *  Takes a function so the value is only built when it will be written, and
+ *  keeps no in-memory copy (the caller already holds the live one). */
 const lastWrite = new Map<string, number>()
-export function setThrottled(key: string, value: unknown, everyMs: number): void {
+export function setThrottled(key: string, make: () => unknown, everyMs: number): void {
   const now = Date.now()
-  memory.set(key, value)
   if (now - (lastWrite.get(key) ?? 0) < everyMs) return
   lastWrite.set(key, now)
-  void set(key, value)
+  const value = make()
+  memory.delete(key)
+  void open().then((db) => {
+    if (!db) return
+    try {
+      db.transaction(STORE, "readwrite").objectStore(STORE).put(value, key)
+    } catch {
+      /* quota: skip this one */
+    }
+  })
+}
+
+/** Forget a key from the in-memory mirror (the IndexedDB copy stays). */
+export function release(key: string): void {
+  memory.delete(key)
 }

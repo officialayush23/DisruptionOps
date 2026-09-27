@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
 import type { Feature, FeatureCollection } from "geojson"
-import { imageName, registerIcons } from "./icons"
-import * as localCache from "@/lib/localCache"
+import { imageName, provideIcon, registerIcons } from "./icons"
 import "mapbox-gl/dist/mapbox-gl.css"
 
 /** The map, on Mapbox.
@@ -101,9 +100,6 @@ type Props = {
   recentreKey?: number
   /** Called with a ward id when the ward itself (not an incident) is clicked. */
   onPickWard?: (id: string) => void
-  /** Keep a picture of this map under this key and show it instantly next
-   *  time, until the live map has painted. One key per screen. */
-  snapshotKey?: string
 }
 
 const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
@@ -115,9 +111,6 @@ try {
 } catch {
   /* older builds without prewarm */
 }
-
-/** How often a screen's picture is refreshed while it is on. */
-const SNAPSHOT_EVERY_MS = 15_000
 
 /** Mapbox's own popup stylesheet is a white card with a white arrow, which on
  *  the dark basemap rendered as near-white text on near-white and read as
@@ -345,7 +338,7 @@ export function LiveMap({
   needs = [], activity, routes = [],
   route, routeLabel, me, center = [73.88, 18.58], zoom = 11.6, className,
   onPickIncident, followMe = false, recentreKey = 0, onUserMove,
-  onPickWard, snapshotKey,
+  onPickWard,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<mapboxgl.Map | null>(null)
@@ -356,21 +349,6 @@ export function LiveMap({
   useEffect(() => {
     pickWard.current = onPickWard
   }, [onPickWard])
-  const snapKey = snapshotKey ? `snap:${snapshotKey}` : null
-  const [snapshot, setSnapshot] = useState<string | undefined>(() =>
-    snapKey ? localCache.peek<string>(snapKey) : undefined
-  )
-  const [painted, setPainted] = useState(false)
-  useEffect(() => {
-    if (!snapKey || snapshot) return
-    let alive = true
-    void localCache.get<string>(snapKey).then((v) => {
-      if (alive && v) setSnapshot(v)
-    })
-    return () => {
-      alive = false
-    }
-  }, [snapKey, snapshot])
   const [, setIconsReady] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
 
@@ -420,6 +398,9 @@ export function LiveMap({
         // Register the drawn icons before any source gets data, so the first
         // poll does not land on a sprite that does not exist yet and fill the
         // console with missing-image warnings.
+        // Pins are rasterised once per page (shared across every map) and
+        // only in the tints actually drawn; a missing one is supplied on demand.
+        m.on("styleimagemissing", (e: { id: string }) => provideIcon(m as unknown as Parameters<typeof provideIcon>[0], e.id))
         void registerIcons(m as unknown as Parameters<typeof registerIcons>[0])
           .then(() => setIconsReady(true))
           .catch(() => setIconsReady(true))
@@ -669,24 +650,6 @@ export function LiveMap({
           }
         })
 
-        // A picture of the painted map, kept for next time. Taken inside a
-        // render callback, the one moment the WebGL buffer is still readable
-        // without preserveDrawingBuffer (which would slow every frame).
-        let lastShot = 0
-        m.on("idle", () => {
-          setPainted(true)
-          if (!snapKey || Date.now() - lastShot < SNAPSHOT_EVERY_MS) return
-          lastShot = Date.now()
-          m.once("render", () => {
-            try {
-              const url = m.getCanvas().toDataURL("image/jpeg", 0.55)
-              if (url.length > 2000) void localCache.set(snapKey, url)
-            } catch {
-              /* a tainted or lost context: skip this one */
-            }
-          })
-          m.triggerRepaint()
-        })
 
         setReady(true)
       })
@@ -1079,14 +1042,6 @@ export function LiveMap({
   return (
     <div className={`relative overflow-hidden ${className ?? "h-[520px] w-full rounded-lg border"}`}>
       <div ref={container} className="h-full w-full" />
-      {snapshot && !painted && (
-        <img
-          src={snapshot}
-          alt=""
-          aria-hidden
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
-        />
-      )}
     </div>
   )
 }

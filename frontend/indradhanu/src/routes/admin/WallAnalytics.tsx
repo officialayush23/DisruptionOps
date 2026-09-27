@@ -243,7 +243,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
               <XAxis dataKey="name" tick={axis} tickLine={false} axisLine={false} />
               <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
               <Tooltip {...tip} />
-              <Bar dataKey="value" name="incidents" radius={[4, 4, 0, 0]} maxBarSize={36}>
+              <Bar isAnimationActive={false} dataKey="value" name="incidents" radius={[4, 4, 0, 0]} maxBarSize={36}>
                 {d.bySeverity.map((r) => <Cell key={r.name} fill={SEV[r.sev]} />)}
               </Bar>
             </BarChart>
@@ -257,7 +257,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis type="number" allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <YAxis type="category" dataKey="name" width={110} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
-                <Bar dataKey="value" name="incidents" fill={MAG} radius={[0, 4, 4, 0]} maxBarSize={16} />
+                <Bar isAnimationActive={false} dataKey="value" name="incidents" fill={MAG} radius={[0, 4, 4, 0]} maxBarSize={16} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No open incidents." />}
@@ -271,8 +271,8 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <YAxis type="category" dataKey="name" width={110} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
                 <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="assigned" name="unit on the way" stackId="z" fill={CAT[0]} maxBarSize={16} />
-                <Bar dataKey="unassigned" name="nobody assigned" stackId="z" fill={SEV[3]} radius={[0, 4, 4, 0]} maxBarSize={16} />
+                <Bar isAnimationActive={false} dataKey="assigned" name="unit on the way" stackId="z" fill={CAT[0]} maxBarSize={16} />
+                <Bar isAnimationActive={false} dataKey="unassigned" name="nobody assigned" stackId="z" fill={SEV[3]} radius={[0, 4, 4, 0]} maxBarSize={16} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No active zones." />}
@@ -287,8 +287,8 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
                 <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="met" name="covered" stackId="n" fill={GOOD} maxBarSize={28} />
-                <Bar dataKey="short" name="short" stackId="n" fill={SEV[5]} radius={[4, 4, 0, 0]} maxBarSize={28} />
+                <Bar isAnimationActive={false} dataKey="met" name="covered" stackId="n" fill={GOOD} maxBarSize={28} />
+                <Bar isAnimationActive={false} dataKey="short" name="short" stackId="n" fill={SEV[5]} radius={[4, 4, 0, 0]} maxBarSize={28} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No open needs." />}
@@ -302,7 +302,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis dataKey="name" tick={axis} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
-                <Bar dataKey="value" name="units" radius={[4, 4, 0, 0]} maxBarSize={36}>
+                <Bar isAnimationActive={false} dataKey="value" name="units" radius={[4, 4, 0, 0]} maxBarSize={36}>
                   {d.units.map((u) => <Cell key={u.name} fill={u.color} />)}
                 </Bar>
               </BarChart>
@@ -317,7 +317,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
               <XAxis dataKey="name" tick={axis} tickLine={false} axisLine={false} interval={2} />
               <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
               <Tooltip {...tip} cursor={{ stroke: "var(--muted-foreground)", strokeWidth: 1 }} />
-              <Area type="monotone" dataKey="value" name="reports" stroke={MAG} strokeWidth={2} fill={MAG} fillOpacity={0.15} />
+              <Area isAnimationActive={false} type="monotone" dataKey="value" name="reports" stroke={MAG} strokeWidth={2} fill={MAG} fillOpacity={0.15} />
             </AreaChart>
           </ResponsiveContainer>
         </Panel>
@@ -331,9 +331,9 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
                 <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="opened" name="opened" stackId="s" fill={CAT[1]} maxBarSize={32} />
-                <Bar dataKey="merged" name="merged" stackId="s" fill={CAT[0]} maxBarSize={32} />
-                <Bar dataKey="held" name="held" stackId="s" fill={OTHER} radius={[4, 4, 0, 0]} maxBarSize={32} />
+                <Bar isAnimationActive={false} dataKey="opened" name="opened" stackId="s" fill={CAT[1]} maxBarSize={32} />
+                <Bar isAnimationActive={false} dataKey="merged" name="merged" stackId="s" fill={CAT[0]} maxBarSize={32} />
+                <Bar isAnimationActive={false} dataKey="held" name="held" stackId="s" fill={OTHER} radius={[4, 4, 0, 0]} maxBarSize={32} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No reports yet." />}
@@ -346,7 +346,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis type="number" domain={[0, 100]} tick={axis} tickLine={false} axisLine={false} unit="%" />
                 <YAxis type="category" dataKey="name" width={110} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} formatter={(v) => [`${v}%`, "risk"]} />
-                <Bar dataKey="value" name="risk" radius={[0, 4, 4, 0]} maxBarSize={16}>
+                <Bar isAnimationActive={false} dataKey="value" name="risk" radius={[0, 4, 4, 0]} maxBarSize={16}>
                   {d.risk.map((r) => <Cell key={r.name} fill={SEV[Math.max(1, Math.min(5, r.sev))] ?? MAG} />)}
                 </Bar>
               </BarChart>
@@ -361,7 +361,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis type="number" domain={[0, 100]} tick={axis} tickLine={false} axisLine={false} unit="%" />
                 <YAxis type="category" dataKey="name" width={120} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} formatter={(v) => [`${v}%`, "full"]} />
-                <Bar dataKey="value" name="full" radius={[0, 4, 4, 0]} maxBarSize={16}>
+                <Bar isAnimationActive={false} dataKey="value" name="full" radius={[0, 4, 4, 0]} maxBarSize={16}>
                   {d.shelters.map((s) => <Cell key={s.name} fill={s.value >= 90 ? SEV[5] : s.value >= 70 ? SEV[3] : GOOD} />)}
                 </Bar>
               </BarChart>
@@ -377,7 +377,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis dataKey="name" tick={axis} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
-                <Bar dataKey="value" name="decisions" fill={MAG} radius={[4, 4, 0, 0]} maxBarSize={36} />
+                <Bar isAnimationActive={false} dataKey="value" name="decisions" fill={MAG} radius={[4, 4, 0, 0]} maxBarSize={36} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No decisions yet." />}
@@ -390,7 +390,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis type="number" tick={axis} tickLine={false} axisLine={false} />
                 <YAxis type="category" dataKey="name" width={110} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
-                <Bar dataKey="value" name="people" fill={MAG} radius={[0, 4, 4, 0]} maxBarSize={16} />
+                <Bar isAnimationActive={false} dataKey="value" name="people" fill={MAG} radius={[0, 4, 4, 0]} maxBarSize={16} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No alerts issued." />}
@@ -404,7 +404,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
                 <XAxis dataKey="name" tick={axis} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tick={axis} tickLine={false} axisLine={false} />
                 <Tooltip {...tip} />
-                <Bar dataKey="value" name="packets" fill={MAG} radius={[4, 4, 0, 0]} maxBarSize={36} />
+                <Bar isAnimationActive={false} dataKey="value" name="packets" fill={MAG} radius={[4, 4, 0, 0]} maxBarSize={36} />
               </BarChart>
             </ResponsiveContainer>
           ) : <Empty text="No mesh packets yet." />}

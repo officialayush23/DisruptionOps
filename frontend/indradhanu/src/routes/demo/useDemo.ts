@@ -250,8 +250,17 @@ export function useDemoPoll(pollMs = 1000) {
         }))
       }
       setState(next)
-      // Keep a copy for the next cold start: every 15 s is plenty.
-      localCache.setThrottled(SNAPSHOT_KEY, { ...next, savedAt: new Date().toISOString() }, 15_000)
+      // A slim copy for the next cold start, once a minute. Without the event
+      // log, narration, raw reports and ward outlines (cached separately):
+      // cloning the whole world into IndexedDB every few seconds was a real
+      // cost on the main thread.
+      localCache.setThrottled(SNAPSHOT_KEY, () => ({
+        ...next,
+        wards: next.wards.map((w) => ({ ...w, boundary: null })),
+        events: [], beats: [], reports: [],
+        routes: next.routes.map((r) => ({ ...r, path: [], steps: [] })),
+        savedAt: new Date().toISOString(),
+      }), 60_000)
       setError(null)
       setLatencyMs(Math.round(performance.now() - started))
     } catch (e) {
@@ -278,10 +287,19 @@ export function useDemoPoll(pollMs = 1000) {
       if (geometry.current.size === 0) {
         const geo = await localCache.get<[string, [number, number][] | null][]>(GEOMETRY_KEY)
         if (geo?.length) geometry.current = new Map(geo)
+        localCache.release(GEOMETRY_KEY)
       }
       if (seq.current === 0) {
         const cached = await localCache.get<DemoState & { savedAt: string }>(SNAPSHOT_KEY)
-        if (alive && cached && seq.current === 0) setState({ ...cached, cachedAt: cached.savedAt })
+        localCache.release(SNAPSHOT_KEY)
+        if (alive && cached && seq.current === 0) {
+          const geo = geometry.current
+          setState({
+            ...cached,
+            wards: cached.wards.map((w) => ({ ...w, boundary: geo.get(w.id) ?? w.boundary })),
+            cachedAt: cached.savedAt,
+          })
+        }
       }
       if (!alive) return
       void refresh()

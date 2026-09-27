@@ -9,6 +9,7 @@ import { LiveMap } from "@/components/map/LiveMap"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import WallAnalytics from "./WallAnalytics"
+import { WallMiniMap } from "./WallMiniMap"
 import { WardPanel } from "./WardPanel"
 import { scopeState, zoneLayers, zonesOf, zoomFor, type Zone } from "./zones"
 
@@ -93,9 +94,9 @@ function useThrottledState(state: DemoState, ms: number): DemoState {
   return slow
 }
 
-function ScreenMap({ state, zone, big, className, onPickWard, snapshotKey }: {
+function ScreenMap({ state, zone, big, className, onPickWard }: {
   state: DemoState; zone: Zone | null; big?: boolean; className: string
-  onPickWard?: (id: string) => void; snapshotKey: string
+  onPickWard?: (id: string) => void
 }) {
   const navigate = useNavigate()
   const pick = useCallback((id: string) => navigate(`/admin/response?incident=${id}`), [navigate])
@@ -113,7 +114,6 @@ function ScreenMap({ state, zone, big, className, onPickWard, snapshotKey }: {
         routes={state.routes}
         onPickIncident={pick}
         onPickWard={onPickWard}
-        snapshotKey={snapshotKey}
         zoom={big ? 11.8 : 10.9}
       />
     )
@@ -131,7 +131,6 @@ function ScreenMap({ state, zone, big, className, onPickWard, snapshotKey }: {
       routes={layers.routes}
       onPickIncident={pick}
       onPickWard={onPickWard}
-      snapshotKey={snapshotKey}
       center={zone.center}
       zoom={zoomFor(zone, big)}
     />
@@ -221,8 +220,7 @@ function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, 
         </span>
       </div>
       {seen ? (
-        <ScreenMap state={state} zone={zone} className="h-full w-full"
-                   snapshotKey={`wall:${zone ? zone.id : "city"}`} />
+        <WallMiniMap state={state} zone={zone} w={size.w} h={size.h} />
       ) : (
         <div className="h-full w-full bg-zinc-900" />
       )}
@@ -292,7 +290,7 @@ function Expanded({ state, zones, index, onClose, onStep, onPickWard }: {
       </div>
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_360px]">
         <ScreenMap state={state} zone={zone} big className="h-full min-h-[50vh] w-full"
-                   onPickWard={onPickWard} snapshotKey={`wall:big:${zone ? zone.id : "city"}`} />
+                   onPickWard={onPickWard} />
         <aside className="min-h-0 overflow-y-auto border-l border-zinc-800 p-3">
           {zone && (
             <div className="mb-3 grid grid-cols-3 gap-2 text-center">
@@ -357,8 +355,10 @@ export default function CommandWall() {
   const [ward, setWard] = useState<string | null>(null)
   // Which screen the analytics follow: null = the whole city.
   const [scopeId, setScopeId] = useState<string | null>(null)
-  const scope = scopeId ? liveZones.find((z) => z.id === scopeId) ?? null : null
-  const scoped = useMemo(() => scopeState(state, scope), [state, scope])
+  const scope = scopeId ? zones.find((z) => z.id === scopeId) ?? null : null
+  // Analytics follow the throttled world too: re-rendering twelve charts every
+  // second was what made clicks lag.
+  const scoped = useMemo(() => scopeState(wallState, scope), [wallState, scope])
   const [now, setNow] = useState(() => Date.now())
   const [preset, setPreset] = useState<keyof typeof PRESETS>(() => load(PRESET_KEY, "M"))
   const [sizes, setSizes] = useState<Record<string, Size>>(() => load(SIZE_KEY, {}))
@@ -459,7 +459,7 @@ export default function CommandWall() {
       </section>
 
       <WallAnalytics
-        zones={scope ? [scope] : liveZones}
+        zones={scope ? [scope] : zones}
         now={now}
         state={scoped}
         scope={scope}

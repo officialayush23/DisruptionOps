@@ -189,7 +189,6 @@ export default function DemoConsole() {
                 }
                 onPickIncident={setSelected}
                 onPickWard={setWard}
-                snapshotKey={expanded ? "console:full" : "console"}
               />
             )}
             footer={

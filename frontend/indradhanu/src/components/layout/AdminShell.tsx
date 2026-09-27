@@ -38,11 +38,11 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import {
-  Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
-} from "@/components/ui/sheet"
 import { Separator } from "@/components/ui/separator"
 import Copilot from "@/routes/admin/Copilot"
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
+} from "@/components/ui/dialog"
 import { PersonaSwitcher } from "./PersonaSwitcher"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -439,27 +439,27 @@ function Chrome({ children }: { children: React.ReactNode }) {
                 full-screen chat sitting between them and the map. Here it is
                 available from every screen, answers against the same world the
                 screen behind it is showing, and closes. */}
-            <Sheet open={copilot} onOpenChange={setCopilot}>
-              <SheetTrigger asChild>
+            <Dialog open={copilot} onOpenChange={setCopilot}>
+              <DialogTrigger asChild>
                 <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
                   <BrainCircuit className="size-3.5" />
                   <span className="hidden sm:inline">Ask</span>
                 </Button>
-              </SheetTrigger>
-              <SheetContent
-                side="right"
-                className="flex w-full flex-col gap-0 p-0 sm:max-w-xl"
-              >
-                <SheetHeader className="shrink-0 border-b px-4 py-3">
-                  <SheetTitle className="flex items-center gap-2 text-sm">
+              </DialogTrigger>
+              <DialogContent className="flex h-[85vh] w-[95vw] max-w-3xl flex-col gap-0 p-0 sm:max-w-3xl">
+                <DialogHeader className="shrink-0 border-b px-4 py-3">
+                  <DialogTitle className="flex items-center gap-2 text-sm">
                     <BrainCircuit className="size-4" /> Commissioner Copilot
-                  </SheetTitle>
-                </SheetHeader>
-                <div className="min-h-0 flex-1 p-3">
-                  <Copilot compact />
+                  </DialogTitle>
+                  <DialogDescription className="text-xs">
+                    Asks the live system. Try “what needs my approval?” or “stop everything”.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="min-h-0 flex-1 overflow-hidden p-3">
+                  {copilot && <Copilot compact />}
                 </div>
-              </SheetContent>
-            </Sheet>
+              </DialogContent>
+            </Dialog>
             <PersonaSwitcher />
           </div>
         </header>

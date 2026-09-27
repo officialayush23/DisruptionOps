@@ -353,34 +353,63 @@ async function raster(svg: Svg, w = PIN_W, h = PIN_H): Promise<ImageBitmap> {
 type MapLike = {
   hasImage(name: string): boolean
   addImage(name: string, image: ImageBitmap, options?: { pixelRatio?: number }): void
+  triggerRepaint?: () => void
 }
 
-/** Register every icon in every tint it can appear in.
+/** Every pin bitmap, built once per page and shared by every map on it.
  *
- *  Eighteen tints across roughly thirty icons is a few hundred small bitmaps,
- *  built once at map load in a few tens of milliseconds. Building them lazily
- *  per feature instead would mean a visible pop-in on the first frame each new
- *  combination appears, which during a live run is constant.
- */
-export async function registerIcons(map: MapLike): Promise<void> {
-  const jobs: Promise<void>[] = []
-  for (const [name, [body, fallback]] of Object.entries(ICONS)) {
-    const colours = name.startsWith("ui-") ? [fallback] : [...new Set([fallback, ...TINTS])]
-    for (const colour of colours) {
-      const key = imageName(name, colour)
-      if (map.hasImage(key)) continue
-      const svg = wrap(pin(colour, body))
-      jobs.push(
-        raster(svg)
-          .then((bitmap) => {
-            if (!map.hasImage(key)) map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
-          })
-          .catch(() => {
-            /* One icon failing to rasterise is a missing picture, not a broken
-               map. The layer falls back to its circle underneath. */
-          })
-      )
-    }
+ *  This used to rasterise every icon in every one of eighteen tints for EACH
+ *  map — a few hundred 96×128 bitmaps, ~15 MB, per map, before Mapbox copied
+ *  them again into its own atlas. With a wall of map screens that was most of
+ *  the JS heap. Now: one shared cache, and a tint is built only the first time
+ *  something is actually drawn in it. */
+const READY = new Map<string, ImageBitmap>()
+const PENDING = new Map<string, Promise<ImageBitmap | null>>()
+
+function build(key: string): Promise<ImageBitmap | null> {
+  const hit = READY.get(key)
+  if (hit) return Promise.resolve(hit)
+  const inflight = PENDING.get(key)
+  if (inflight) return inflight
+  const [name, colour] = key.split("|")
+  const spec = ICONS[name as keyof typeof ICONS]
+  if (!spec || !colour) return Promise.resolve(null)
+  const job = raster(wrap(pin(colour, spec[0])))
+    .then((bitmap) => {
+      READY.set(key, bitmap)
+      return bitmap
+    })
+    .catch(() => null)
+    .finally(() => PENDING.delete(key))
+  PENDING.set(key, job)
+  return job
+}
+
+/** `styleimagemissing` handler: supply the pin synchronously when it is
+ *  already built (no warning, no pop-in), otherwise build it and add it. */
+export function provideIcon(map: MapLike, key: string): void {
+  if (map.hasImage(key)) return
+  const hit = READY.get(key)
+  if (hit) {
+    map.addImage(key, hit, { pixelRatio: PIN_RATIO })
+    return
   }
-  await Promise.all(jobs)
+  void build(key).then((bitmap) => {
+    if (bitmap && !map.hasImage(key)) {
+      map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
+      map.triggerRepaint?.()
+    }
+  })
+}
+
+/** Register each icon in its default tint (the common case), from the shared
+ *  cache. Other tints arrive through `provideIcon` when first drawn. */
+export async function registerIcons(map: MapLike): Promise<void> {
+  const keys = Object.entries(ICONS).map(([name, [, fallback]]) => imageName(name, fallback))
+  // Anything this page has already built, in any tint, is free to add now.
+  for (const key of READY.keys()) if (!keys.includes(key)) keys.push(key)
+  await Promise.all(keys.map(async (key) => {
+    const bitmap = await build(key)
+    if (bitmap && !map.hasImage(key)) map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
+  }))
 }
