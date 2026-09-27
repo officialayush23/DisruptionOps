@@ -11,7 +11,9 @@ import { Button } from "@/components/ui/button"
 import WallAnalytics from "./WallAnalytics"
 import { WallMiniMap } from "./WallMiniMap"
 import { WardPanel } from "./WardPanel"
-import { scopeState, zoneLayers, zonesOf, zoomFor, type Zone } from "./zones"
+import {
+  autoRegion, REGIONS, regionState, scopeState, zoneLayers, zonesOf, zoomFor, type Region, type Zone,
+} from "./zones"
 
 /** The command wall.
  *
@@ -41,6 +43,7 @@ const PRESETS: Record<"S" | "M" | "L", Size> = {
 }
 const SIZE_KEY = "wall:sizes:v1"
 const PRESET_KEY = "wall:preset:v1"
+const REGION_KEY = "wall:region:v1"
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -81,9 +84,15 @@ function useSeenOnce<T extends Element>(margin = "400px") {
 /** The world, refreshed at most every `ms`. Small screens do not need the
  *  once-a-second poll, and re-feeding ten maps every second is what made them
  *  stutter. */
-function useThrottledState(state: DemoState, ms: number): DemoState {
+function useThrottledState(state: DemoState, ms: number, resetKey = ""): DemoState {
   const latest = useRef(state)
   const [slow, setSlow] = useState(state)
+  // A different region is a different picture: show it now, not in 4 s.
+  const [key, setKey] = useState(resetKey)
+  if (key !== resetKey) {
+    setKey(resetKey)
+    setSlow(state)
+  }
   useEffect(() => {
     latest.current = state
   }, [state])
@@ -94,8 +103,8 @@ function useThrottledState(state: DemoState, ms: number): DemoState {
   return slow
 }
 
-function ScreenMap({ state, zone, big, className, onPickWard }: {
-  state: DemoState; zone: Zone | null; big?: boolean; className: string
+function ScreenMap({ state, zone, region, big, className, onPickWard }: {
+  state: DemoState; zone: Zone | null; region?: Region | null; big?: boolean; className: string
   onPickWard?: (id: string) => void
 }) {
   const navigate = useNavigate()
@@ -114,7 +123,9 @@ function ScreenMap({ state, zone, big, className, onPickWard }: {
         routes={state.routes}
         onPickIncident={pick}
         onPickWard={onPickWard}
-        zoom={big ? 11.8 : 10.9}
+        key={region?.id ?? "all"}
+        center={region?.center}
+        zoom={region ? region.zoom + (big ? 0.6 : 0) : big ? 11.8 : 10.9}
       />
     )
   }
@@ -137,8 +148,8 @@ function ScreenMap({ state, zone, big, className, onPickWard }: {
   )
 }
 
-function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, onSelect }: {
-  state: DemoState; zone: Zone | null; onExpand: () => void; main?: boolean; fresh?: boolean
+function Screen({ state, zone, region, onExpand, main, fresh, size, onResize, selected, onSelect }: {
+  state: DemoState; zone: Zone | null; region?: Region | null; onExpand: () => void; main?: boolean; fresh?: boolean
   size: Size; onResize: (s: Size) => void; selected: boolean; onSelect: () => void
 }) {
   const [box, seen] = useSeenOnce<HTMLDivElement>()
@@ -200,7 +211,7 @@ function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, 
           <MonitorPlay className="size-3.5 text-sky-300" />
         )}
         <span className="truncate text-xs font-semibold tracking-wide uppercase">
-          {zone ? zone.name : "All zones · city"}
+          {zone ? zone.name : `All zones · ${region?.name ?? "every region"}`}
         </span>
         {fresh && <Badge className="h-4 bg-amber-400 px-1 text-[10px] text-black">NEW</Badge>}
         <span className="ml-auto flex items-center gap-2 text-[11px] tabular-nums text-zinc-300">
@@ -220,7 +231,7 @@ function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, 
         </span>
       </div>
       {seen ? (
-        <WallMiniMap state={state} zone={zone} w={size.w} h={size.h} />
+        <WallMiniMap state={state} zone={zone} region={region} w={size.w} h={size.h} />
       ) : (
         <div className="h-full w-full bg-zinc-900" />
       )}
@@ -243,8 +254,8 @@ function Screen({ state, zone, onExpand, main, fresh, size, onResize, selected, 
   )
 }
 
-function Expanded({ state, zones, index, onClose, onStep, onPickWard }: {
-  state: DemoState; zones: Zone[]; index: number; onClose: () => void; onStep: (d: number) => void
+function Expanded({ state, zones, region, index, onClose, onStep, onPickWard }: {
+  state: DemoState; zones: Zone[]; region: Region | null; index: number; onClose: () => void; onStep: (d: number) => void
   onPickWard: (id: string) => void
 }) {
   const navigate = useNavigate()
@@ -275,7 +286,7 @@ function Expanded({ state, zones, index, onClose, onStep, onPickWard }: {
         </Button>
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold uppercase tracking-wide">
-            {zone ? zone.name : "All zones · city"}
+            {zone ? zone.name : `All zones · ${region?.name ?? "every region"}`}
           </div>
           <div className="text-xs text-zinc-400">
             Screen {index + 2} of {zones.length + 1} · ← → between screens · click a ward for its numbers · Esc to close
@@ -289,7 +300,7 @@ function Expanded({ state, zones, index, onClose, onStep, onPickWard }: {
         </Button>
       </div>
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_360px]">
-        <ScreenMap state={state} zone={zone} big className="h-full min-h-[50vh] w-full"
+        <ScreenMap state={state} zone={zone} region={region} big className="h-full min-h-[50vh] w-full"
                    onPickWard={onPickWard} />
         <aside className="min-h-0 overflow-y-auto border-l border-zinc-800 p-3">
           {zone && (
@@ -345,10 +356,21 @@ function Kpi({ label, value }: { label: string; value: number }) {
 }
 
 export default function CommandWall() {
-  const { state } = useDemo()
+  const { state: world } = useDemo()
+  // One region at a time (Pune and Ghaziabad are 1,200 km apart). "auto"
+  // follows wherever the newest report came from.
+  const [regionPick, setRegionPick] = useState<string>(() => load(REGION_KEY, "auto"))
+  const autoId = useMemo(() => autoRegion(world).id, [world])
+  const region = regionPick === "all" ? null
+    : REGIONS.find((r) => r.id === (regionPick === "auto" ? autoId : regionPick)) ?? null
+  const state = useMemo(() => regionState(world, region), [world, region])
+  const pickRegion = (id: string) => {
+    setRegionPick(id)
+    save(REGION_KEY, id)
+  }
   // Small screens redraw every 4 s; the analytics and the expanded view use the
   // live snapshot.
-  const wallState = useThrottledState(state, 4000)
+  const wallState = useThrottledState(state, 4000, region?.id ?? "all")
   const zones = useMemo(() => zonesOf(wallState), [wallState])
   const liveZones = useMemo(() => zonesOf(state), [state])
   const [open, setOpen] = useState(-2)
@@ -416,6 +438,17 @@ export default function CommandWall() {
             </Badge>
           )}
           <div className="ml-auto flex items-center gap-1">
+            <select
+              value={regionPick}
+              onChange={(e) => pickRegion(e.target.value)}
+              className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+              aria-label="Region"
+              title="Which region the wall shows"
+            >
+              <option value="auto">Auto · {REGIONS.find((r) => r.id === autoId)?.name}</option>
+              {REGIONS.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+              <option value="all">All regions</option>
+            </select>
             {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((p) => (
               <Button key={p} size="sm" variant={preset === p && !Object.keys(sizes).length ? "default" : "outline"}
                       className="h-8 w-8 px-0" onClick={() => choosePreset(p)} title={`All screens ${p}`}>
@@ -434,7 +467,7 @@ export default function CommandWall() {
           ref={strip}
           className="flex snap-x items-start gap-2 overflow-x-auto rounded-xl bg-zinc-950 p-2 [scrollbar-width:thin]"
         >
-          <Screen state={wallState} zone={null} main onExpand={() => setOpen(-1)}
+          <Screen state={wallState} zone={null} region={region} main onExpand={() => setOpen(-1)}
                   size={sizeOf("city", true)} onResize={(s) => resize("city", s)}
                   selected={!scope} onSelect={() => setScopeId(null)} />
           {zones.map((z) => (
@@ -470,6 +503,7 @@ export default function CommandWall() {
         <Expanded
           state={state}
           zones={liveZones}
+          region={region}
           index={Math.min(open, liveZones.length - 1)}
           onClose={() => setOpen(-2)}
           onStep={step}

@@ -30,6 +30,8 @@ Scenarios
                        two gateways: two reports, one duplicate, zero spoofs
   multi_hazard_surge   fire, collapse and stranded people across wards at
                        once: the shortfall is recorded, not hidden
+  ghaziabad_monsoon    a monsoon night around IPEC, Ghaziabad: local units
+                       (not Pune's) are tasked
 """
 
 from __future__ import annotations
@@ -418,6 +420,42 @@ async def multi_hazard_surge(run: Run) -> None:
              "Ask the Copilot for options to see mutual aid priced.")
 
 
+async def ghaziabad_monsoon(run: Run) -> None:
+    """A monsoon night around IPEC, Sahibabad: Hindon over its banks at
+    Karhera, underpasses under water, a wall down in Khoda, a factory fire in
+    the industrial area. Every report goes through intake like any other, and
+    the plan should task Ghaziabad units, not Pune's."""
+    for prefer, cat, note, n in [
+        ("Karhera", "person_stranded", "Hindon water entering houses, families on rooftops", 3),
+        ("Arthala", "person_stranded", "Low-lying lanes cut off by river water, elderly inside", 2),
+        ("Vaishali", "flooded_road", "Vaishali metro underpass fully under water, cars stuck", 2),
+        ("Kaushambi", "flooded_road", "Knee-deep water at Kaushambi bus depot road", 1),
+        ("Khoda", "structural_damage", "Boundary wall collapsed after rain, people trapped", 2),
+        ("IPEC", "fire", "Fire at a factory in Sahibabad Site IV, thick smoke towards IPEC", 2),
+        ("Indirapuram", "power_line", "Live wire down in waterlogged street, man injured", 1),
+        ("Vasundhara", "fallen_tree", "Tree fell across road in Sector 5, blocking ambulances", 1),
+        ("Mohan Nagar", "flooded_road", "Water over the road at Mohan Nagar crossing", 1),
+        ("Shalimar", "waterlogging", "Colony waterlogged, drains overflowing into homes", 1),
+        ("Karhera", "supply_shortage", "Relief camp running out of drinking water and food", 1),
+        ("Karhera", "shelter_full", "Karhera school shelter full, more families arriving", 1),
+        ("Kavi Nagar", "heat_casualty", "Elderly woman collapsed in humid heat at relief queue", 1),
+    ]:
+        ward = await _ward(prefer)
+        for k in range(n):
+            await _report(run, ward, cat, note if k == 0 else f"{note} (caller {k + 1})")
+    await _replan(run, "Ghaziabad monsoon")
+    tasked = await db.fetchval(
+        """
+        select count(*) from assignments a
+          join incidents i on i.id = a.incident_id
+         where i.ward_id like 'w-gzb-%' and a.resource_id like 'GZB-%'
+           and a.status::text not in ('cancelled', 'complete')
+        """
+    )
+    run.check("Ghaziabad units tasked to Ghaziabad incidents", (tasked or 0) > 0,
+              f"{tasked or 0} local assignments")
+
+
 SCENARIOS: dict[str, tuple[str, Callable[[Run], Awaitable[None]]]] = {
     "flood_cascade": ("Many reports of one flooded road become one incident and one dispatch.", flood_cascade),
     "block_on_approach": ("A crew's road is closed ahead of it: re-routed once, job kept.", block_on_approach),
@@ -427,6 +465,7 @@ SCENARIOS: dict[str, tuple[str, Callable[[Run], Awaitable[None]]]] = {
     "camera_fire_mesh": ("A camera sees fire in a ward with no internet; it arrives over the mesh.", camera_fire_mesh),
     "mesh_blackout_sos": ("People report over bitchat; duplicates and forgeries are caught.", mesh_blackout_sos),
     "multi_hazard_surge": ("Five hazards at once: shortfalls recorded, not hidden.", multi_hazard_surge),
+    "ghaziabad_monsoon": ("Monsoon night around IPEC, Ghaziabad: Hindon flood, underpasses, collapse, fire.", ghaziabad_monsoon),
 }
 
 

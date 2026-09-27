@@ -49,7 +49,7 @@ export function zonesOf(state: DemoState): Zone[] {
     const lng = incidents.reduce((s, i) => s + i.location[0], 0) / n
     const lat = incidents.reduce((s, i) => s + i.location[1], 0) / n
     const center: [number, number] =
-      Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : (wardCentre.get(id) ?? [73.86, 18.52])
+      Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : (wardCentre.get(id) ?? [0, 0])
     const radiusKm = Math.max(0.6, ...incidents.map((i) => km(center, i.location)))
     zones.push({
       id,
@@ -115,5 +115,69 @@ export function scopeState(state: DemoState, z: Zone | null): DemoState {
     wards: state.wards.filter((w) => w.id === z.id),
     roadBlocks: state.roadBlocks.filter((b) => near(b.location)),
     routes: state.routes.filter((r) => ids.has(r.incidentId)),
+  }
+}
+
+/** Operating regions in this deployment. Pune and Ghaziabad are 1,200 km
+ *  apart, so a single "city" view of both is two dots on a map of India: the
+ *  wall shows one region at a time. Anything is placed in the nearest region. */
+export type Region = { id: string; name: string; center: [number, number]; zoom: number }
+export const REGIONS: Region[] = [
+  { id: "ncr", name: "Ghaziabad · IPEC", center: [77.375, 28.662], zoom: 11.9 },
+  { id: "pune", name: "Pune", center: [73.86, 18.55], zoom: 10.4 },
+]
+const REACH_KM = 150
+
+export function regionOf(loc: [number, number] | null | undefined): Region | null {
+  if (!loc || !Number.isFinite(loc[0]) || !Number.isFinite(loc[1])) return null
+  let best: Region | null = null
+  let d = Infinity
+  for (const r of REGIONS) {
+    const k = km(r.center, loc)
+    if (k < d) { d = k; best = r }
+  }
+  return d <= REACH_KM ? best : null
+}
+
+/** The region where the newest report or incident is: where things are
+ *  happening now. Falls back to the region with most open incidents. */
+export function autoRegion(state: DemoState): Region {
+  let latest: { t: number; loc: [number, number] } | null = null
+  for (const x of [...state.reports, ...state.incidents]) {
+    const t = Date.parse(x.createdAt) || 0
+    if (!latest || t > latest.t) latest = { t, loc: x.location }
+  }
+  const r = regionOf(latest?.loc)
+  if (r) return r
+  const counts = REGIONS.map((g) => state.incidents.filter((i) => isOpen(i.status) && regionOf(i.location)?.id === g.id).length)
+  return REGIONS[counts.indexOf(Math.max(...counts))] ?? REGIONS[0]
+}
+
+/** The world restricted to one region (`null` = everything). */
+export function regionState(state: DemoState, region: Region | null): DemoState {
+  if (!region) return state
+  const inR = (loc: [number, number] | null | undefined) => regionOf(loc)?.id === region.id
+  const wards = state.wards.filter((w) => inR(w.centroid))
+  const wardIds = new Set(wards.map((w) => w.id))
+  const incidents = state.incidents.filter((i) => inR(i.location))
+  const ids = new Set(incidents.map((i) => i.id))
+  const mine = (params: Record<string, unknown> | undefined, wardId: string | null) =>
+    (wardId != null && wardIds.has(wardId)) || (!!params && (
+      (typeof params.ward_id === "string" && wardIds.has(params.ward_id)) ||
+      (typeof params.incident_id === "string" && ids.has(params.incident_id))))
+  return {
+    ...state,
+    wards,
+    incidents,
+    reports: state.reports.filter((r) => inR(r.location)),
+    resources: state.resources.filter((r) => inR(r.location)),
+    needs: state.needs.filter((n) => ids.has(n.incidentId)),
+    decisions: state.decisions.filter((d) => mine(d.params as Record<string, unknown> | undefined, d.wardId)),
+    alerts: state.alerts.filter((a) => wardIds.has(a.wardId)),
+    facilities: state.facilities.filter((f) => inR(f.location)),
+    roadBlocks: state.roadBlocks.filter((b) => inR(b.location)),
+    routes: state.routes.filter((r) => ids.has(r.incidentId)),
+    agencyRequests: state.agencyRequests.filter((a) => wardIds.has(a.wardId)),
+    duplicates: state.duplicates.filter((d) => d.wardId == null || wardIds.has(d.wardId)),
   }
 }

@@ -100,7 +100,12 @@ async def ward_contexts(hazard: str, city_id: str = "pune") -> list[WardContext]
                coalesce(jsonb_object_agg(lf.kind, lf.n)
                         filter (where lf.kind is not null), '{{}}'::jsonb) as lifelines,
                coalesce(max(hist.n), 0) as past_events,
-               (select min(elevation_m) from wards where city_id = $2) as city_min_elevation
+               (select min(w2.elevation_m) from wards w2
+                 where w2.city_id = $2
+                   -- one deployment can hold several regions (Pune and
+                   -- Ghaziabad); the flood datum is the local one
+                   and extensions.ST_DWithin(w2.centroid, w.centroid, 60000)
+               ) as city_min_elevation
         from wards w
         left join lf on lf.ward_id = w.id
         left join hist on hist.ward_id = w.id

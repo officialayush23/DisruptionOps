@@ -6,6 +6,7 @@ import { useDemo } from "./DemoProvider"
 import type { DemoState } from "./useDemo"
 import { LiveMap } from "@/components/map/LiveMap"
 import { WardPanel } from "@/routes/admin/WardPanel"
+import { autoRegion, REGIONS } from "@/routes/admin/zones"
 import { MapStage } from "@/components/map/MapStage"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -63,6 +64,11 @@ function BeatFeed({ beats }: { beats: DemoState["beats"] }) {
 
 export default function DemoConsole() {
   const { state, error, activity, selected, setSelected, busy, run } = useDemo()
+  // Pune and Ghaziabad are 1,200 km apart: the map opens on the region the
+  // newest report came from, and the buttons jump between them.
+  const [regionId, setRegionId] = useState<string | null>(null)
+  const autoId = useMemo(() => autoRegion(state).id, [state])
+  const region = REGIONS.find((r) => r.id === (regionId ?? autoId)) ?? REGIONS[0]
   const [ward, setWard] = useState<string | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
   /** Reset throws away the run. It asks once, in place, rather than through a
@@ -163,11 +169,23 @@ export default function DemoConsole() {
 
       <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
         <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-muted-foreground text-xs">Region</span>
+            {REGIONS.map((r) => (
+              <Button key={r.id} size="sm" className="h-7" variant={region.id === r.id ? "default" : "outline"}
+                      onClick={() => setRegionId(r.id)}>
+                {r.name}
+              </Button>
+            ))}
+          </div>
           <MapStage
             panelTitle="What is happening"
             panel={<BeatFeed beats={state.beats} />}
             map={(expanded) => (
               <LiveMap
+                key={region.id}
+                center={region.center}
+                zoom={region.zoom + 0.6}
                 className={
                   expanded
                     ? "h-full w-full"
