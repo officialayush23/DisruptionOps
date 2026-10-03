@@ -52,6 +52,10 @@ services:
       # `distro-ruddy.vercel.app.attacker.com` is a substring match.
       - key: CORS_ORIGIN_REGEX
         sync: false
+      # Where the PWA is served. The BiChat phone app opens this + /citizen for
+      # residents and + /field for crews and staff (GET /api/v1/auth/client-config).
+      - key: PUBLIC_APP_URL
+        value: https://distro-ruddy.vercel.app
 
       # DEV_AUTH_ROLE is deliberately absent. It treats unauthenticated
       # requests as a named role, and the settings validator refuses to start

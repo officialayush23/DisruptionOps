@@ -82,7 +82,12 @@ class ClientConfig(Camel):
 
 def _app_url() -> str:
     if settings.public_app_url:
-        return settings.public_app_url.rstrip("/")
+        # The phone adds `/citizen` or `/field` itself, by role; accept either pasted here.
+        url = settings.public_app_url.strip().strip("\"'").rstrip("/")
+        for suffix in ("/citizen", "/field"):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+        return url
     for origin in settings.cors_origin_list:
         if "localhost" not in origin and "127.0.0.1" not in origin:
             return origin.rstrip("/")

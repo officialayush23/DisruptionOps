@@ -30,6 +30,7 @@ import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Textarea } from "@/components/ui/textarea"
 import { inBiChat, readHandoff, saveHandoff } from "@/lib/native"
+import { toWav16k } from "@/lib/wav"
 
 /* `deviceId` now lives in the http client and is sent as a header on every
    request, because the rate limiter needs the same value the trust scorer does:
@@ -203,6 +204,7 @@ export default function CitizenApp() {
   const [recording, setRecording] = useState(false)
   const [heard, setHeard] = useState<VoiceResult | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
+  const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // A report half-written on the mesh side of the BiChat app carries over.
   const [text, setText] = useState(() => (inBiChat() ? readHandoff().draft ?? "" : ""))
   const [busy, setBusy] = useState<string | null>(null)
@@ -494,21 +496,30 @@ export default function CitizenApp() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const chunks: BlobPart[] = []
-      const mime = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : "audio/mp4"
-      const rec = new MediaRecorder(stream, { mimeType: mime })
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]
+        .find((m) => MediaRecorder.isTypeSupported(m))
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream)
+      const recordedType = rec.mimeType || mime || "audio/webm"
       rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
       rec.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop())
         setRecording(false)
-        const blob = new Blob(chunks, { type: mime })
-        if (blob.size < 1200) {
+        if (stopTimer.current) { clearTimeout(stopTimer.current); stopTimer.current = null }
+        const recorded = new Blob(chunks, { type: recordedType })
+        if (recorded.size < 1200) {
           setError("That was too short to make out. Hold the button while you speak.")
           return
         }
         setBusy("voice")
         try {
+          // Plain WAV is what the speech service reads reliably; fall back to the
+          // original recording only if this browser cannot decode its own audio.
+          let blob = recorded
+          let contentType = recordedType
+          try {
+            blob = await toWav16k(recorded)
+            contentType = "audio/wav"
+          } catch { /* send as recorded */ }
           const b64 = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader()
             reader.onloadend = () => resolve(String(reader.result).split(",")[1] ?? "")
@@ -519,7 +530,7 @@ export default function CitizenApp() {
             method: "POST",
             body: {
               lng: pos.lng, lat: pos.lat, audioBase64: b64,
-              contentType: mime, language: "unknown",
+              contentType, language: "unknown",
               fileIt: false, cityId: "pune", deviceId: deviceId(),
             },
           })
@@ -532,6 +543,8 @@ export default function CitizenApp() {
       recorder.current = rec
       rec.start()
       setRecording(true)
+      // The speech service takes about 30 seconds per recording; stop a little before.
+      stopTimer.current = setTimeout(() => stopRecording(), 25_000)
     } catch {
       setError(
         "The microphone is not available. Check the permission, or type the " +
@@ -541,7 +554,8 @@ export default function CitizenApp() {
   }
 
   function stopRecording() {
-    recorder.current?.stop()
+    if (stopTimer.current) { clearTimeout(stopTimer.current); stopTimer.current = null }
+    if (recorder.current?.state === "recording") recorder.current.stop()
     recorder.current = null
   }
 

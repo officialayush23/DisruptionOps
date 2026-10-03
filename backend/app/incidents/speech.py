@@ -21,8 +21,8 @@ Two modes, and which one is used is a real decision:
     one the keyword vocabulary does not cover, because translation loses the
     idiom the parser leans on.
 
-Never raises. Speech that cannot be transcribed leaves the person the text box
-they already had.
+A service failure raises `SpeechError` with a sentence a person can read; silence
+returns None. Either way the person keeps the text box they already had.
 """
 
 from __future__ import annotations
@@ -108,11 +108,36 @@ def decode_audio(b64: str) -> bytes:
     return raw
 
 
+#: Extension Sarvam should see for each container we may be sent. The service reads the
+#: format from the upload, and a browser's `audio/webm;codecs=opus` is not a file name.
+_EXTENSIONS = {
+    "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+    "audio/webm": "webm", "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp3": "mp3",
+    "audio/mp4": "m4a", "audio/m4a": "m4a", "audio/x-m4a": "m4a", "audio/aac": "aac",
+    "audio/flac": "flac",
+}
+
+
+def normalise_type(content_type: str) -> tuple[str, str]:
+    """`audio/webm;codecs=opus` → (`audio/webm`, `report.webm`)."""
+    base = (content_type or "").split(";", 1)[0].strip().lower() or "audio/wav"
+    return base, f"report.{_EXTENSIONS.get(base, 'wav')}"
+
+
+class SpeechError(Exception):
+    """The speech service refused or failed. `message` is safe to show a person."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
 async def transcribe(
     audio: bytes,
     *,
-    filename: str = "report.webm",
-    content_type: str = "audio/webm",
+    filename: str | None = None,
+    content_type: str = "audio/wav",
     language: str = "unknown",
 ) -> Transcript | None:
     """Speech to text, keeping the original language where we can parse it.
@@ -120,6 +145,9 @@ async def transcribe(
     `language="unknown"` asks Saarika to detect it, which is the right default:
     a person reporting a flood should not have to pick their own language off a
     list first.
+
+    Returns None when nothing was said. Raises [SpeechError] when the service
+    itself failed, so the caller can say *why* instead of "nothing heard".
     """
     key = _key()
     if not key:
@@ -127,30 +155,48 @@ async def transcribe(
 
     import time
 
+    content_type, default_name = normalise_type(content_type)
+    filename = filename or default_name
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=settings.feed_timeout_seconds * 2) as client:
+        async with httpx.AsyncClient(timeout=max(30.0, settings.feed_timeout_seconds * 2)) as client:
             response = await client.post(
                 STT_URL,
                 headers={"api-subscription-key": key},
                 files={"file": (filename, audio, content_type)},
                 data={
                     "model": settings.sarvam_stt_model,
-                    "language_code": language,
+                    "language_code": language or "unknown",
                 },
             )
-            response.raise_for_status()
-            payload: Any = response.json()
-    except Exception as exc:  # noqa: BLE001 - a speech outage is not a failure
-        log.warning("sarvam_stt_unavailable", error=str(exc)[:200])
-        return None
+    except httpx.HTTPError as exc:
+        log.warning("sarvam_stt_unreachable", error=str(exc)[:200])
+        raise SpeechError("The speech service could not be reached. Try again, or type the report.") from exc
+
+    if response.status_code >= 400:
+        detail = _error_text(response)
+        log.warning("sarvam_stt_refused", status=response.status_code, detail=detail[:300],
+                    content_type=content_type, size=len(audio))
+        if response.status_code in (401, 403):
+            raise SpeechError("Speech is set up with a key the speech service does not accept.",
+                              status=response.status_code)
+        if response.status_code == 429:
+            raise SpeechError("The speech service is busy. Try again in a moment.", status=429)
+        raise SpeechError(
+            f"The speech service could not read that recording ({detail or response.status_code}).",
+            status=response.status_code,
+        )
+    try:
+        payload: Any = response.json()
+    except ValueError as exc:
+        raise SpeechError("The speech service sent an answer that could not be read.") from exc
 
     latency = int((time.perf_counter() - started) * 1000)
     text = str((payload or {}).get("transcript") or "").strip()
     detected = str((payload or {}).get("language_code") or language or "").strip()
 
     notes: list[str] = []
-    if detected and detected not in PARSEABLE:
+    if detected and detected not in PARSEABLE and detected != "unknown":
         # The transcript is in a language the keyword vocabulary does not cover.
         # Rather than hand the parser something it will certainly fall through
         # on, ask for English and say that is what happened.
@@ -172,6 +218,20 @@ async def transcribe(
         text=text, language=detected or "unknown", translated=False,
         model=settings.sarvam_stt_model, latency_ms=latency, notes=notes,
     )
+
+
+def _error_text(response: httpx.Response) -> str:
+    """The service's own words for a refusal, from whichever shape it used."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text.strip()[:200]
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("code") or "")[:200]
+        return str(body.get("message") or body.get("detail") or err or "")[:200]
+    return str(body)[:200]
 
 
 async def _translate(

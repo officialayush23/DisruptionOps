@@ -24,7 +24,7 @@ from typing import Literal
 from fastapi import APIRouter, Query
 from pydantic import Field
 
-from app.core.errors import BadRequest, Conflict, NotFound
+from app.core.errors import BadRequest, Conflict, NotFound, UpstreamUnavailable
 from app.core.logging import get_logger
 from app.core import cache
 from app.core.security import CurrentPrincipal, StaffPrincipal
@@ -339,18 +339,23 @@ async def citizen_voice_report(
     care that this one was spoken.
     """
     if not speech.configured():
-        raise BadRequest(
-            "Speech reporting is not configured. Set SARVAM_API_KEY, or type "
-            "the report instead."
+        raise UpstreamUnavailable(
+            "Speech reporting is not set up on this server (SARVAM_API_KEY). "
+            "Type the report instead."
         )
     try:
         audio = speech.decode_audio(body.audio_base64)
     except ValueError as exc:
         raise BadRequest(str(exc)) from exc
 
-    heard = await speech.transcribe(
-        audio, content_type=body.content_type, language=body.language
-    )
+    try:
+        heard = await speech.transcribe(
+            audio, content_type=body.content_type, language=body.language
+        )
+    except speech.SpeechError as exc:
+        # The service failed, which is not the person's fault: say so, and say it
+        # as something other than "bad request".
+        raise UpstreamUnavailable(exc.message) from exc
     if heard is None or not heard.usable:
         raise BadRequest(
             "Nothing could be made out in that recording. Try again somewhere "
