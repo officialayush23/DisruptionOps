@@ -1,12 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { AlertTriangle, CheckCircle2, Loader2, MapPin, Radio, Send, Truck } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  CheckCircle2, ExternalLink, Loader2, MapPin, Navigation, Radio, Send, Share2, X,
+} from "lucide-react"
 import { request } from "@/api/httpClient"
-import { LiveMap } from "@/components/map/LiveMap"
-import { MapStage } from "@/components/map/MapStage"
+import { LiveMap, type CameraRequest, type MapSelection } from "@/components/map/LiveMap"
+import { MapExperience, type Snap } from "@/components/map/experience/MapExperience"
+import { useCanHover, useMediaQuery } from "@/components/map/experience/hooks"
+import {
+  ActionButton, AlertBanner, ChoicePills, ConnectivityPill, DetailRow, FilterControl,
+  LegendRow, MapControls, NavPanel, PlaceRow, SectionLabel, TopBar, type FilterOption, type Tone,
+} from "@/components/map/experience/parts"
+import { ItemDisc } from "@/components/map/experience/ItemDisc"
+import {
+  facilityItem, incidentItem, kindLabel, unitItem, words, type MapItem,
+} from "@/components/map/experience/items"
+import {
+  MAP, alongLine, compass, externalMapsUrl, formatMetres, metresBetween, placeGroupOf,
+  serviceOf, sharePlace,
+} from "@/components/map/mapTheme"
+import { useOutbox } from "@/lib/pwa"
 import { OfflineBar } from "@/components/common/OfflineBar"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -385,29 +400,544 @@ export default function FieldApp() {
   const resourceKinds = kinds.filter((k) => k.appliesTo === "resource")
   const lifelineKinds = kinds.filter((k) => k.appliesTo === "lifeline")
 
-  return (
-    <div className="mx-auto max-w-6xl space-y-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-semibold">Field</h1>
-          <p className="text-muted-foreground text-xs">
-            {state?.operator ?? "All agencies"} · {state?.units.length ?? 0} unit(s)
-          </p>
-        </div>
-        <a href="/login" className="text-muted-foreground text-xs underline">Sign in</a>
-      </div>
+  // ================================================================== map UI
+  //
+  // Presentation only. The map is the screen; the status buttons, the hazard
+  // report and the unit list live in the sheet (phone), a floating card
+  // (tablet) or the context panel (desktop).
 
-      {/* The two crew accounts, on the crew screen. The point of the demo is
-          that Fire Brigade and PMC Drainage see different units, and switching
-          between them is how anyone sees that. */}
-      <DemoCredentials portal="field" title="Demo crew sign-ins" />
+  const desktop = useMediaQuery("(min-width: 1024px)")
+  const canHover = useCanHover()
+  const { online, queued } = useOutbox()
+  const [clock, setClock] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setClock(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [])
+  const [lastLive, setLastLive] = useState<number | null>(null)
+  const [seenState, setSeenState] = useState<FieldState | null>(null)
+  if (state !== seenState) {
+    // A state object only arrives from a successful poll, so this is "last live".
+    setSeenState(state)
+    if (state) setLastLive(clock)
+  }
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [filter, setFilter] = useState("all")
+  const [tab, setTab] = useState<"task" | "report" | "status" | "units">("task")
+  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
+  const [camera, setCamera] = useState<CameraRequest | null>(null)
+  const cameraSeq = useRef(0)
+  const fly = useCallback((req: Omit<CameraRequest, "key">) => {
+    cameraSeq.current += 1
+    setCamera({ ...req, key: cameraSeq.current })
+  }, [])
+  const [snapRequest, setSnapRequest] = useState<{ snap: Snap; key: number } | null>(null)
+  const snapTo = useCallback((snap: Snap) => setSnapRequest({ snap, key: Date.now() }), [])
+  /** Turn-by-turn for the selected unit's task is on. */
+  const [navOn, setNavOn] = useState(false)
+  const [flash, setFlash] = useState<string | null>(null)
+  useEffect(() => {
+    if (!flash) return
+    const id = setTimeout(() => setFlash(null), 2500)
+    return () => clearTimeout(id)
+  }, [flash])
 
+  const incidentsForMap = useMemo(() =>
+    // Real incidents when the API offers them, the crew's own tasks as the
+    // fallback so an older backend still draws something rather than an empty map.
+    state?.incidents?.length
+      ? state.incidents.map((i) => ({
+          id: i.id,
+          title: i.verification === "unconfirmed" ? `${i.title} · unconfirmed` : i.title,
+          category: i.category,
+          severity: i.severity,
+          reportCount: i.reportCount,
+          location: i.location,
+        }))
+      : state?.units
+          .filter((u) => u.incidentLocation)
+          .map((u) => ({
+            id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
+            category: "", severity: 4, reportCount: 1,
+            location: u.incidentLocation as [number, number],
+          })) ?? [],
+  [state])
+
+  const items = useMemo<MapItem[]>(() => [
+    ...incidentsForMap.map(incidentItem),
+    ...(state?.units ?? []).map(unitItem),
+    ...(state?.facilities ?? []).map(facilityItem),
+  ], [incidentsForMap, state])
+
+  const filterDef = FIELD_FILTERS.find((f) => f.id === filter) ?? FIELD_FILTERS[0]
+  const unitKey = unit ? `unit:${unit.id}` : null
+  const taskKey = unit?.incidentId ? `incident:${unit.incidentId}` : null
+  const visible = useMemo(() => new Set(
+    items
+      .filter((i) => i.critical || filterDef.match(i) || i.key === selectedKey || i.key === unitKey || i.key === taskKey)
+      .map((i) => i.key)
+  ), [items, filterDef, selectedKey, unitKey, taskKey])
+  const filterOptions: FilterOption[] = FIELD_FILTERS
+    .map((f) => ({ id: f.id, label: f.label, colour: f.colour, count: items.filter(f.match).length }))
+    .filter((o) => o.id === "all" || o.count > 0 || o.id === filter)
+
+  const picked = items.find((i) => i.key === selectedKey) ?? null
+  const origin: [number, number] | null = myPos ?? unit?.location ?? null
+
+  function select(item: MapItem) {
+    setSelectedKey(item.key)
+    if (item.kind === "unit") setSelected(item.id)
+    setFollow(false)
+    fly({ center: item.location })
+    snapTo("peek")
+  }
+
+  const onMapSelect = (hit: MapSelection | null) => {
+    if (!hit) {
+      setSelectedKey(null)
+      return
+    }
+    const kind = hit.kind === "resource" ? "unit" : hit.kind
+    const item = items.find((i) => i.key === `${kind}:${hit.id}`)
+    if (item) select(item)
+  }
+
+  // ---- the selected unit's route, and how far to trust it.
+  const unitRoute: number[][] | undefined =
+    (unit?.route?.length ?? 0) > 1
+      ? (unit!.route as number[][])
+      : unit?.incidentLocation
+        ? [unit.location, unit.incidentLocation]
+        : undefined
+  const roadRoute = (unit?.route?.length ?? 0) > 1 && unit?.routeEngine !== "straight-line-fallback"
+  const routeStatus: "clear" | "uncertain" | undefined = unitRoute ? (roadRoute ? "clear" : "uncertain") : undefined
+
+  /** The control room re-solved this unit's route: said, because a line that
+   *  redraws itself under a driver otherwise reads as a glitch. */
+  const routeSig = unitRoute
+    ? `${unit?.id}:${unitRoute.length}:${unitRoute[unitRoute.length - 1]?.join(",")}`
+    : ""
+  const [seenRoute, setSeenRoute] = useState(routeSig)
+  const [reroutedAt, setReroutedAt] = useState<number | null>(null)
+  if (routeSig !== seenRoute) {
+    const sameUnit = seenRoute.split(":")[0] === routeSig.split(":")[0]
+    setSeenRoute(routeSig)
+    if (sameUnit && seenRoute && routeSig) setReroutedAt(clock)
+  }
+  const rerouted = reroutedAt !== null && clock - reroutedAt < 30_000
+
+  // Where the crew is along it, from their own fix when there is one.
+  const along = unitRoute && myPos ? alongLine(unitRoute, myPos) : null
+  const onRoute = along !== null && along.off < 150
+  const travelledM = onRoute ? along!.along : null
+  const totalM = along?.total ?? (unit?.distanceKm ? unit.distanceKm * 1000 : null)
+  const remainingM = travelledM !== null && totalM ? Math.max(0, totalM - travelledM) : unit?.distanceKm ? unit.distanceKm * 1000 : null
+  const progress = travelledM !== null && totalM ? travelledM / totalM : unit?.progress ?? 0
+
+  // Both below are a few dozen arithmetic operations; recomputed per render.
+  const step = (() => {
+    const steps = unit?.steps ?? []
+    if (!steps.length || travelledM === null) return null
+    let acc = 0
+    for (let i = 0; i < steps.length; i++) {
+      const end = acc + steps[i].distanceM
+      if (travelledM < end || i === steps.length - 1) {
+        return { index: i, step: steps[i], next: steps[i + 1] ?? null, toNextM: Math.max(0, end - travelledM) }
+      }
+      acc = end
+    }
+    return null
+  })()
+
+  /** Incidents beside the route ahead of the crew — the things they will meet. */
+  const hazardsAhead = (() => {
+    if (!unitRoute || unitRoute.length < 2) return []
+    const from = travelledM ?? 0
+    const out: { tone: Tone; text: string; ahead: number }[] = []
+    for (const i of incidentsForMap) {
+      if (i.id === unit?.incidentId) continue
+      const a = alongLine(unitRoute, i.location)
+      if (a.off <= 80 && a.along > from) {
+        out.push({
+          tone: i.severity >= 5 ? "danger" : "caution", ahead: a.along - from,
+          text: `${i.title} ${formatMetres(a.along - from)} ahead, beside the route`,
+        })
+      }
+    }
+    return out.sort((a, b) => a.ahead - b.ahead).slice(0, 2)
+  })()
+
+  const taskRef = unit?.incidentId ? ` #${unit.incidentId.replace(/[^a-z0-9]/gi, "").slice(-4).toUpperCase()}` : ""
+
+  const share = async (title: string, at: [number, number]) => {
+    const r = await sharePlace(title, at[0], at[1])
+    if (r === "copied") setFlash("Location copied")
+    else if (r === "failed") setFlash("Could not share from this browser")
+  }
+
+  const frameRoute = (route: number[][]) => {
+    let w = Infinity, s2 = Infinity, e = -Infinity, n = -Infinity
+    for (const [x, y] of route) { w = Math.min(w, x); e = Math.max(e, x); s2 = Math.min(s2, y); n = Math.max(n, y) }
+    fly({ bounds: [[w, s2], [e, n]], zoom: 16.5 })
+  }
+
+  const startNav = () => {
+    if (!unitRoute) return
+    setNavOn(true)
+    setSelectedKey(null)
+    setFollow(false)
+    frameRoute(unitRoute)
+    snapTo("peek")
+  }
+
+  // ---- pieces
+
+  const gpsShort =
+    fix && fixUsable ? `GPS ±${Math.round(fix.accuracy)} m`
+    : fix ? "GPS weak"
+    : gps.state === "denied" ? "Location blocked"
+    : gps.state === "locating" ? "Finding GPS…"
+    : "No GPS"
+
+  const top = navOn && unit && unitRoute ? (
+    <NavPanel
+      context={<>{unit.label} → {unit.assignedTo ?? "its task"}{taskRef}</>}
+      distance={step ? formatMetres(step.toNextM) : remainingM !== null ? formatMetres(remainingM) : null}
+      instruction={step ? step.step.instruction : unit.assignedTo ? `to ${unit.assignedTo}` : null}
+      then={step?.next ? <>Then: {step.next.instruction}</> : null}
+      remaining={
+        <>
+          {remainingM !== null ? `${formatMetres(remainingM)} left` : ""}
+          {unit.etaMinutes ? ` · about ${unit.etaMinutes} min (dispatch estimate)` : ""}
+          {travelledM === null && myPos ? " · you are not on this route" : ""}
+          {!myPos ? " · from the unit's recorded position" : ""}
+        </>
+      }
+      status={{
+        tone: roadRoute ? "ok" : "uncertain",
+        text: roadRoute
+          ? "Road route from the control room, around every hazard it knows about."
+          : (unit.route?.length ?? 0) > 1
+            ? "Straight-line estimate: the router was unreachable, so roads and closures are unknown."
+            : "No route yet — this is the direct line to the task, not a road.",
+      }}
+      hazards={hazardsAhead}
+      notice={rerouted ? "Route updated by the control room." : null}
+      arrived={unit.status === "on_site" ? <>On scene at {unit.assignedTo ?? "the task"}.</> : null}
+      onExit={() => setNavOn(false)}
+    />
+  ) : (
+    <TopBar
+      title={<>Field · {state?.operator ?? "All agencies"}</>}
+      subtitle={
+        <span className="flex min-w-0 items-center gap-2">
+          <ConnectivityPill online={online} reachable={!/failed to fetch|networkerror|load failed/i.test(error ?? "")} staleSince={null}
+                            lastLive={lastLive} queued={queued} now={clock} />
+          <span className="shrink-0 text-[11px] text-slate-500">· {gpsShort}</span>
+        </span>
+      }
+      right={<FilterControl value={filter} options={filterOptions} onChange={(id) => { setFilter(id); if (id !== "all") setSelectedKey(null) }} />}
+    />
+  )
+
+  const banner = (
+    <div className="space-y-2">
       {error && (
-        <Alert variant="destructive">
-          <AlertTriangle className="size-4" />
-          <AlertDescription className="text-xs">{error}</AlertDescription>
-        </Alert>
+        <AlertBanner tone="caution" title="Something did not go through" detail={error} onDismiss={() => setError(null)} />
       )}
+      {flash && (
+        <div className="mx-auto w-fit rounded-full border border-white/10 bg-[rgb(14_17_22/0.92)] px-3 py-1.5 text-xs">
+          {flash}
+        </div>
+      )}
+    </div>
+  )
+
+  const controls = (
+    <MapControls
+      following={follow && Boolean(myPos)}
+      hasFix={Boolean(myPos)}
+      onLocate={() => {
+        // Pressing it always re-centres, and turns following back on.
+        setRecentre((n) => n + 1)
+        setFollow(true)
+        if (!myPos) setGpsAttempt((n) => n + 1)
+      }}
+      onZoomIn={() => fly({ zoomBy: 1 })}
+      onZoomOut={() => fly({ zoomBy: -1 })}
+      showZoom={desktop || canHover}
+      layers={
+        <div className="space-y-3">
+          <SectionLabel>Basemap</SectionLabel>
+          <ChoicePills
+            value={lightPreset}
+            onChange={setLightPreset}
+            options={[{ id: "night", label: "Night" }, { id: "dusk", label: "Dusk" }, { id: "day", label: "Day" }]}
+          />
+          <SectionLabel>On this map</SectionLabel>
+          <div className="grid gap-1.5">
+            <LegendRow colour={MAP.critical} label="Critical incident — always shown, pulses" />
+            <LegendRow colour={MAP.sev4} label="Incident, severity 4" />
+            <LegendRow colour={MAP.sev3} label="Incident, severity 3 and below" />
+            <LegendRow colour={MAP.medical} label="Ambulance, hospital, medical camp" />
+            <LegendRow colour={MAP.fire} label="Fire crew" />
+            <LegendRow colour={MAP.rescue} label="Rescue team, boat" />
+            <LegendRow colour={MAP.logistics} label="Pump, bus, truck, tanker" />
+            <LegendRow colour={MAP.shelter} label="Shelter, food, water" />
+            <LegendRow colour="#f59e0b" ring label="Ring: unit status (amber en route, green on scene)" />
+            <LegendRow colour={MAP.you} label="You" />
+          </div>
+        </div>
+      }
+    />
+  )
+
+  const unitSummary = unit && (
+    <div className="flex items-center gap-3">
+      <ItemDisc item={unitItem(unit)} size={40} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[15px] font-semibold">{unit.label}</div>
+        <div className="truncate text-xs text-slate-400">
+          {words(unit.status)}
+          {unit.assignedTo ? ` → ${unit.assignedTo}${taskRef}` : " · no task"}
+          {unit.distanceKm ? ` · ${unit.distanceKm.toFixed(1)} km` : ""}
+          {unit.etaMinutes ? ` · ~${unit.etaMinutes} min` : ""}
+        </div>
+      </div>
+    </div>
+  )
+
+  const peek = (
+    <div className="space-y-2.5">
+      {navOn && unit && unitRoute ? (
+        <div className="flex items-center gap-2">
+          <ActionButton tone="danger" onClick={() => setNavOn(false)}>End</ActionButton>
+          <ActionButton onClick={() => { setTab("task"); snapTo("half") }} className="flex-1">
+            <Navigation className="size-4" /> Directions
+          </ActionButton>
+          <ActionButton href={externalMapsUrl(unitRoute[unitRoute.length - 1][0], unitRoute[unitRoute.length - 1][1])} className="w-11 px-0">
+            <ExternalLink className="size-4" /><span className="sr-only">Open in external maps</span>
+          </ActionButton>
+        </div>
+      ) : picked && picked.kind !== "unit" ? (
+        <>
+          <div className="flex items-center gap-3">
+            <ItemDisc item={picked} size={40} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[15px] font-semibold">{picked.title}</div>
+              <div className="truncate text-xs text-slate-400">
+                {kindLabel(picked)}
+                {origin ? ` · ${formatMetres(metresBetween(origin, picked.location))} ${compass(origin, picked.location)}` : ""}
+                {picked.status ? ` · ${words(picked.status)}` : ""}
+                {picked.severity ? ` · severity ${picked.severity}` : ""}
+              </div>
+            </div>
+            <button type="button" aria-label="Close" onClick={() => setSelectedKey(null)}
+                    className="grid size-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-white/10">
+              <X className="size-4" />
+            </button>
+          </div>
+          <div className="flex gap-2">
+            {picked.key === taskKey && unitRoute ? (
+              <ActionButton tone={picked.critical ? "critical" : "primary"} className="flex-1" onClick={startNav}>
+                <Navigation className="size-4" /> Navigate
+              </ActionButton>
+            ) : (
+              <ActionButton tone="primary" className="flex-1" href={externalMapsUrl(picked.location[0], picked.location[1])}>
+                <ExternalLink className="size-4" /> Open in Maps
+              </ActionButton>
+            )}
+            <ActionButton onClick={() => void share(picked.title, picked.location)} className="w-11 px-0">
+              <Share2 className="size-4" /><span className="sr-only">Share location</span>
+            </ActionButton>
+            {picked.kind === "facility" && (
+              <ActionButton onClick={() => { setTab("status"); snapTo("half") }}>Status</ActionButton>
+            )}
+          </div>
+        </>
+      ) : unit ? (
+        <>
+          {unitSummary}
+          <div className="flex gap-2">
+            {unitRoute ? (
+              <ActionButton tone="primary" className="flex-1" onClick={startNav}>
+                <Navigation className="size-4" /> Navigate
+              </ActionButton>
+            ) : (
+              <ActionButton className="flex-1" onClick={() => { setTab("status"); snapTo("half") }}>
+                <Radio className="size-4" /> Report status
+              </ActionButton>
+            )}
+            <ActionButton onClick={() => { setTab("report"); snapTo("half") }}>
+              <MapPin className="size-4" /> Hazard here
+            </ActionButton>
+          </div>
+        </>
+      ) : (
+        <p className="py-1 text-xs text-slate-400">
+          {state ? "No units for this operator. Sign in as a field operator." : "Loading your units…"}
+        </p>
+      )}
+    </div>
+  )
+
+  const taskTab = (
+    <div className="space-y-3">
+      {unit && (unit.steps?.length ?? 0) > 0 ? (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold">{unit.label} to {unit.assignedTo}</div>
+          <div className="text-xs text-slate-400">
+            {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
+            {unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
+            {typeof unit.progress === "number" ? ` · ${Math.round(unit.progress * 100)}% of the way` : ""}
+            {roadRoute
+              ? " · routed around every hazard the control room knows about"
+              : " · straight-line estimate, the router was unreachable"}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!navOn && unitRoute && (
+              <ActionButton tone="primary" onClick={startNav}><Navigation className="size-4" /> Navigate</ActionButton>
+            )}
+            {unitRoute && (
+              <ActionButton onClick={() => { setFollow(false); frameRoute(unitRoute) }}>View route</ActionButton>
+            )}
+            {unit.incidentLocation && (
+              <>
+                <ActionButton href={externalMapsUrl(unit.incidentLocation[0], unit.incidentLocation[1])}>
+                  <ExternalLink className="size-4" /> Open in Maps
+                </ActionButton>
+                <ActionButton onClick={() => void share(unit.assignedTo ?? "Task", unit.incidentLocation as [number, number])}>
+                  <Share2 className="size-4" /> Share
+                </ActionButton>
+              </>
+            )}
+          </div>
+          <ol className="space-y-1 rounded-2xl bg-white/[0.04] p-3">
+            {unit.steps!.slice(0, 12).map((st, i) => (
+              <li key={i} className={`flex gap-2 text-xs ${step && step.index === i ? "font-semibold text-white" : step && i < step.index ? "text-slate-500" : ""}`}>
+                <span className="w-14 shrink-0 tabular-nums text-slate-400">
+                  {st.distanceM >= 1000 ? `${(st.distanceM / 1000).toFixed(1)} km` : `${st.distanceM} m`}
+                </span>
+                <span>{st.instruction}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : unit ? (
+        <div className="space-y-2">
+          {unitSummary}
+          <p className="text-xs text-slate-400">
+            {unit.assignedTo
+              ? "No street directions for this task yet. The line on the map is the direct line, not a road."
+              : "This unit has no task. The control room assigns one; it appears here and on the map."}
+          </p>
+          {unit.incidentLocation && (
+            <div className="flex flex-wrap gap-2">
+              <ActionButton tone="primary" onClick={startNav}><Navigation className="size-4" /> Navigate</ActionButton>
+              <ActionButton href={externalMapsUrl(unit.incidentLocation[0], unit.incidentLocation[1])}>
+                <ExternalLink className="size-4" /> Open in Maps
+              </ActionButton>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {picked && picked.kind !== "unit" && (
+        <div className="space-y-1.5 border-t border-white/10 pt-3">
+          <SectionLabel>Selected</SectionLabel>
+          <DetailRow label="Type">{kindLabel(picked)}</DetailRow>
+          <DetailRow label="Distance">
+            {origin ? `${formatMetres(metresBetween(origin, picked.location))} ${compass(origin, picked.location)}, straight line${myPos ? "" : ", from the unit"}` : null}
+          </DetailRow>
+          {picked.kind === "incident" && (() => {
+            const i = state?.incidents?.find((x) => x.id === picked.id)
+            return i ? (
+              <>
+                <DetailRow label="Severity">{i.severity}{i.severity >= 5 ? " — critical" : ""}</DetailRow>
+                <DetailRow label="State">{words(i.status)} · {i.verification}</DetailRow>
+                <DetailRow label="Reports">{i.reportCount}</DetailRow>
+              </>
+            ) : null
+          })()}
+          {picked.kind === "facility" && (() => {
+            const f = state?.facilities.find((x) => x.id === picked.id)
+            return f ? (
+              <>
+                <DetailRow label="Status">{words(f.status)}</DetailRow>
+                <DetailRow label="Places free">{f.capacity ? `${Math.max(0, f.capacity - (f.occupancy ?? 0))} of ${f.capacity}` : null}</DetailRow>
+              </>
+            ) : null
+          })()}
+          <DetailRow label="Position">
+            <span className="tabular-nums">{picked.location[1].toFixed(5)}, {picked.location[0].toFixed(5)}</span>
+          </DetailRow>
+        </div>
+      )}
+    </div>
+  )
+
+  const reportTab = (
+    <div className="space-y-2.5">
+      {/* Report what is in front of you. The most credible reporters in the
+          city could see things and had nowhere to put them. */}
+      <div className="flex items-center gap-2 text-sm font-semibold"><MapPin className="size-4" /> Report a hazard here</div>
+      <div className="text-xs text-slate-400">
+        <GpsLine
+          gps={gps}
+          fixAgeS={fixAgeS}
+          usable={fixUsable}
+          precise={fixPrecise}
+          source={reportSource}
+          unitLabel={unit?.label}
+          onRetry={() => setGpsAttempt((n) => n + 1)}
+        />
+      </div>
+      <Textarea
+        value={hazardText}
+        onChange={(e) => setHazardText(e.target.value)}
+        placeholder="Wall collapsed across the lane, nobody trapped"
+        className="min-h-20 text-base"
+      />
+      <div className="flex flex-wrap gap-1.5">
+        {cats.slice(0, 10).map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            onClick={() => setHazardCat(hazardCat === c.id ? "" : c.id)}
+            className={
+              "rounded-full border px-3 py-1.5 text-sm " +
+              (hazardCat === c.id ? "border-white/40 bg-white/15 font-medium" : "border-white/10")
+            }
+          >
+            {c.displayName}
+          </button>
+        ))}
+      </div>
+      <Button size="sm" className="w-full" disabled={busy !== null || !reportAt} onClick={() => void fileHazard()}>
+        {busy === "hazard" ? <Loader2 className="mr-1 size-3 animate-spin" /> : <Send className="mr-1 size-3" />}
+        File it
+      </Button>
+      {filed && (
+        <div className="space-y-1 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs">
+          <div className="font-medium">
+            {filed.readAsLabel} in {filed.wardName}
+            {filed.createdIncident
+              ? " — new incident on the map"
+              : filed.linked
+                ? " — merged into an incident already open there"
+                : " — held, no incident"}
+          </div>
+          <div className="text-slate-400">
+            Trust {filed.trust.toFixed(2)} · {filed.trustStatus.replace(/_/g, " ")}
+          </div>
+          <div className="text-slate-400">{filed.readHow}</div>
+        </div>
+      )}
+    </div>
+  )
+
+  const statusTab = (
+    <div className="space-y-4">
       {effects.length > 0 && (
         <Alert>
           <CheckCircle2 className="size-4" />
@@ -416,477 +946,272 @@ export default function FieldApp() {
           </AlertDescription>
         </Alert>
       )}
-
-      <OfflineBar manifest="/field.webmanifest" />
-
-      <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
-        <div className="space-y-3">
-          {/* Where the crew is, above the map rather than buried under the
-              report card. This is the line a driver checks first — "does it
-              know where I am" — and it was three cards down. */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2.5">
-            <div className="text-muted-foreground min-w-0 text-xs">
-              <GpsLine
-                gps={gps}
-                fixAgeS={fixAgeS}
-                usable={fixUsable}
-                precise={fixPrecise}
-                source={reportSource}
-                unitLabel={unit?.label}
-                onRetry={() => setGpsAttempt((n) => n + 1)}
-              />
-            </div>
-            <Button
-              size="sm"
-              variant={follow ? "secondary" : "outline"}
-              className="h-8 shrink-0 text-xs"
-              disabled={!myPos}
-              onClick={() => {
-                // Pressing it always re-centres, and turns following back on.
-                // Two behaviours in one button because they are the same
-                // intent: put me back on the map.
-                setRecentre((n) => n + 1)
-                setFollow(true)
-              }}
-            >
-              <MapPin className="size-3.5" />
-              {myPos ? (follow ? "Following you" : "Centre on me") : "No position"}
-            </Button>
-          </div>
-
-          <MapStage
-            panelTitle="My units"
-            panel={
-              <div className="space-y-2 text-xs">
-                {(state?.units ?? []).map((u) => (
-                  <div key={u.id} className="rounded border border-slate-500/25 p-2">
-                    <div className="font-medium text-slate-100">{u.label}</div>
-                    <div className="text-slate-400">
-                      {u.status.replace(/_/g, " ")}
-                      {u.assignedTo ? ` → ${u.assignedTo}` : ""}
-                      {u.etaMinutes ? `, ${u.etaMinutes} min` : ""}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            }
-            map={(expanded) => (
-                  <LiveMap
-                    className={expanded ? "h-full w-full" : "h-[420px] w-full rounded-lg border"}
-                resources={state?.units.map((u) => ({ ...u, capabilities: [] })) ?? []}
-                facilities={state?.facilities ?? []}
-                incidents={
-                  // Real incidents when the API offers them, the crew's own
-                  // tasks as the fallback so an older backend still draws
-                  // something rather than an empty map.
-                  state?.incidents?.length
-                    ? state.incidents.map((i) => ({
-                        id: i.id,
-                        title:
-                          i.verification === "unconfirmed"
-                            ? `${i.title} · unconfirmed`
-                            : i.title,
-                        category: i.category,
-                        severity: i.severity,
-                        reportCount: i.reportCount,
-                        location: i.location,
-                      }))
-                    : state?.units
-                        .filter((u) => u.incidentLocation)
-                        .map((u) => ({
-                          id: u.incidentId ?? u.id, title: u.assignedTo ?? "Task",
-                          category: "", severity: 4, reportCount: 1,
-                          location: u.incidentLocation as [number, number],
-                        })) ?? []
-                }
-                routes={
-                  state?.units
-                    .filter((u) => (u.route?.length ?? 0) > 1)
-                    .map((u) => ({
-                      id: u.id, resourceId: u.id, resourceLabel: u.label,
-                      incidentId: u.incidentId ?? u.id,
-                      incidentTitle: u.assignedTo ?? "Task", status: u.status,
-                      etaMinutes: u.etaMinutes ?? null,
-                      distanceKm: u.distanceKm ?? null,
-                      engine: u.routeEngine, progress: u.progress,
-                      steps: u.steps, path: u.route as [number, number][],
-                    })) ?? []
-                }
-                route={
-                  (unit?.route?.length ?? 0) > 1
-                    ? (unit!.route as number[][])
-                    : unit?.incidentLocation
-                      ? [unit.location, unit.incidentLocation]
-                      : undefined
-                }
-                routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
-                // The crew on their own map. `LiveMap` has taken a `me` marker
-                // all along and this screen never passed one, so a driver could
-                // see their truck's last recorded position and every incident
-                // in the city, and not themselves.
-                me={myPos ? { lng: myPos[0], lat: myPos[1], label: "You" } : null}
-                // Locked to the crew by default. A driver does not pan a map
-                // one-handed: the one thing this view has to do is stay on them
-                // as they move, and it was doing the opposite — `LiveMap` has
-                // taken `followMe` since it was written and this screen passed
-                // neither it nor `recentreKey`, so the camera sat wherever the
-                // truck's *recorded* position put it at mount and never moved
-                // again. That is the "free flow".
-                //
-                // Turned off the moment they drag, because a crew checking what
-                // is two streets over should not be yanked back mid-look, and
-                // turned on again by the button below.
-                followMe={follow}
-                recentreKey={recentre}
-                onUserMove={() => setFollow(false)}
-                center={myPos ?? unit?.location ?? [73.88, 18.58]}
-                zoom={13.2}
-              />
-            )}
-          />
-
-          {unit && (unit.steps?.length ?? 0) > 0 && (
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">
-                  {unit.label} to {unit.assignedTo}
-                </CardTitle>
-                <CardDescription>
-                  {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
-                  {unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
-                  {typeof unit.progress === "number"
-                    ? ` · ${Math.round(unit.progress * 100)}% of the way`
-                    : ""}
-                  {unit.routeEngine && unit.routeEngine !== "straight-line-fallback"
-                    ? " · routed around every hazard the control room knows about"
-                    : " · straight-line estimate, the router was unreachable"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ol className="space-y-1">
-                  {unit.steps!.slice(0, 10).map((st, i) => (
-                    <li key={i} className="flex gap-2 text-xs">
-                      <span className="text-muted-foreground w-14 shrink-0 tabular-nums">
-                        {st.distanceM >= 1000
-                          ? `${(st.distanceM / 1000).toFixed(1)} km`
-                          : `${st.distanceM} m`}
-                      </span>
-                      <span>{st.instruction}</span>
-                    </li>
-                  ))}
-                </ol>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Report what is in front of you.
-              A crew could always say "my truck has a puncture" and never
-              "there is a collapsed wall here", which is a strange gap in a
-              system whose argument is that the picture is assembled from
-              whoever can see it. The most credible reporters in the city could
-              see things and had nowhere to put them. */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <MapPin className="size-4" /> Report a hazard here
-              </CardTitle>
-              <CardDescription className="space-y-1 text-xs">
-                <GpsLine
-                  gps={gps}
-                  fixAgeS={fixAgeS}
-                  usable={fixUsable}
-                  precise={fixPrecise}
-                  source={reportSource}
-                  unitLabel={unit?.label}
-                  onRetry={() => setGpsAttempt((n) => n + 1)}
-                />
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Textarea
-                value={hazardText}
-                onChange={(e) => setHazardText(e.target.value)}
-                placeholder="Wall collapsed across the lane, nobody trapped"
-                className="min-h-20 text-base"
-              />
-              <div className="flex flex-wrap gap-1">
-                {cats.slice(0, 10).map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => setHazardCat(hazardCat === c.id ? "" : c.id)}
-                    className={
-                      "rounded-md border px-3 py-2 text-sm " +
-                      (hazardCat === c.id
-                        ? "border-primary bg-primary/10 font-medium"
-                        : "border-muted-foreground/25")
-                    }
-                  >
-                    {c.displayName}
-                  </button>
-                ))}
-              </div>
-              <Button
-                size="sm"
-                className="w-full"
-                disabled={busy !== null || !reportAt}
-                onClick={() => void fileHazard()}
-              >
-                {busy === "hazard"
-                  ? <Loader2 className="mr-1 size-3 animate-spin" />
-                  : <Send className="mr-1 size-3" />}
-                File it
-              </Button>
-
-              {filed && (
-                <div className="space-y-1 rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs">
-                  <div className="font-medium">
-                    {filed.readAsLabel} in {filed.wardName}
-                    {filed.createdIncident
-                      ? " — new incident on the map"
-                      : filed.linked
-                        ? " — merged into an incident already open there"
-                        : " — held, no incident"}
-                  </div>
-                  {/* The trust score, shown rather than applied quietly. A crew
-                      whose report was held deserves the sentence explaining
-                      why, and a crew whose report dispatched a unit should see
-                      that their word did that. */}
-                  <div className="text-muted-foreground">
-                    Trust {filed.trust.toFixed(2)} · {filed.trustStatus.replace(/_/g, " ")}
-                  </div>
-                  <div className="text-muted-foreground">{filed.readHow}</div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">My units</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1">
-              {state?.units.map((u) => (
-                <button
-                  key={u.id}
-                  onClick={() => setSelected(u.id)}
-                  className={`hover:bg-accent flex w-full items-center gap-2 rounded border p-2 text-left text-xs ${
-                    selected === u.id ? "border-primary" : ""
-                  }`}
-                >
-                  <Truck className="size-3.5 shrink-0" />
-                  <span className="font-medium">{u.label}</span>
-                  <Badge variant={u.status === "offline" ? "destructive" : "outline"}>
-                    {u.status.replace(/_/g, " ")}
-                  </Badge>
-                  {u.assignedTo && (
-                    <span className="text-muted-foreground truncate">→ {u.assignedTo}</span>
-                  )}
-                  {u.etaMinutes ? (
-                    <span className="text-muted-foreground ml-auto">{u.etaMinutes} min</span>
-                  ) : null}
-                </button>
-              ))}
-              {state?.units.length === 0 && (
-                <p className="text-muted-foreground text-xs">
-                  No units for this operator. Sign in as a field operator, or pass
-                  <code className="mx-1">?operator=</code>.
-                </p>
-              )}
-            </CardContent>
-          </Card>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Radio className="size-4" /> Report status</div>
+        <div className="text-xs text-slate-400">
+          {unit ? `${unit.label} — ${unit.status.replace(/_/g, " ")}` : "Pick a unit"}
+          {unit?.unavailableReason && ` (${unit.unavailableReason})`}
         </div>
-
-        <div className="space-y-3">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Radio className="size-4" /> Report status
-              </CardTitle>
-              <CardDescription>
-                {unit ? `${unit.label} — ${unit.status.replace(/_/g, " ")}` : "Pick a unit"}
-                {unit?.unavailableReason && ` (${unit.unavailableReason})`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Input value={note} onChange={(e) => setNote(e.target.value)}
-                     placeholder="Anything to add" className="text-sm" />
-              <div className="flex flex-wrap gap-1.5">
-                {resourceKinds.map((k) => (
-                  <Button
-                    key={k.id} size="sm" variant={k.makesOffline ? "destructive" : "outline"}
-                    className="h-7 text-xs"
-                    disabled={!unit || busy !== null}
-                    onClick={() => unit && declare("resource", unit.id, k.id)}
-                  >
-                    {busy === k.id ? <Loader2 className="size-3 animate-spin" /> : null}
+        <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything to add" className="text-sm" />
+        <div className="flex flex-wrap gap-1.5">
+          {resourceKinds.map((k) => (
+            <Button
+              key={k.id} size="sm" variant={k.makesOffline ? "destructive" : "outline"}
+              className="h-8 text-xs"
+              disabled={!unit || busy !== null}
+              onClick={() => unit && declare("resource", unit.id, k.id)}
+            >
+              {busy === k.id ? <Loader2 className="size-3 animate-spin" /> : null}
+              {k.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <div className="text-sm font-semibold">Facilities</div>
+        <p className="text-xs text-slate-400">Declaring one full stops the citizen agent sending anyone there.</p>
+        {[...(state?.facilities ?? [])]
+          .sort((a, b) => (picked?.key === `facility:${b.id}` ? 1 : 0) - (picked?.key === `facility:${a.id}` ? 1 : 0))
+          .slice(0, 6)
+          .map((f) => (
+            <div key={f.id} className={`rounded-xl border p-2 text-xs ${picked?.key === `facility:${f.id}` ? "border-white/30" : "border-white/10"}`}>
+              <div className="flex items-center gap-2">
+                <button type="button" className="font-medium hover:underline" onClick={() => select(facilityItem(f))}>{f.name}</button>
+                <Badge variant={f.status === "full" ? "destructive" : "outline"}>{f.status}</Badge>
+                {f.capacity ? (
+                  <span className="ml-auto text-slate-400">
+                    {Math.max(0, f.capacity - (f.occupancy ?? 0))}/{f.capacity} free
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {lifelineKinds.map((k) => (
+                  <Button key={k.id} size="sm" variant={TONE[k.severity] ?? "outline"}
+                          className="h-6 px-2 text-[11px]" disabled={busy !== null}
+                          onClick={() => declare("lifeline", f.id, k.id)}>
                     {k.label}
                   </Button>
                 ))}
               </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Facilities</CardTitle>
-              <CardDescription>
-                Declaring one full stops the citizen agent sending anyone there.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {state?.facilities.slice(0, 6).map((f) => (
-                <div key={f.id} className="rounded border p-2 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{f.name}</span>
-                    <Badge variant={f.status === "full" ? "destructive" : "outline"}>
-                      {f.status}
-                    </Badge>
-                    {f.capacity ? (
-                      <span className="text-muted-foreground ml-auto">
-                        {Math.max(0, f.capacity - (f.occupancy ?? 0))}/{f.capacity} free
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {lifelineKinds.map((k) => (
-                      <Button key={k.id} size="sm" variant={TONE[k.severity] ?? "outline"}
-                              className="h-6 px-2 text-[11px]" disabled={busy !== null}
-                              onClick={() => declare("lifeline", f.id, k.id)}>
-                        {k.label}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          {/* What became of what this crew filed.
-              The one thing a crew asks after reporting a hazard, and the one
-              thing the screen could not answer once the confirmation card
-              faded. Every row carries the consequence, not the status: which
-              incident it landed on, how many others are on that incident, and
-              whether anyone is coming. */}
-          {(state?.myReports?.length ?? 0) > 0 && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-sm">
-                  <Send className="size-4" /> What you reported
-                </CardTitle>
-                <CardDescription>
-                  Live. A report is worth filing only if you can see what it did.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-2.5">
-                {state!.myReports!.map((r) => {
-                  const held = r.status === "quarantined" || r.status === "rejected"
-                  const closed = r.incidentStatus === "resolved"
-                  return (
-                    <div
-                      key={r.id}
-                      className={
-                        "space-y-1.5 rounded-md border p-2.5 " +
-                        (closed
-                          ? "border-emerald-500/40 bg-emerald-500/5"
-                          : held
-                            ? "border-amber-500/40 bg-amber-500/5"
-                            : "")
-                      }
-                    >
-                      <p className="line-clamp-2 text-xs">{r.text}</p>
-                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                        <Badge variant="outline" className="font-normal">
-                          {r.readAs.replace(/_/g, " ")}
-                        </Badge>
-                        {/* "trust 0.62" tells a driver nothing: nobody said the
-                            scale, or which end is good. The word does both, and
-                            the number stays for anyone who wants it. */}
-                        {r.trust !== null && (
-                          <span className="text-muted-foreground">
-                            trust {trustWords(r.trust)}
-                            <span className="tabular-nums"> ({r.trust.toFixed(2)})</span>
-                          </span>
-                        )}
-                        <span className="text-muted-foreground">
-                          {new Date(r.at).toLocaleTimeString(undefined, {
-                            hour: "2-digit", minute: "2-digit", hour12: false,
-                          })}
-                        </span>
-                      </div>
-
-                      {/* The chain, in one sentence each. Three outcomes, and
-                          the middle one is the one a crew most needs said out
-                          loud — filed, believed, and nobody free to send. */}
-                      {held ? (
-                        <p className="text-xs">
-                          <span className="font-medium">
-                            {REPORT_STATUS[r.status]?.label ?? "Held"}.
-                          </span>{" "}
-                          {REPORT_STATUS[r.status]?.hint ??
-                            "Nothing has been dispatched for it."}{" "}
-                          It has not opened an incident, so treat it as not yet
-                          acted on.
-                        </p>
-                      ) : r.incidentTitle ? (
-                        <div className="space-y-0.5 text-xs">
-                          <p>
-                            {closed ? "Closed: " : "On "}
-                            <span className="font-medium">{r.incidentTitle}</span>
-                            {r.incidentSeverity != null && (
-                              <span className="text-muted-foreground">
-                                {" "}· severity {r.incidentSeverity}
-                              </span>
-                            )}
-                          </p>
-                          <p className="text-muted-foreground">
-                            {r.reportCount > 1
-                              ? `${r.reportCount} reports on it`
-                              : "the only report on it"}
-                            {" · "}
-                            {closed
-                              ? "worked and closed"
-                              : r.unitsOnIt > 0
-                                ? `${r.unitsOnIt} unit${r.unitsOnIt === 1 ? "" : "s"} on the way` +
-                                  (r.etaMinutes != null ? `, ${r.etaMinutes} min out` : "")
-                                : "nobody assigned yet"}
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-muted-foreground text-xs">
-                          Filed, not yet on an incident. The next plan will look
-                          at it.
-                        </p>
-                      )}
-                    </div>
-                  )
-                })}
-              </CardContent>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Unit status changes</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1">
-              {state?.recent.slice(0, 10).map((r, i) => (
-                <div key={i} className="text-muted-foreground text-xs">
-                  <span className="font-medium">{r.subjectId}</span> ·{" "}
-                  {r.statusKind.replace(/_/g, " ")}
-                  {r.note && ` — ${r.note}`}
-                </div>
-              ))}
-              {state?.recent.length === 0 && (
-                <p className="text-muted-foreground text-xs">Nothing reported yet.</p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+            </div>
+          ))}
       </div>
     </div>
   )
+
+  const unitsTab = (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <SectionLabel>My units · {state?.units.length ?? 0}</SectionLabel>
+        {state?.units.map((u) => (
+          <PlaceRow
+            key={u.id}
+            active={selected === u.id}
+            disc={<ItemDisc item={unitItem(u)} />}
+            title={u.label}
+            subtitle={`${words(u.status)}${u.assignedTo ? ` → ${u.assignedTo}` : ""}`}
+            trailing={u.etaMinutes ? `${u.etaMinutes} min` : undefined}
+            onClick={() => select(unitItem(u))}
+          />
+        ))}
+        {state?.units.length === 0 && (
+          <p className="text-xs text-slate-400">
+            No units for this operator. Sign in as a field operator, or pass
+            <code className="mx-1">?operator=</code>.
+          </p>
+        )}
+      </div>
+
+      {(state?.myReports?.length ?? 0) > 0 && (
+        <div className="space-y-2">
+          <SectionLabel>What you reported</SectionLabel>
+          {state!.myReports!.map((r) => {
+            const held = r.status === "quarantined" || r.status === "rejected"
+            const closed = r.incidentStatus === "resolved"
+            const onMap = r.incidentId ? items.find((i) => i.key === `incident:${r.incidentId}`) : undefined
+            return (
+              <div
+                key={r.id}
+                className={
+                  "space-y-1.5 rounded-xl border p-2.5 " +
+                  (closed ? "border-emerald-500/40 bg-emerald-500/5"
+                    : held ? "border-amber-500/40 bg-amber-500/5" : "border-white/10")
+                }
+              >
+                <p className="line-clamp-2 text-xs">{r.text}</p>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <Badge variant="outline" className="font-normal">{r.readAs.replace(/_/g, " ")}</Badge>
+                  {r.trust !== null && (
+                    <span className="text-slate-400">
+                      trust {trustWords(r.trust)}<span className="tabular-nums"> ({r.trust.toFixed(2)})</span>
+                    </span>
+                  )}
+                  <span className="text-slate-400">
+                    {new Date(r.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })}
+                  </span>
+                  {onMap && (
+                    <button type="button" className="ml-auto text-sky-400 underline underline-offset-2"
+                            onClick={() => select(onMap)}>
+                      View on map
+                    </button>
+                  )}
+                </div>
+                {held ? (
+                  <p className="text-xs">
+                    <span className="font-medium">{REPORT_STATUS[r.status]?.label ?? "Held"}.</span>{" "}
+                    {REPORT_STATUS[r.status]?.hint ?? "Nothing has been dispatched for it."}{" "}
+                    It has not opened an incident, so treat it as not yet acted on.
+                  </p>
+                ) : r.incidentTitle ? (
+                  <div className="space-y-0.5 text-xs">
+                    <p>
+                      {closed ? "Closed: " : "On "}
+                      <span className="font-medium">{r.incidentTitle}</span>
+                      {r.incidentSeverity != null && <span className="text-slate-400"> · severity {r.incidentSeverity}</span>}
+                    </p>
+                    <p className="text-slate-400">
+                      {r.reportCount > 1 ? `${r.reportCount} reports on it` : "the only report on it"}
+                      {" · "}
+                      {closed
+                        ? "worked and closed"
+                        : r.unitsOnIt > 0
+                          ? `${r.unitsOnIt} unit${r.unitsOnIt === 1 ? "" : "s"} on the way` +
+                            (r.etaMinutes != null ? `, ${r.etaMinutes} min out` : "")
+                          : "nobody assigned yet"}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-400">Filed, not yet on an incident. The next plan will look at it.</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="space-y-1">
+        <SectionLabel>Unit status changes</SectionLabel>
+        {state?.recent.slice(0, 10).map((r, i) => (
+          <div key={i} className="text-xs text-slate-400">
+            <span className="font-medium text-slate-200">{r.subjectId}</span> · {r.statusKind.replace(/_/g, " ")}
+            {r.note && ` — ${r.note}`}
+          </div>
+        ))}
+        {state?.recent.length === 0 && <p className="text-xs text-slate-400">Nothing reported yet.</p>}
+      </div>
+
+      {/* The two crew accounts, on the crew screen: Fire Brigade and PMC
+          Drainage see different units, and switching is how anyone sees that. */}
+      <DemoCredentials portal="field" title="Demo crew sign-ins" />
+      <a href="/login" className="block text-xs text-slate-400 underline">Sign in</a>
+    </div>
+  )
+
+  const body = (
+    <div className="space-y-4 pb-2 pt-1">
+      <OfflineBar manifest="/field.webmanifest" />
+      <ChoicePills
+        value={tab}
+        onChange={setTab}
+        options={[
+          { id: "task", label: navOn ? "Directions" : "Task" },
+          { id: "report", label: "Report" },
+          { id: "status", label: "Status" },
+          { id: "units", label: "Units" },
+        ]}
+      />
+      {tab === "task" ? taskTab : tab === "report" ? reportTab : tab === "status" ? statusTab : unitsTab}
+    </div>
+  )
+
+  const selectionRing = picked
+    ? { lng: picked.location[0], lat: picked.location[1], colour: picked.colour }
+    : null
+
+  const show = <T extends { id: string }>(kind: MapItem["kind"], list: T[] | undefined) =>
+    (list ?? []).filter((x) => visible.has(`${kind}:${x.id}`))
+
+  return (
+    <MapExperience
+      top={top}
+      banner={banner}
+      controls={controls}
+      peek={peek}
+      body={body}
+      snapRequest={snapRequest}
+      panelTitle={
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-base font-semibold">Field</div>
+            <div className="text-xs text-slate-400">
+              {state?.operator ?? "All agencies"} · {state?.units.length ?? 0} unit(s)
+            </div>
+          </div>
+          <a href="/login" className="text-xs text-slate-400 underline">Sign in</a>
+        </div>
+      }
+      map={(padding) => (
+        <LiveMap
+          className="h-full w-full"
+          basemap="night"
+          lightPreset={lightPreset}
+          markers="badge"
+          cluster
+          pulseCritical
+          hoverCards={canHover}
+          resources={show("unit", state?.units).map((u) => ({ ...u, capabilities: [] }))}
+          facilities={show("facility", state?.facilities)}
+          incidents={show("incident", incidentsForMap)}
+          routes={
+            state?.units
+              .filter((u) => (u.route?.length ?? 0) > 1 && u.id !== unit?.id)
+              .map((u) => ({
+                id: u.id, resourceId: u.id, resourceLabel: u.label,
+                incidentId: u.incidentId ?? u.id,
+                incidentTitle: u.assignedTo ?? "Task", status: u.status,
+                etaMinutes: u.etaMinutes ?? null,
+                distanceKm: u.distanceKm ?? null,
+                engine: u.routeEngine, progress: u.progress,
+                steps: u.steps, path: u.route as [number, number][],
+              })) ?? []
+          }
+          route={unitRoute}
+          routeLabel={unit ? `${unit.label} to ${unit.assignedTo ?? "its task"}` : undefined}
+          routeStatus={routeStatus}
+          routeProgress={progress}
+          // The crew on their own map, with how sure the GPS is.
+          me={myPos ? { lng: myPos[0], lat: myPos[1], label: "You", accuracyM: fix?.accuracy ?? null } : null}
+          // Locked to the crew by default, released the moment they drag, and
+          // taken back by the locate button.
+          followMe={follow}
+          recentreKey={recentre}
+          onUserMove={() => setFollow(false)}
+          center={myPos ?? unit?.location ?? [73.88, 18.58]}
+          zoom={13.2}
+          onSelect={onMapSelect}
+          selection={selectionRing}
+          camera={camera}
+          padding={padding}
+        />
+      )}
+    />
+  )
 }
+
+/** The crew map's filters: real kinds on this map only. */
+const FIELD_FILTERS: { id: string; label: string; colour?: string; match: (i: MapItem) => boolean }[] = [
+  { id: "all", label: "All", match: () => true },
+  { id: "critical", label: "Critical", colour: MAP.critical, match: (i) => i.critical },
+  { id: "incidents", label: "Incidents", colour: MAP.sev4, match: (i) => i.kind === "incident" },
+  { id: "units", label: "My units", colour: MAP.logistics, match: (i) => i.kind === "unit" },
+  {
+    id: "medical", label: "Medical", colour: MAP.medical,
+    match: (i) => (i.kind === "facility" && placeGroupOf(i.sub) === "medical") ||
+      (i.kind === "unit" && serviceOf(i.sub) === "medical"),
+  },
+  { id: "shelter", label: "Shelter & relief", colour: MAP.shelter, match: (i) => i.kind === "facility" && placeGroupOf(i.sub) === "shelter" },
+  { id: "infra", label: "Infrastructure", colour: MAP.infra, match: (i) => i.kind === "facility" && placeGroupOf(i.sub) === "infra" },
+]
 
 /** What the GPS is doing, in a sentence a driver can act on.
  *

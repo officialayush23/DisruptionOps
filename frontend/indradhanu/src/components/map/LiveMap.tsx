@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
 import type { Feature, FeatureCollection } from "geojson"
-import { imageName, provideIcon, registerIcons } from "./icons"
+import { badgeName, imageName, provideIcon, registerIcons } from "./icons"
+import {
+  CRITICAL_SEVERITY, MAP, incidentColour, placeColour, serviceColour, statusRing,
+} from "./mapTheme"
 import "mapbox-gl/dist/mapbox-gl.css"
 
 /** The map, on Mapbox.
@@ -49,6 +52,8 @@ export type FacilityFeature = {
 }
 export type BlockFeature = {
   id: string; reason: string; location: [number, number]; reportedBy?: string
+  /** How far around the point the closure reaches, when the crew said. */
+  radiusM?: number
 }
 /** A unit's road geometry to what it was tasked with. */
 export type RouteFeature = {
@@ -62,6 +67,26 @@ export type RouteFeature = {
 export type NeedFeature = {
   incidentId: string; capability: string; required: number; met: number
 }
+
+/** What a click landed on, for maps that drive a selection rather than hover cards. */
+export type MapSelection = {
+  kind: "incident" | "resource" | "facility" | "block"
+  id: string
+}
+
+/** Ask the camera to move. A new `key` is a new request; the same key is ignored,
+ *  so re-renders never re-fly the camera. */
+export type CameraRequest = {
+  key: string | number
+  center?: [number, number]
+  zoom?: number
+  /** [[west, south], [east, north]] */
+  bounds?: [[number, number], [number, number]]
+  /** Zoom in or out by this much, keeping the centre. */
+  zoomBy?: number
+}
+
+export type MapPadding = { top: number; right: number; bottom: number; left: number }
 
 type Props = {
   wards?: WardFeature[]
@@ -81,7 +106,7 @@ type Props = {
   /** Label for that highlighted route, shown on hover. */
   routeLabel?: string
   /** The viewer's own position, if this interface has one. */
-  me?: { lng: number; lat: number; label?: string } | null
+  me?: { lng: number; lat: number; label?: string; accuracyM?: number | null } | null
   center?: [number, number]
   zoom?: number
   className?: string
@@ -100,6 +125,35 @@ type Props = {
   recentreKey?: number
   /** Called with a ward id when the ward itself (not an incident) is clicked. */
   onPickWard?: (id: string) => void
+
+  // ---- The map experience (citizen and crew apps). All optional; the console
+  // ---- passes none of them and renders exactly as it always has.
+
+  /** `night`: Mapbox Standard with the night light preset — dark, but keeping
+   *  every street name, river and landmark a person navigates by. */
+  basemap?: "streets" | "night"
+  /** Light preset for the `night` basemap, switchable without a style reload. */
+  lightPreset?: "night" | "dusk" | "dawn" | "day"
+  /** `badge`: round markers centred on their point, shared with the Android map. */
+  markers?: "pin" | "badge"
+  /** Group dense incidents, units and places. Critical incidents never cluster. */
+  cluster?: boolean
+  /** Hover cards. Off for touch, where a tap selects instead. */
+  hoverCards?: boolean
+  /** A click on a marker (or on nothing: `null`). When set, takes over from
+   *  `onPickIncident`/`onPickWard`. */
+  onSelect?: (hit: MapSelection | null) => void
+  /** Draw a selection ring here. */
+  selection?: { lng: number; lat: number; colour?: string } | null
+  camera?: CameraRequest | null
+  /** Space covered by floating UI, so centring and fitting use the visible map. */
+  padding?: MapPadding
+  /** How far the highlighted route can be trusted. `uncertain` draws it dashed. */
+  routeStatus?: "clear" | "caution" | "uncertain"
+  /** 0..1 of the highlighted route already travelled; that part is dimmed. */
+  routeProgress?: number
+  /** Pulse critical incidents. */
+  pulseCritical?: boolean
 }
 
 const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
@@ -147,6 +201,20 @@ const POPUP_CSS = `
 .indra-pop .ip-act span { color: #cbd5e1; }
 .indra-pop .ip-warn { color: #fca5a5; }
 .indra-pop .ip-ok { color: #86efac; }
+.indra-pulse { width: 28px; height: 28px; pointer-events: none; }
+.indra-pulse::before, .indra-pulse::after {
+  content: ""; position: absolute; inset: 0; border-radius: 999px;
+  background: rgb(239 68 68 / 0.45); animation: indra-pulse 1.8s ease-out infinite;
+}
+.indra-pulse::after { animation-delay: .9s; }
+@keyframes indra-pulse {
+  from { transform: scale(1); opacity: .9; }
+  to { transform: scale(2.4); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .indra-pulse::before, .indra-pulse::after { animation: none; opacity: .35; transform: scale(1.6); }
+}
+.mapboxgl-ctrl-bottom-left, .mapboxgl-ctrl-bottom-right { z-index: 1; }
 `
 
 let cssInjected = false
@@ -188,6 +256,12 @@ const BASEMAP = {
   // that a broken console is the worse trade.
   dark: "mapbox://styles/mapbox/streets-v12",
 } as const
+
+/** Mapbox Standard. With the night preset it is the dark, premium basemap of the
+ *  citizen and crew maps — and unlike `dark-v11` it keeps the POIs, street names
+ *  and water a person navigates by. It carries no traffic feed, so it has none
+ *  of the 404s `navigation-night-v1` produced on this account. */
+const NIGHT_STYLE = "mapbox://styles/mapbox/standard"
 
 /** The lowest label layer in the basemap.
  *
@@ -319,6 +393,14 @@ function activityBlock(entries: Activity[] | undefined, heading = "Recent") {
   )
 }
 
+/** A ground distance as a circle radius in pixels at zoom 22, for an
+ *  exponential zoom interpolation from 0 px at zoom 0. Mapbox GL renders
+ *  512 px tiles, so a pixel at z22 is 40075016.686 / (512 · 2²²) m at the equator. */
+function metresToPxAt22(metres: number, lat: number): number {
+  const mPerPx = (40075016.686 / (512 * 2 ** 22)) * Math.cos((lat * Math.PI) / 180)
+  return mPerPx > 0 ? metres / mPerPx : 0
+}
+
 function fc(features: Feature[]): FeatureCollection {
   return { type: "FeatureCollection", features }
 }
@@ -339,6 +421,9 @@ export function LiveMap({
   route, routeLabel, me, center = [73.88, 18.58], zoom = 11.6, className,
   onPickIncident, followMe = false, recentreKey = 0, onUserMove,
   onPickWard,
+  basemap = "streets", lightPreset = "night", markers = "pin", cluster = false,
+  hoverCards = true, onSelect, selection, camera, padding, routeStatus,
+  routeProgress, pulseCritical = false,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<mapboxgl.Map | null>(null)
@@ -349,6 +434,19 @@ export function LiveMap({
   useEffect(() => {
     pickWard.current = onPickWard
   }, [onPickWard])
+  const selectRef = useRef(onSelect)
+  useEffect(() => {
+    selectRef.current = onSelect
+  }, [onSelect])
+  const hoverRef = useRef(hoverCards)
+  useEffect(() => {
+    hoverRef.current = hoverCards
+    if (!hoverCards) popup.current?.remove()
+  }, [hoverCards])
+  // Read once, at construction: these decide which sources and layers exist.
+  const badges = markers === "badge"
+  const night = basemap === "night"
+  const pulses = useRef(new Map<string, mapboxgl.Marker>())
   const [, setIconsReady] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
 
@@ -364,7 +462,13 @@ export function LiveMap({
     try {
       const options = {
         container: container.current,
-        style: dark ? BASEMAP.dark : BASEMAP.light,
+        style: night ? NIGHT_STYLE : dark ? BASEMAP.dark : BASEMAP.light,
+        // Standard's own configuration: the light preset, and no 3D. Buildings
+        // extruded over a disaster map hide the markers behind them and cost a
+        // phone frames it does not have.
+        ...(night
+          ? { config: { basemap: { lightPreset, show3dObjects: false, showPointOfInterestLabels: true } } }
+          : {}),
         center, zoom, attributionControl: true,
         // Speed over polish: no tile fade-in, no re-fetching tiles that are
         // merely past their HTTP expiry, a larger in-memory tile cache, flat
@@ -379,7 +483,8 @@ export function LiveMap({
       } as mapboxgl.MapOptions
       const m = new mapboxgl.Map(options)
       map.current = m
-      m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right")
+      // The experience maps bring their own floating controls.
+      if (!badges) m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right")
       popup.current = new mapboxgl.Popup({
         closeButton: false, closeOnClick: false, offset: 14,
         className: "indra-pop", maxWidth: "340px",
@@ -388,8 +493,11 @@ export function LiveMap({
       m.on("error", (e) => {
         // A tile 401 is almost always a bad or restricted token, and the map
         // otherwise just sits there blank looking like our bug.
-        const msg = (e as unknown as { error?: { message?: string } })?.error?.message
-        if (msg?.includes("401") || msg?.toLowerCase().includes("unauthorized")) {
+        const err = (e as unknown as { error?: { message?: string; status?: number } })?.error
+        const msg = err?.message
+        // A whole-word 401 only: a style error quoting a number such as
+        // 0.17401 used to be reported as a rejected token.
+        if (err?.status === 401 || (msg && (/\b401\b/.test(msg) || /unauthori[sz]ed/i.test(msg)))) {
           setFailed("Mapbox rejected the token (401). Check VITE_MAPBOX_TOKEN and its URL restrictions.")
         }
       })
@@ -409,28 +517,55 @@ export function LiveMap({
         // place names. Painted over them it would hide the one thing a resident
         // uses to confirm they are on the right road, and the colourful basemap
         // would have bought nothing.
-        const belowLabels = firstLabelLayer(m)
+        //
+        // On Mapbox Standard the basemap's layers are not in `getStyle()`, so
+        // there is no label layer to insert before. Standard has slots for this
+        // instead: "bottom" sits under the roads, "middle" over the roads and
+        // under the labels.
+        const belowLabels = night ? undefined : firstLabelLayer(m)
+        const slot = (name: "bottom" | "middle") => (night ? { slot: name } : {})
+        // Layer specs with a `slot` are valid on v3; the typings lag behind.
+        const add = (spec: Record<string, unknown>, before?: string) =>
+          m.addLayer(spec as unknown as mapboxgl.AnyLayer, before)
+        const notCluster = ["!", ["has", "point_count"]]
+
+        // Round badges are drawn centred; pins stand on their tip.
+        const markerLayout = (stops: number[]) => ({
+          "icon-image": ["get", "icon"],
+          "icon-size": badges
+            ? ["interpolate", ["linear"], ["zoom"], 10, 0.72, 13, 0.88, 16, 1.04]
+            : ["interpolate", ["linear"], ["zoom"], ...stops],
+          "icon-anchor": badges ? "center" : "bottom",
+          "icon-allow-overlap": true, "icon-ignore-placement": true,
+        })
 
         m.addSource("wards", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "ward-fill", type: "fill", source: "wards",
+        add({
+          id: "ward-fill", type: "fill", source: "wards", ...slot("bottom"),
           paint: { "fill-color": SEVERITY_COLOR },
         }, belowLabels)
-        m.addLayer({
-          id: "ward-line", type: "line", source: "wards",
+        add({
+          id: "ward-line", type: "line", source: "wards", ...slot("bottom"),
           paint: { "line-color": "#64748b", "line-opacity": 0.55, "line-width": 1 },
         }, belowLabels)
 
-        m.addSource("route", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "route-casing", type: "line", source: "route",
+        // `lineMetrics` lets the travelled part of a route be dimmed and the
+        // route be drawn in, rather than appearing all at once.
+        m.addSource("route", { type: "geojson", data: fc([]), lineMetrics: true })
+        add({
+          id: "route-casing", type: "line", source: "route", ...slot("middle"),
           layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#0f172a", "line-width": 9, "line-opacity": 0.35 },
+          paint: { "line-color": "#0f172a", "line-width": badges ? 10 : 9, "line-opacity": badges ? 0.55 : 0.35 },
         })
-        m.addLayer({
-          id: "route-line", type: "line", source: "route",
+        add({
+          id: "route-travelled", type: "line", source: "route", ...slot("middle"),
           layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#22c55e", "line-width": 4 },
+          paint: { "line-color": "#94a3b8", "line-width": 4, "line-opacity": badges ? 0.45 : 0 },
+        })
+        add({
+          id: "route-line", type: "line", source: "route", ...slot("middle"),
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": "#22c55e", "line-width": badges ? 5 : 4 },
         })
 
         // Unit routes: the streets each committed vehicle is actually driving.
@@ -438,13 +573,13 @@ export function LiveMap({
         // was honest about nothing: the unit was not taking that path and the
         // path did not exist.
         m.addSource("links", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "link-casing", type: "line", source: "links",
+        add({
+          id: "link-casing", type: "line", source: "links", ...slot("middle"),
           layout: { "line-cap": "round", "line-join": "round" },
           paint: { "line-color": "#0b1220", "line-width": 6, "line-opacity": 0.5 },
         })
-        m.addLayer({
-          id: "link-line", type: "line", source: "links",
+        add({
+          id: "link-line", type: "line", source: "links", ...slot("middle"),
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
             "line-color": [
@@ -454,113 +589,210 @@ export function LiveMap({
               "#0ea5e9",
             ] as unknown as mapboxgl.Expression,
             "line-width": 3,
-            "line-opacity": 0.9,
+            "line-opacity": badges ? 0.7 : 0.9,
           },
         })
 
-        m.addSource("facilities", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "facility-dot", type: "symbol", source: "facilities",
-          layout: {
-            "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 13, 1.15, 16, 1.45],
-            "icon-anchor": "bottom",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
+        // The selected thing, ringed. Beneath the markers so the marker itself
+        // stays crisp; the ring is the larger shape around it.
+        m.addSource("selection", { type: "geojson", data: fc([]) })
+        add({
+          id: "selection-halo", type: "circle", source: "selection",
+          paint: {
+            "circle-radius": 26, "circle-color": ["get", "colour"], "circle-opacity": 0.22,
+            "circle-radius-transition": { duration: 300 },
           },
+        })
+        add({
+          id: "selection-ring", type: "circle", source: "selection",
+          paint: {
+            "circle-radius": 19, "circle-color": "rgba(0,0,0,0)",
+            "circle-stroke-width": 2.5, "circle-stroke-color": "#ffffff",
+          },
+        })
+
+        const clusterOptions = (props?: Record<string, unknown>) =>
+          cluster
+            ? { cluster: true, clusterRadius: 46, clusterMaxZoom: 14, ...(props ? { clusterProperties: props } : {}) }
+            : {}
+        const clusterLayers = (source: string, ring: unknown) => {
+          if (!cluster) return
+          add({
+            id: `${source}-cluster`, type: "circle", source,
+            filter: ["has", "point_count"],
+            paint: {
+              "circle-color": "rgba(14,17,22,0.92)",
+              "circle-radius": ["step", ["get", "point_count"], 15, 5, 18, 15, 22],
+              "circle-stroke-width": 2.5, "circle-stroke-color": ring,
+            },
+          })
+          add({
+            id: `${source}-cluster-count`, type: "symbol", source,
+            filter: ["has", "point_count"],
+            layout: {
+              "text-field": ["get", "point_count_abbreviated"],
+              "text-font": FONT, "text-size": 12, "text-allow-overlap": true,
+            },
+            paint: { "text-color": "#ffffff" },
+          })
+        }
+
+        m.addSource("facilities", { type: "geojson", data: fc([]), ...clusterOptions() })
+        add({
+          id: "facility-dot", type: "symbol", source: "facilities", filter: notCluster,
+          layout: markerLayout([10, 0.8, 13, 1.15, 16, 1.45]),
         })
         // A ring for anything that has reported itself full or closed. Colour
         // alone is not enough when there are four kinds of facility on screen.
-        m.addLayer({
+        add({
           id: "facility-alarm", type: "circle", source: "facilities",
-          filter: ["in", ["get", "status"], ["literal", ["full", "closed"]]],
+          filter: ["all", notCluster, ["in", ["get", "status"], ["literal", ["full", "closed"]]]],
           paint: {
-            "circle-radius": 18, "circle-color": "rgba(0,0,0,0)",
+            "circle-radius": badges ? 15 : 18, "circle-color": "rgba(0,0,0,0)",
             "circle-stroke-width": 2, "circle-stroke-color": "#ef4444",
           },
         }, "facility-dot")
+        clusterLayers("facilities", MAP.shelter)
 
         m.addSource("blocks", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "block-dot", type: "symbol", source: "blocks",
-          layout: {
-            "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.9, 14, 1.35],
-            "icon-anchor": "bottom",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
+        // How far a closure reaches, in metres on the ground at every zoom.
+        add({
+          id: "block-zone", type: "circle", source: "blocks",
+          filter: [">", ["coalesce", ["get", "pxAt22"], 0], 0],
+          paint: {
+            "circle-radius": [
+              "interpolate", ["exponential", 2], ["zoom"],
+              0, 0, 22, ["coalesce", ["get", "pxAt22"], 0],
+            ],
+            "circle-color": MAP.block, "circle-opacity": 0.12,
+            "circle-stroke-width": 1, "circle-stroke-color": MAP.block, "circle-stroke-opacity": 0.5,
           },
         })
+        add({
+          id: "block-dot", type: "symbol", source: "blocks",
+          layout: markerLayout([10, 0.9, 14, 1.35]),
+        })
 
-        m.addSource("incidents", { type: "geojson", data: fc([]) })
+        m.addSource("incidents", {
+          type: "geojson", data: fc([]),
+          ...clusterOptions({ maxSev: ["max", ["get", "severity"]] }),
+        })
         // The halo still carries severity and merge count — it is the thing you
         // read across a whole city — and the icon on top of it carries what kind
         // of hazard it is, which is the thing you read once you have found it.
-        m.addLayer({
-          id: "incident-halo", type: "circle", source: "incidents",
+        add({
+          id: "incident-halo", type: "circle", source: "incidents", filter: notCluster,
           paint: {
-            "circle-radius": ["+", 17, ["*", 3.5, ["get", "reportCount"]]],
+            "circle-radius": badges
+              ? ["+", 15, ["*", 2, ["min", ["get", "reportCount"], 8]]]
+              : ["+", 17, ["*", 3.5, ["get", "reportCount"]]],
             "circle-color": ["get", "colour"],
-            "circle-opacity": 0.18,
+            "circle-opacity": badges ? 0.14 : 0.18,
             "circle-stroke-width": 1, "circle-stroke-color": ["get", "colour"],
             "circle-stroke-opacity": 0.4,
           },
         })
-        m.addLayer({
-          id: "incident-dot", type: "symbol", source: "incidents",
-          layout: {
-            "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.95, 13, 1.35, 16, 1.7],
-            "icon-anchor": "bottom",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
-          },
+        add({
+          id: "incident-dot", type: "symbol", source: "incidents", filter: notCluster,
+          layout: markerLayout([10, 0.95, 13, 1.35, 16, 1.7]),
         })
         // The merge count sits beside the icon rather than inside it, so the
         // hazard stays legible. It is the whole argument for deduplication and
         // it should not be hidden behind a picture of a tree.
-        m.addLayer({
+        add({
           id: "incident-count", type: "symbol", source: "incidents",
-          filter: [">", ["get", "reportCount"], 1],
+          filter: ["all", notCluster, [">", ["get", "reportCount"], 1]],
           layout: {
             "text-field": ["to-string", ["get", "reportCount"]],
-            "text-font": FONT, "text-size": 13, "text-allow-overlap": true,
-            "text-offset": [1.3, -2.3], "text-anchor": "left",
+            "text-font": FONT, "text-size": badges ? 11 : 13, "text-allow-overlap": true,
+            "text-offset": badges ? [1.15, -1.15] : [1.3, -2.3], "text-anchor": "left",
           },
           paint: {
             "text-color": "#ffffff",
             "text-halo-color": "rgba(9,12,20,0.9)", "text-halo-width": 1.4,
           },
         })
+        clusterLayers("incidents", [
+          "step", ["coalesce", ["get", "maxSev"], 0],
+          MAP.sev3, 4, MAP.sev4, CRITICAL_SEVERITY, MAP.critical,
+        ])
 
-        m.addSource("resources", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "resource-dot", type: "symbol", source: "resources",
-          layout: {
-            "icon-image": ["get", "icon"],
-            "icon-size": ["interpolate", ["linear"], ["zoom"], 10, 0.9, 13, 1.2, 16, 1.5],
-            "icon-anchor": "bottom",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
+        // Critical incidents live in their own source so clustering can never
+        // fold one into a number. Only used when clustering is on.
+        m.addSource("incidents-critical", { type: "geojson", data: fc([]) })
+        add({
+          id: "critical-halo", type: "circle", source: "incidents-critical",
+          paint: {
+            "circle-radius": 20, "circle-color": MAP.critical, "circle-opacity": 0.2,
+            "circle-stroke-width": 1.5, "circle-stroke-color": MAP.critical, "circle-stroke-opacity": 0.6,
           },
         })
+        add({
+          id: "critical-dot", type: "symbol", source: "incidents-critical",
+          layout: markerLayout([10, 1.05, 13, 1.45, 16, 1.8]),
+        })
+
+        m.addSource("resources", { type: "geojson", data: fc([]), ...clusterOptions() })
+        // Status as a ring around the badge, so the badge's own colour can say
+        // which service it is. Pins carry status in their fill, as before.
+        add({
+          id: "resource-status", type: "circle", source: "resources",
+          filter: ["all", notCluster, ["has", "ring"]],
+          paint: {
+            "circle-radius": 15.5, "circle-color": "rgba(0,0,0,0)",
+            "circle-stroke-width": 2.5, "circle-stroke-color": ["get", "ring"],
+          },
+        })
+        add({
+          id: "resource-dot", type: "symbol", source: "resources", filter: notCluster,
+          layout: markerLayout([10, 0.9, 13, 1.2, 16, 1.5]),
+        })
+        clusterLayers("resources", "#94a3b8")
 
         m.addSource("me", { type: "geojson", data: fc([]) })
-        m.addLayer({
-          id: "me-halo", type: "circle", source: "me",
-          paint: { "circle-radius": 26, "circle-color": "#8b5cf6", "circle-opacity": 0.18 },
-        })
-        m.addLayer({
-          id: "me-dot", type: "symbol", source: "me",
-          layout: {
-            "icon-image": ["get", "icon"],
-            "icon-size": 1.4,
-            "icon-anchor": "bottom",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
-          },
-        })
+        if (badges) {
+          // The blue dot: accuracy circle in metres, a white keyline, a solid core.
+          add({
+            id: "me-accuracy", type: "circle", source: "me",
+            filter: [">", ["coalesce", ["get", "pxAt22"], 0], 0],
+            paint: {
+              "circle-radius": [
+                "interpolate", ["exponential", 2], ["zoom"],
+                0, 0, 22, ["coalesce", ["get", "pxAt22"], 0],
+              ],
+              "circle-color": MAP.you, "circle-opacity": 0.12,
+              "circle-stroke-width": 1, "circle-stroke-color": MAP.you, "circle-stroke-opacity": 0.35,
+            },
+          })
+          add({
+            id: "me-halo", type: "circle", source: "me",
+            paint: { "circle-radius": 9.5, "circle-color": "#ffffff", "circle-blur": 0.1 },
+          })
+          add({
+            id: "me-dot", type: "circle", source: "me",
+            paint: { "circle-radius": 6.5, "circle-color": MAP.you },
+          })
+        } else {
+          add({
+            id: "me-halo", type: "circle", source: "me",
+            paint: { "circle-radius": 26, "circle-color": "#8b5cf6", "circle-opacity": 0.18 },
+          })
+          add({
+            id: "me-dot", type: "symbol", source: "me",
+            layout: {
+              "icon-image": ["get", "icon"],
+              "icon-size": 1.4,
+              "icon-anchor": "bottom",
+              "icon-allow-overlap": true, "icon-ignore-placement": true,
+            },
+          })
+        }
 
         // Where each route ends, which is the hazard the unit is going to.
         // A line that fades out into a dot is a line going nowhere in
         // particular; the endpoint names its destination.
         m.addSource("endpoints", { type: "geojson", data: fc([]) })
-        m.addLayer({
+        add({
           id: "endpoint-ring", type: "circle", source: "endpoints",
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 11, 15, 20],
@@ -570,14 +802,19 @@ export function LiveMap({
             "circle-stroke-opacity": 0.95,
           },
         })
-        m.addLayer({
+        add({
           id: "endpoint-label", type: "symbol", source: "endpoints",
           minzoom: 12,
-          layout: {
-            "text-field": ["get", "label"], "text-font": FONT,
-            "text-size": 12, "text-offset": [0, 1.9], "text-anchor": "top",
-            "text-max-width": 12,
-          },
+          // On the experience maps a label for every destination is clutter:
+          // the selected one is named in the panel.
+          ...(badges ? { layout: { visibility: "none" } } : {}),
+          ...(badges ? {} : {
+            layout: {
+              "text-field": ["get", "label"], "text-font": FONT,
+              "text-size": 12, "text-offset": [0, 1.9], "text-anchor": "top",
+              "text-max-width": 12,
+            },
+          }),
           paint: {
             "text-color": "#e6edf7",
             "text-halo-color": "rgba(9,12,20,0.92)", "text-halo-width": 1.6,
@@ -597,12 +834,13 @@ export function LiveMap({
         // order here is "smallest and most specific first", which is also the
         // order somebody's attention moves in.
         const HOVER_ORDER = [
-          "me-dot", "incident-dot", "resource-dot", "facility-dot",
+          "me-dot", "critical-dot", "incident-dot", "resource-dot", "facility-dot",
           "block-dot", "endpoint-ring", "route-line", "link-line", "ward-fill",
         ]
         const present = () => HOVER_ORDER.filter((id) => m.getLayer(id))
 
         m.on("mousemove", (e) => {
+          if (!hoverRef.current) return
           const hits = m.queryRenderedFeatures(e.point, { layers: present() })
           if (!hits.length) {
             m.getCanvas().style.cursor = ""
@@ -632,10 +870,48 @@ export function LiveMap({
           popup.current?.remove()
         })
 
+        // A cluster opens to the zoom at which it comes apart.
+        const CLUSTERS = ["incidents-cluster", "resources-cluster", "facilities-cluster"]
+        const expandCluster = (e: mapboxgl.MapMouseEvent): boolean => {
+          const layers = CLUSTERS.filter((id) => m.getLayer(id))
+          if (!layers.length) return false
+          const hit = m.queryRenderedFeatures(e.point, { layers })[0]
+          if (!hit) return false
+          const src = m.getSource(String(hit.layer?.source ?? "")) as mapboxgl.GeoJSONSource | undefined
+          const clusterId = Number(propsOf(hit).cluster_id)
+          const at = (hit.geometry as unknown as { coordinates: [number, number] }).coordinates
+          src?.getClusterExpansionZoom(clusterId, (err, z) => {
+            if (err || z === null || z === undefined) return
+            m.easeTo({ center: at, zoom: z + 0.4, duration: 700 })
+          })
+          return true
+        }
+
+        const SELECTABLE: [string, MapSelection["kind"]][] = [
+          ["critical-dot", "incident"], ["incident-dot", "incident"],
+          ["resource-dot", "resource"], ["facility-dot", "facility"],
+          ["block-dot", "block"], ["endpoint-ring", "incident"],
+        ]
+
         // Clicking picks the incident under the cursor, whether that was the
         // hazard icon itself or the ring at the end of a route pointing at it.
         m.on("click", (e) => {
-          const layers = ["incident-dot", "endpoint-ring"].filter((id) => m.getLayer(id))
+          if (expandCluster(e)) return
+          if (selectRef.current) {
+            const layers = SELECTABLE.map(([id]) => id).filter((id) => m.getLayer(id))
+            const hits = layers.length ? m.queryRenderedFeatures(e.point, { layers }) : []
+            for (const [layer, kind] of SELECTABLE) {
+              const hit = hits.find((h) => h.layer?.id === layer)
+              const id = hit ? propsOf(hit).incidentId ?? propsOf(hit).id : null
+              if (id) {
+                selectRef.current({ kind, id: String(id) })
+                return
+              }
+            }
+            selectRef.current(null)
+            return
+          }
+          const layers = ["incident-dot", "critical-dot", "endpoint-ring"].filter((id) => m.getLayer(id))
           const hits = layers.length ? m.queryRenderedFeatures(e.point, { layers }) : []
           const id = hits.length ? propsOf(hits[0]).incidentId ?? propsOf(hits[0]).id : null
           if (id && onPickIncident) {
@@ -650,6 +926,13 @@ export function LiveMap({
           }
         })
 
+        // Pointer cursor over anything clickable, even with hover cards off.
+        m.on("mousemove", (e) => {
+          if (hoverRef.current) return
+          const layers = [...SELECTABLE.map(([id]) => id), ...CLUSTERS].filter((id) => m.getLayer(id))
+          const over = layers.length ? m.queryRenderedFeatures(e.point, { layers }).length > 0 : false
+          m.getCanvas().style.cursor = over ? "pointer" : ""
+        })
 
         setReady(true)
       })
@@ -707,7 +990,7 @@ export function LiveMap({
       if (list) list.push(n)
       else needsBy.set(n.incidentId, [n])
     }
-    set("incidents", fc(incidents.map((i) => {
+    const features = incidents.map((i) => {
       const mine = needsBy.get(i.id) ?? []
       const short = mine.filter((n) => n.met < n.required)
       const tip =
@@ -743,13 +1026,51 @@ export function LiveMap({
           : "") +
         activityBlock(activity?.get(i.id), "What happened") +
         `<div class="ip-act"><span style="color:#64748b">Click to open it.</span></div>`
+      const colour = badges ? incidentColour(i.severity) : severityColour(i.severity)
       return point(i.location[0], i.location[1], {
         id: i.id, severity: i.severity, reportCount: i.reportCount, tip,
-        colour: severityColour(i.severity),
-        icon: imageName(hazardIcon(i.category), severityColour(i.severity)),
+        colour,
+        icon: badges
+          ? badgeName(hazardIcon(i.category), colour)
+          : imageName(hazardIcon(i.category), colour),
       })
-    })))
-  }, [ready, incidents, needs, activity])
+    })
+    // Clustering would fold a critical incident into a number. It gets its own
+    // unclustered source instead, drawn above everything else of its kind.
+    const critical = (f: Feature) => Number(propsOf(f).severity) >= CRITICAL_SEVERITY
+    set("incidents", fc(cluster ? features.filter((f) => !critical(f)) : features))
+    set("incidents-critical", fc(cluster ? features.filter(critical) : []))
+
+    // The pulse. DOM markers rather than a per-frame paint update: the browser
+    // animates CSS on the compositor, so a pulsing SOS costs no map redraws.
+    const live = new Set<string>()
+    if (pulseCritical) {
+      for (const i of incidents) {
+        if (i.severity < CRITICAL_SEVERITY) continue
+        live.add(i.id)
+        const held = pulses.current.get(i.id)
+        if (held) {
+          held.setLngLat(i.location)
+        } else if (map.current) {
+          const el = document.createElement("div")
+          el.className = "indra-pulse"
+          el.setAttribute("aria-hidden", "true")
+          pulses.current.set(
+            i.id,
+            new mapboxgl.Marker({ element: el, anchor: "center" }).setLngLat(i.location).addTo(map.current),
+          )
+        }
+      }
+    }
+    for (const [id, marker] of pulses.current) {
+      if (!live.has(id)) {
+        marker.remove()
+        pulses.current.delete(id)
+      }
+    }
+    // `badges` and `cluster` are fixed at mount; they are read, not tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, incidents, needs, activity, pulseCritical])
 
   useEffect(() => {
     if (!ready) return
@@ -777,9 +1098,12 @@ export function LiveMap({
         activityBlock(activity?.get(r.id), "Agent actions")
       return point(r.location[0], r.location[1], {
         id: r.id, status: r.status, tip,
-        icon: imageName(kindIcon(r.kind), statusColour(r.status)),
+        ...(badges
+          ? { icon: badgeName(kindIcon(r.kind), serviceColour(r.kind)), ring: statusRing(r.status) }
+          : { icon: imageName(kindIcon(r.kind), statusColour(r.status)) }),
       })
     })))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, resources, activity])
 
   useEffect(() => {
@@ -901,9 +1225,12 @@ export function LiveMap({
 
       return point(f.location[0], f.location[1], {
         id: f.id, status: f.status, tip,
-        icon: imageName(lifelineIcon(f.kind), colour),
+        icon: badges
+          ? badgeName(lifelineIcon(f.kind), placeColour(f.kind))
+          : imageName(lifelineIcon(f.kind), colour),
       })
     })))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, facilities, activity])
 
   useEffect(() => {
@@ -911,7 +1238,8 @@ export function LiveMap({
     set("blocks", fc(blocks.map((b) =>
       point(b.location[0], b.location[1], {
         id: b.id,
-        icon: imageName("ui-block", "#dc2626"),
+        icon: badges ? badgeName("ui-block", MAP.block) : imageName("ui-block", "#dc2626"),
+        pxAt22: b.radiusM ? metresToPxAt22(b.radiusM, b.location[1]) : 0,
         tip:
           `<div class="ip-title">Road blocked</div>` +
           `<div class="ip-sub">${esc(b.reason)}</div>` +
@@ -920,6 +1248,7 @@ export function LiveMap({
           activityBlock(activity?.get(b.id), "Since"),
       })
     )))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, blocks, activity])
 
   useEffect(() => {
@@ -937,6 +1266,152 @@ export function LiveMap({
       : fc([]))
   }, [ready, route, routeLabel])
 
+  /** How much the highlighted route can be trusted, said in the line itself:
+   *  green on real roads, amber where it passes reported hazards, and dashed
+   *  amber where it is not a road route at all. */
+  useEffect(() => {
+    const m = map.current
+    if (!ready || !m?.getLayer("route-line")) return
+    const colour = routeStatus === "uncertain" ? MAP.uncertain
+      : routeStatus === "caution" ? MAP.caution : MAP.route
+    m.setPaintProperty("route-line", "line-color", colour)
+    m.setPaintProperty(
+      "route-line", "line-dasharray",
+      routeStatus === "uncertain" ? [1.4, 1.6] : (null as unknown as number[]),
+    )
+  }, [ready, routeStatus])
+
+  /** The route drawing itself in, start to destination, when a new one
+   *  arrives; then the travelled part dimmed as the person moves along it.
+   *  Dashed (uncertain) lines skip both: trimming and dashing do not combine. */
+  const routeSig = route && route.length > 1
+    ? `${route.length}:${route[0].join(",")}:${route[route.length - 1].join(",")}`
+    : ""
+  const revealing = useRef(false)
+  useEffect(() => {
+    const m = map.current
+    if (!ready || !m?.getLayer("route-line") || !routeSig || !badges) return
+    if (routeStatus === "uncertain") return
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    if (reduce) return
+    let frame = 0
+    const start = performance.now()
+    revealing.current = true
+    const step = (now: number) => {
+      // A frame's timestamp can precede `start`, which made this negative.
+      const t = Math.max(0, Math.min(1, (now - start) / 750))
+      const eased = 1 - Math.pow(1 - t, 3)
+      try {
+        m.setPaintProperty("route-line", "line-trim-offset", [eased, 1])
+      } catch { /* style mid-reload */ }
+      if (t < 1) frame = requestAnimationFrame(step)
+      else revealing.current = false
+    }
+    frame = requestAnimationFrame(step)
+    return () => {
+      cancelAnimationFrame(frame)
+      revealing.current = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, routeSig])
+
+  useEffect(() => {
+    const m = map.current
+    if (!ready || !m?.getLayer("route-line") || !badges || revealing.current) return
+    const p = routeStatus === "uncertain" ? 0 : Math.max(0, Math.min(1, routeProgress ?? 0))
+    try {
+      m.setPaintProperty("route-line", "line-trim-offset", [0, p])
+    } catch { /* style mid-reload */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, routeProgress, routeStatus, routeSig])
+
+  // ---- selection, camera, padding, light: the experience maps' camera work.
+
+  const selLng = selection?.lng
+  const selLat = selection?.lat
+  const selColour = selection?.colour ?? MAP.you
+  useEffect(() => {
+    if (!ready) return
+    set("selection", selLng !== undefined && selLat !== undefined
+      ? fc([point(selLng, selLat, { colour: selColour })])
+      : fc([]))
+  }, [ready, selLng, selLat, selColour])
+
+  const paddingKey = padding ? `${padding.top},${padding.right},${padding.bottom},${padding.left}` : ""
+  const paddingRef = useRef(padding)
+  useEffect(() => {
+    paddingRef.current = padding
+  })
+  useEffect(() => {
+    const m = map.current
+    if (!ready || !m || !paddingRef.current) return
+    // Never cut a camera move short: a padding change that lands mid-flight
+    // (the sheet resizing as a selection opens) waits for it to finish.
+    const apply = () => {
+      if (paddingRef.current) m.easeTo({ padding: paddingRef.current, duration: 260 })
+    }
+    if (m.isMoving()) {
+      m.once("moveend", apply)
+      return () => {
+        m.off("moveend", apply)
+      }
+    }
+    apply()
+  }, [ready, paddingKey])
+
+  /** Smooth, never snapping: a fly for a long way, an ease for a short one. */
+  const cameraKey = camera?.key
+  const cameraRef = useRef(camera)
+  useEffect(() => {
+    cameraRef.current = camera
+  })
+  useEffect(() => {
+    const m = map.current
+    const c = cameraRef.current
+    if (!ready || !m || !c || cameraKey === undefined) return
+    const pad = paddingRef.current
+    if (c.bounds) {
+      m.fitBounds(c.bounds, {
+        padding: {
+          top: (pad?.top ?? 0) + 56, bottom: (pad?.bottom ?? 0) + 56,
+          left: (pad?.left ?? 0) + 56, right: (pad?.right ?? 0) + 56,
+        },
+        maxZoom: c.zoom ?? 16.5,
+        duration: 900,
+      })
+      return
+    }
+    if (c.zoomBy) {
+      m.easeTo({ zoom: m.getZoom() + c.zoomBy, duration: 250 })
+      return
+    }
+    if (!c.center) return
+    const here = m.getCenter()
+    const far = Math.abs(here.lng - c.center[0]) + Math.abs(here.lat - c.center[1]) > 0.05
+    const zoomTo = c.zoom ?? Math.max(m.getZoom(), 15)
+    const withPad = pad ? { padding: pad } : {}
+    if (far) m.flyTo({ center: c.center, zoom: zoomTo, speed: 1.6, curve: 1.3, essential: true, ...withPad })
+    else m.easeTo({ center: c.center, zoom: zoomTo, duration: 650, ...withPad })
+  }, [ready, cameraKey])
+
+  useEffect(() => {
+    const m = map.current as unknown as {
+      setConfigProperty?: (i: string, k: string, v: unknown) => void
+    } | null
+    if (!ready || !night || !m?.setConfigProperty) return
+    try {
+      m.setConfigProperty("basemap", "lightPreset", lightPreset)
+    } catch { /* not a Standard style */ }
+  }, [ready, night, lightPreset])
+
+  useEffect(() => {
+    const held = pulses.current
+    return () => {
+      for (const marker of held.values()) marker.remove()
+      held.clear()
+    }
+  }, [])
+
   // Keyed on the coordinates rather than on the `me` object. Callers build that
   // object inline in their JSX, so it was a new value on every render and this
   // effect re-ran — and re-issued an `easeTo` — several times a second whether
@@ -944,12 +1419,14 @@ export function LiveMap({
   const meLng = me?.lng
   const meLat = me?.lat
   const meLabel = me?.label
+  const meAccuracy = me?.accuracyM ?? null
   useEffect(() => {
     if (!ready) return
     const here = meLng !== undefined && meLat !== undefined
     set("me", here
       ? fc([point(meLng, meLat, {
           icon: imageName("ui-me", "#8b5cf6"),
+          pxAt22: meAccuracy ? metresToPxAt22(meAccuracy, meLat) : 0,
           tip: `<div class="ip-title">${esc(meLabel ?? "You")}</div>` +
                `<div class="ip-sub">${meLat.toFixed(5)}, ${meLng.toFixed(5)}</div>`,
         })])
@@ -957,7 +1434,7 @@ export function LiveMap({
     if (here && followMe) {
       map.current?.easeTo({ center: [meLng, meLat], duration: 400 })
     }
-  }, [ready, meLng, meLat, meLabel, followMe, recentreKey])
+  }, [ready, meLng, meLat, meLabel, meAccuracy, followMe, recentreKey])
 
   /** A touch or a scroll on the canvas is the person taking the camera.
    *

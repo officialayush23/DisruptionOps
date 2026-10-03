@@ -1,19 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle, Camera, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Compass,
-  Droplets, Hospital, Loader2, Mic, Navigation, Pill, Send, ShieldCheck,
-  Siren, Square, Utensils, WifiOff,
+  Droplets, ExternalLink, Hospital, Loader2, Mic, Navigation, Pill, Send, Share2, ShieldCheck,
+  Square, Utensils, WifiOff, X,
 } from "lucide-react"
 import { apiBaseUrl, deviceId, request } from "@/api/httpClient"
-import { LiveMap } from "@/components/map/LiveMap"
-import { MapStage } from "@/components/map/MapStage"
+import { LiveMap, type CameraRequest, type MapSelection } from "@/components/map/LiveMap"
+import { MapExperience, type Snap } from "@/components/map/experience/MapExperience"
+import { useCanHover, useMediaQuery } from "@/components/map/experience/hooks"
+import {
+  ActionButton, AlertBanner, ChoicePills, ConnectivityPill, DetailRow, FilterControl,
+  LegendRow, MapControls, NavPanel, PlaceRow, SectionLabel, TopBar, type FilterOption, type Tone,
+} from "@/components/map/experience/parts"
+import { ItemDisc } from "@/components/map/experience/ItemDisc"
+import {
+  blockItem, facilityItem, incidentItem, kindLabel, unitItem, words, type MapItem,
+} from "@/components/map/experience/items"
+import {
+  MAP, alongLine, compass, externalMapsUrl, formatMetres, metresBetween, placeGroupOf,
+  serviceOf, sharePlace,
+} from "@/components/map/mapTheme"
+import { useOutbox } from "@/lib/pwa"
 import { OfflineBar } from "@/components/common/OfflineBar"
 import { MeshPanel } from "@/components/common/MeshPanel"
 import { DemoCredentials } from "@/auth/DemoCredentials"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Textarea } from "@/components/ui/textarea"
 
@@ -250,6 +263,8 @@ export default function CitizenApp() {
   /** Shown briefly when the route re-solves on its own, because a path that
    *  silently redraws itself is indistinguishable from a glitch. */
   const [rerouted, setRerouted] = useState<string | null>(null)
+  /** When the map last showed live data, for "Offline · map data from 3 min ago". */
+  const [lastLive, setLastLive] = useState<number | null>(null)
   /** Bumped by the recentre button. It used to clone `pos` into a new object to
    *  force the map to ease back — which also refetched the whole city state,
    *  because the poll was keyed on that object's identity. Recentring the view
@@ -287,6 +302,7 @@ export default function CitizenApp() {
       setState(next)
       setUnreachable(false)
       setError(null)
+      if (!fromCache) setLastLive(Date.now())
       // The network failed and the service worker answered from its copy. Worth
       // saying: this screen's whole job is telling somebody which road to
       // avoid, and roads close. A map from ten minutes ago is worth having and
@@ -530,6 +546,26 @@ export default function CitizenApp() {
    *  "Am I safe?" halfway to a hospital replaced the live guidance with an
    *  empty one and switched navigation off mid-journey. The answer is worth
    *  showing; it is not worth the route. */
+  // ---- Map presentation state, declared here because `ask` drives it: a new
+  // route the person asked for is framed on the map and its directions shown.
+  const [camera, setCamera] = useState<CameraRequest | null>(null)
+  const cameraSeq = useRef(0)
+  const fly = useCallback((req: Omit<CameraRequest, "key">) => {
+    cameraSeq.current += 1
+    setCamera({ ...req, key: cameraSeq.current })
+  }, [])
+  const [tab, setTab] = useState<"near" | "go" | "report" | "area">("near")
+  const [snapRequest, setSnapRequest] = useState<{ snap: Snap; key: number } | null>(null)
+  const snapTo = useCallback((snap: Snap) => setSnapRequest({ snap, key: Date.now() }), [])
+  const frameRoute = useCallback((route: number[][]) => {
+    if (route.length < 2) return
+    let w = Infinity, s2 = Infinity, e = -Infinity, n = -Infinity
+    for (const [x, y] of route) {
+      w = Math.min(w, x); e = Math.max(e, x); s2 = Math.min(s2, y); n = Math.max(n, y)
+    }
+    fly({ bounds: [[w, s2], [e, n]], zoom: 16.5 })
+  }, [fly])
+
   async function ask(
     intent: string, condition?: string, silent = false, fromPerson = true
   ) {
@@ -552,6 +588,12 @@ export default function CitizenApp() {
       setGuide(g)
       setNavOn(movable)
       routeSolvedAt.current = { lng: pos.lng, lat: pos.lat, hazards: hazardSig, at: Date.now() }
+      // A route somebody asked for (or an advisory gave them) is shown whole
+      // before they set off. A silent re-solve mid-walk leaves the camera be.
+      if (!silent) {
+        setTab("go")
+        if (movable) frameRoute(g.route)
+      }
     } catch (e) {
       // A silent re-solve that fails leaves the previous route on screen, which
       // is still the best advice anyone has. Saying "route failed" over working
@@ -828,6 +870,8 @@ export default function CitizenApp() {
       remainingM: Math.max(0, Math.round(total - travelled)),
       arrived: total - travelled < 40,
       strayed: offBy > 120,
+      travelledM: travelled,
+      totalM: total,
     }
   })()
 
@@ -935,86 +979,421 @@ export default function CitizenApp() {
     setPos((p) => ({ lng: p.lng + dx * STEP, lat: p.lat + dy * STEP }))
   }, [])
 
-  return (
-    <div className="mx-auto max-w-6xl space-y-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-semibold">Indradhanu</h1>
-          <p className="text-muted-foreground text-xs">
-            {state?.ward ? state.ward.name : "Finding your area…"}
-            {state && !state.inside && " · outside the covered area"}
-          </p>
+  // ================================================================== map UI
+  //
+  // Everything below is presentation. The map is the screen; what used to be
+  // a long page of cards now lives in the sheet (phone), a floating card
+  // (tablet) or the context panel (desktop), in four tabs, with the three
+  // actions somebody in water came here for always in reach at the bottom.
+
+  const desktop = useMediaQuery("(min-width: 1024px)")
+  const canHover = useCanHover()
+  const { online, queued } = useOutbox()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [])
+  /** Follows the person until they move the map themselves. */
+  const [following, setFollowing] = useState(true)
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [filter, setFilter] = useState("all")
+  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
+  const [dismissedAlert, setDismissedAlert] = useState<string | null>(null)
+  /** A place from somewhere else (a mesh notice) shown on the map. */
+  const [pinned, setPinned] = useState<{ lng: number; lat: number; label: string } | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+  useEffect(() => {
+    if (!flash) return
+    const id = setTimeout(() => setFlash(null), 2500)
+    return () => clearTimeout(id)
+  }, [flash])
+
+  const here: [number, number] = [pos.lng, pos.lat]
+
+  const items = useMemo<MapItem[]>(() => [
+    ...(state?.incidents ?? []).map(incidentItem),
+    ...(state?.facilities ?? []).map(facilityItem),
+    ...(state?.unitsNearby ?? []).map(unitItem),
+    ...(state?.roadBlocks ?? []).map(blockItem),
+  ], [state])
+
+  const filterDef = CITIZEN_FILTERS.find((f) => f.id === filter) ?? CITIZEN_FILTERS[0]
+  /** Critical incidents are never filtered away: hiding a life-safety hazard
+   *  because somebody was looking for a hospital is not a filter, it is a trap. */
+  const visible = useMemo(() => new Set(
+    items.filter((i) => i.critical || filterDef.match(i) || i.key === selectedKey).map((i) => i.key)
+  ), [items, filterDef, selectedKey])
+  const filterOptions: FilterOption[] = CITIZEN_FILTERS
+    .map((f) => ({ id: f.id, label: f.label, colour: f.colour, count: items.filter(f.match).length }))
+    .filter((o) => o.id === "all" || o.count > 0 || o.id === filter)
+
+  const selected = items.find((i) => i.key === selectedKey) ?? null
+  const distanceTo = (i: MapItem) => metresBetween(here, i.location)
+
+  const sorted = useMemo(() => items
+    .filter((i) => visible.has(i.key))
+    .map((i) => ({ item: i, d: metresBetween([lng, lat], i.location) }))
+    .sort((a, b) => (Number(b.item.critical) - Number(a.item.critical)) || a.d - b.d),
+  [items, visible, lng, lat])
+
+  function select(item: MapItem) {
+    setSelectedKey(item.key)
+    setPinned(null)
+    setFollowing(false)
+    fly({ center: item.location })
+    snapTo("peek")
+  }
+
+  const onMapSelect = (hit: MapSelection | null) => {
+    if (!hit) {
+      setSelectedKey(null)
+      return
+    }
+    const kind = hit.kind === "resource" ? "unit" : hit.kind
+    const item = items.find((i) => i.key === `${kind}:${hit.id}`)
+    if (item) select(item)
+  }
+
+  // ---- navigation, as the panel presents it.
+  const roadRoute = guide?.routeEngine === "mapbox" || guide?.routeEngine === "osrm"
+  const routeStatus: "clear" | "caution" | "uncertain" | undefined = guide?.route?.length
+    ? (!roadRoute ? "uncertain" : guide.exposedPoints > 0 ? "caution" : "clear")
+    : undefined
+  const routeTone: Tone = routeStatus === "uncertain" ? "uncertain" : routeStatus === "caution" ? "caution" : "ok"
+  const routeStatusText = !guide ? "" : !roadRoute
+    ? "Straight-line estimate: the street router was unreachable, so roads and closures along it are unknown."
+    : guide.exposedPoints > 0
+      ? `Least exposed road route found — it still passes near ${guide.exposedPoints} reported hazard(s).`
+      : `Road route${guide.hazardsConsidered > 0 ? `, avoiding ${guide.hazardsConsidered} reported hazard(s)` : ""}.`
+
+  /** Closures and serious hazards on the route ahead of the person, from what
+   *  the control room actually knows. A closure here usually means it was
+   *  reported after the route was solved. */
+  const travelled = nav?.travelledM ?? 0
+  const hazardsAhead = useMemo(() => {
+    const route = guide?.route
+    if (!navOn || !route || route.length < 2) return []
+    const out: { tone: Tone; text: string; ahead: number }[] = []
+    for (const b of state?.roadBlocks ?? []) {
+      const a = alongLine(route, b.location)
+      if (a.off <= Math.max(60, b.radiusM ?? 0) && a.along > travelled) {
+        out.push({
+          tone: "danger", ahead: a.along - travelled,
+          text: `Road closed ${formatMetres(a.along - travelled)} ahead${b.reason ? ` — ${b.reason}` : ""}`,
+        })
+      }
+    }
+    for (const i of state?.incidents ?? []) {
+      if (i.severity < 4) continue
+      const a = alongLine(route, i.location)
+      if (a.off <= 60 && a.along > travelled) {
+        out.push({
+          tone: i.severity >= 5 ? "danger" : "caution", ahead: a.along - travelled,
+          text: `${i.title} ${formatMetres(a.along - travelled)} ahead, beside the route`,
+        })
+      }
+    }
+    return out.sort((a, b) => a.ahead - b.ahead).slice(0, 2)
+  }, [navOn, guide?.route, state?.roadBlocks, state?.incidents, travelled])
+
+  const minutesLeft = nav && guide?.routeMinutes && nav.totalM > 0
+    ? Math.max(1, Math.round((guide.routeMinutes * nav.remainingM) / nav.totalM))
+    : null
+
+  const alert = state?.alerts?.[0]
+  const showAlert = Boolean(alert && dismissedAlert !== alert.id)
+
+  // ---- pieces
+
+  const pill = (
+    <ConnectivityPill
+      online={online}
+      reachable={!unreachable}
+      staleSince={staleSince}
+      lastLive={lastLive}
+      queued={queued}
+      now={now}
+    />
+  )
+
+  const top = navOn && nav ? (
+    <NavPanel
+      context={<>You → {guide?.destination?.name ?? "destination"}{guide?.destination?.kind ? ` · ${words(guide.destination.kind)}` : ""}</>}
+      distance={readable(nav.toNextM)}
+      instruction={nav.step.instruction}
+      then={nav.next ? <>Then: {nav.next.instruction}</> : null}
+      remaining={
+        <>
+          {readable(nav.remainingM)} left
+          {minutesLeft ? ` · about ${minutesLeft} min${roadRoute ? "" : " (estimate)"}` : ""}
+          {nav.remaining > 0 ? ` · ${nav.remaining} turn(s)` : ""}
+        </>
+      }
+      status={{ tone: routeTone, text: routeStatusText }}
+      hazards={hazardsAhead}
+      notice={
+        rerouted && !nav.arrived ? rerouted
+        : nav.strayed && !nav.arrived ? `About ${readable(nav.offBy)} off the route — redrawing it from where you are.`
+        : advice && !nav.arrived ? `${advice} Your route is still on screen.`
+        : null
+      }
+      arrived={nav.arrived ? <>You have arrived at {guide?.destination?.name ?? "your destination"}.</> : null}
+      onExit={() => { setNavOn(false); setAdvice(null) }}
+    />
+  ) : (
+    <TopBar
+      title={
+        <>
+          {state?.ward ? state.ward.name : "Finding your area…"}
+          {state && !state.inside && <span className="font-normal text-amber-300"> · outside the covered area</span>}
+        </>
+      }
+      subtitle={pill}
+      badge={sev > 0 ? (
+        <span
+          className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+          style={{
+            background: sev >= 4 ? "rgb(239 68 68 / 0.18)" : "rgb(234 179 8 / 0.16)",
+            color: sev >= 4 ? "#fca5a5" : "#fde68a",
+          }}
+        >
+          Severity {sev}
+        </span>
+      ) : null}
+      right={<FilterControl value={filter} options={filterOptions} onChange={(id) => { setFilter(id); if (id !== "all") setSelectedKey(null) }} />}
+    />
+  )
+
+  const banner = (
+    <div className="space-y-2">
+      {showAlert && alert && (
+        <AlertBanner
+          title={newAlert === alert.headline ? <>New alert · {alert.headline}</> : alert.headline}
+          detail={
+            <>
+              {alert.action}
+              {alert.safeLocation && <> Go to <b>{alert.safeLocation.name}</b>, {alert.safeLocation.distance_km} km away.</>}
+            </>
+          }
+          onView={alert.safeLocation && !navOn ? () => void ask("shelter") : undefined}
+          viewLabel={busy === "shelter" ? "Finding the way…" : "Take me there"}
+          onDismiss={() => { setDismissedAlert(alert.id); setNewAlert(null) }}
+        />
+      )}
+      {flash && (
+        <div className="mx-auto w-fit rounded-full border border-white/10 bg-[rgb(14_17_22/0.92)] px-3 py-1.5 text-xs">
+          {flash}
         </div>
+      )}
+    </div>
+  )
+
+  const layers = (
+    <div className="space-y-3">
+      <SectionLabel>Basemap</SectionLabel>
+      <ChoicePills
+        value={lightPreset}
+        onChange={setLightPreset}
+        options={[{ id: "night", label: "Night" }, { id: "dusk", label: "Dusk" }, { id: "day", label: "Day" }]}
+      />
+      <SectionLabel>On this map</SectionLabel>
+      <div className="grid gap-1.5">
+        <LegendRow colour={MAP.critical} label="Critical incident — always shown, pulses" />
+        <LegendRow colour={MAP.sev4} label="Hazard, severity 4" />
+        <LegendRow colour={MAP.sev3} label="Hazard, severity 3 and below" />
+        <LegendRow colour={MAP.medical} label="Hospital, medical camp, ambulance" />
+        <LegendRow colour={MAP.shelter} label="Shelter, food, water" />
+        <LegendRow colour={MAP.fire} label="Fire crew" />
+        <LegendRow colour={MAP.rescue} label="Rescue team, boat" />
+        <LegendRow colour={MAP.block} label="Road closed, and how far" />
+        <LegendRow colour={MAP.you} label="You" />
+      </div>
+      <div className="space-y-1 border-t border-white/10 pt-2.5 text-[11px] text-slate-400">
+        <div className="flex items-center gap-2"><span className="h-[3px] w-5 rounded" style={{ background: MAP.route }} />Road route</div>
+        <div className="flex items-center gap-2"><span className="h-[3px] w-5 rounded" style={{ background: MAP.caution }} />Route near a reported hazard</div>
+        <div className="flex items-center gap-2"><span className="h-0 w-5 border-t-[3px] border-dashed" style={{ borderColor: MAP.uncertain }} />Straight line — not a road route</div>
+      </div>
+    </div>
+  )
+
+  const controls = (
+    <MapControls
+      following={following}
+      hasFix
+      onLocate={() => { setFollowing(true); setRecentre((n) => n + 1) }}
+      onZoomIn={() => fly({ zoomBy: 1 })}
+      onZoomOut={() => fly({ zoomBy: -1 })}
+      showZoom={desktop || canHover}
+      layers={layers}
+    />
+  )
+
+  /** Hidden, and always mounted: the photo buttons in the sheet head and in
+   *  the report tab both open it. */
+  const photoPicker = (
+    <input
+      ref={photoInput}
+      type="file"
+      accept="image/*"
+      capture="environment"
+      className="hidden"
+      onChange={(e) => {
+        const f = e.target.files?.[0]
+        if (f) void attachPhoto(f)
+      }}
+    />
+  )
+
+  const intentFor = (i: MapItem): { intent: string; label: string } | null => {
+    if (i.kind !== "facility") return null
+    switch (i.sub) {
+      case "hospital": return { intent: "hospital", label: "Safest route to a hospital" }
+      case "medical_camp": return { intent: "medical_supplies", label: "Safest route to medicine" }
+      case "shelter": case "school": return { intent: "shelter", label: "Safest route to a shelter" }
+      case "food_kitchen": case "relief_centre": return { intent: "food", label: "Safest route to food" }
+      case "water_point": return { intent: "water", label: "Safest route to water" }
+      default: return null
+    }
+  }
+
+  const share = async (title: string, at: [number, number]) => {
+    const r = await sharePlace(title, at[0], at[1])
+    if (r === "copied") setFlash("Location copied")
+    else if (r === "failed") setFlash("Could not share from this browser")
+  }
+
+  const peek = (
+    <div className="space-y-2.5">
+      {photoPicker}
+      {navOn && nav ? (
         <div className="flex items-center gap-2">
-          {sev >= 4 && <Badge variant="destructive">Severity {sev}</Badge>}
-          {sev > 0 && sev < 4 && <Badge variant="secondary">Severity {sev}</Badge>}
-          <a href="/login" className="text-muted-foreground text-xs underline">Sign in</a>
+          <ActionButton tone="danger" onClick={() => { setNavOn(false); setAdvice(null) }}>Stop</ActionButton>
+          <ActionButton onClick={() => { setTab("go"); snapTo("half") }} className="flex-1">
+            <Navigation className="size-4" /> Directions
+          </ActionButton>
+          <div className="text-right text-xs tabular-nums text-slate-400">
+            {readable(nav.remainingM)} left
+          </div>
         </div>
-      </div>
+      ) : selected ? (
+        <>
+          <div className="flex items-center gap-3">
+            <ItemDisc item={selected} size={40} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[15px] font-semibold">{selected.title}</div>
+              <div className="truncate text-xs text-slate-400">
+                {kindLabel(selected)} · {formatMetres(distanceTo(selected))} {compass(here, selected.location)}
+                {selected.status ? ` · ${words(selected.status)}` : ""}
+                {selected.severity ? ` · severity ${selected.severity}` : ""}
+              </div>
+            </div>
+            <button type="button" aria-label="Close" onClick={() => setSelectedKey(null)}
+                    className="grid size-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-white/10">
+              <X className="size-4" />
+            </button>
+          </div>
+          <div className="flex gap-2">
+            {(() => {
+              const go = intentFor(selected)
+              if (go) {
+                return (
+                  <ActionButton tone="primary" className="flex-1" disabled={busy !== null}
+                                onClick={() => void ask(go.intent)}>
+                    {busy === go.intent ? <Loader2 className="size-4 animate-spin" /> : <Navigation className="size-4" />}
+                    {go.label}
+                  </ActionButton>
+                )
+              }
+              if (selected.kind === "incident") {
+                return (
+                  <ActionButton tone={selected.critical ? "critical" : "primary"} className="flex-1"
+                                disabled={busy !== null} onClick={() => void ask("safety")}>
+                    {busy === "safety" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+                    Am I safe here?
+                  </ActionButton>
+                )
+              }
+              return (
+                <ActionButton tone="primary" className="flex-1" href={externalMapsUrl(selected.location[0], selected.location[1])}>
+                  <ExternalLink className="size-4" /> Open in Maps
+                </ActionButton>
+              )
+            })()}
+            <ActionButton onClick={() => void share(selected.title, selected.location)} className="w-11 px-0">
+              <Share2 className="size-4" /><span className="sr-only">Share location</span>
+            </ActionButton>
+            {intentFor(selected) || selected.kind === "incident" ? (
+              <ActionButton href={externalMapsUrl(selected.location[0], selected.location[1])} className="w-11 px-0">
+                <ExternalLink className="size-4" /><span className="sr-only">Open in external maps</span>
+              </ActionButton>
+            ) : null}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* The three things somebody in water actually came here to do. */}
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              disabled={busy === "shelter"}
+              onClick={() => void ask("shelter")}
+              className={
+                "flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-semibold text-white disabled:opacity-60 " +
+                (sev >= 4 || state?.alerts?.length ? "bg-[#ef4444]" : "bg-[#0a84ff]")
+              }
+            >
+              {busy === "shelter" ? <Loader2 className="size-5 animate-spin" /> : <Navigation className="size-5" />}
+              Where do I go
+            </button>
+            <button
+              type="button"
+              disabled={busy === "voice" || voiceOff}
+              onPointerDown={() => {
+                if (!recording && !voiceOff) {
+                  setTab("report")
+                  void startRecording()
+                }
+              }}
+              onPointerUp={() => { if (recording) stopRecording() }}
+              onPointerLeave={() => { if (recording) stopRecording() }}
+              className={
+                "flex h-14 touch-none select-none flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-semibold disabled:opacity-50 " +
+                (recording ? "bg-[#ef4444] text-white" : "bg-white/10")
+              }
+            >
+              {busy === "voice" ? <Loader2 className="size-5 animate-spin" />
+                : recording ? <Square className="size-5" /> : <Mic className="size-5" />}
+              {recording ? "Release to stop" : voiceOff ? "Voice is off" : "Hold to talk"}
+            </button>
+            <button
+              type="button"
+              disabled={busy === "photo"}
+              onClick={() => { setTab("report"); snapTo("half"); photoInput.current?.click() }}
+              className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl bg-white/10 text-xs font-semibold disabled:opacity-50"
+            >
+              {busy === "photo" ? <Loader2 className="size-5 animate-spin" /> : <Camera className="size-5" />}
+              {photo ? "Change photo" : "Take a photo"}
+            </button>
+          </div>
+          {sorted[0] && (
+            <button type="button" onClick={() => select(sorted[0].item)}
+                    className="flex w-full items-center gap-2 text-left text-xs text-slate-400">
+              <span className="size-2 shrink-0 rounded-full" style={{ background: sorted[0].item.colour }} />
+              <span className="min-w-0 flex-1 truncate">
+                {sorted[0].item.critical ? "Critical: " : "Nearest: "}
+                <span className="text-slate-200">{sorted[0].item.title}</span>
+              </span>
+              <span className="tabular-nums">{formatMetres(sorted[0].d)}</span>
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  )
 
-      {/* The three things somebody in water actually came here to do.
-       *
-       *  They used to be below the map, which on a phone means below the fold:
-       *  a person standing in a flooded street had to scroll past a map they
-       *  cannot read one-handed to find the microphone. Nothing else on this
-       *  screen is an action, so nothing else competes for the top of it.
-       *
-       *  Sticky, because the one time this matters is the one time the person
-       *  has already scrolled. */}
-      <div className="bg-background/95 sticky top-0 z-20 -mx-4 grid grid-cols-3 gap-2 px-4 py-2 backdrop-blur">
-        <Button
-          type="button"
-          size="lg"
-          variant={sev >= 4 || state?.alerts?.length ? "destructive" : "default"}
-          className="h-14 flex-col gap-0.5 text-xs"
-          disabled={busy === "shelter"}
-          onClick={() => void ask("shelter")}
-        >
-          {busy === "shelter" ? (
-            <Loader2 className="size-5 animate-spin" />
-          ) : (
-            <Navigation className="size-5" />
-          )}
-          Where do I go
-        </Button>
-        <Button
-          type="button"
-          size="lg"
-          variant={recording ? "destructive" : "secondary"}
-          className="h-14 flex-col gap-0.5 text-xs"
-          disabled={busy === "voice" || voiceOff}
-          // Hold to talk, exactly as the card below does it — the same handlers,
-          // not a second recorder, so there is one answer to "am I recording".
-          onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
-          onPointerUp={() => { if (recording) stopRecording() }}
-          onPointerLeave={() => { if (recording) stopRecording() }}
-        >
-          {busy === "voice" ? (
-            <Loader2 className="size-5 animate-spin" />
-          ) : recording ? (
-            <Square className="size-5" />
-          ) : (
-            <Mic className="size-5" />
-          )}
-          {recording ? "Release to stop" : voiceOff ? "Voice is off" : "Hold to talk"}
-        </Button>
-        <Button
-          type="button"
-          size="lg"
-          variant="secondary"
-          className="h-14 flex-col gap-0.5 text-xs"
-          disabled={busy === "photo"}
-          onClick={() => photoInput.current?.click()}
-        >
-          {busy === "photo" ? (
-            <Loader2 className="size-5 animate-spin" />
-          ) : (
-            <Camera className="size-5" />
-          )}
-          {photo ? "Change photo" : "Take a photo"}
-        </Button>
-      </div>
-
+  const notices = (
+    <div className="space-y-2">
       {gpsNote && <Alert><AlertDescription className="text-xs">{gpsNote}</AlertDescription></Alert>}
       {state && !state.inside && (
         <Alert variant="destructive">
@@ -1025,7 +1404,6 @@ export default function CitizenApp() {
       {error && (
         <Alert variant="destructive"><AlertDescription className="text-xs">{error}</AlertDescription></Alert>
       )}
-
       {/* Nothing answered. Said plainly, with the address it tried, because the
           person who most often sees this is the one who can start the server. */}
       {unreachable && (
@@ -1038,61 +1416,383 @@ export default function CitizenApp() {
           </AlertDescription>
         </Alert>
       )}
+      {staleSince !== null && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+          This is the last map this phone managed to fetch
+          {now - staleSince > 60_000 ? `, about ${Math.round((now - staleSince) / 60_000)} minute(s) ago` : ""}.
+          Roads close faster than that, so treat closures as the minimum rather
+          than the whole picture.
+        </div>
+      )}
+    </div>
+  )
 
-      {/* A new alert, announced. Dismissible, because it has been read by the
-          time somebody is deciding to close it. */}
-      {newAlert && (
-        <Alert variant="destructive" className="border-2">
-          <Siren className="size-4 animate-pulse" />
-          <AlertDescription className="flex items-start justify-between gap-3">
-            <span className="text-sm font-medium">{newAlert}</span>
-            <button
-              type="button"
-              className="shrink-0 text-xs underline"
-              onClick={() => setNewAlert(null)}
-            >
-              Dismiss
-            </button>
-          </AlertDescription>
-        </Alert>
+  const selectedDetails = selected && (
+    <div className="space-y-3">
+      <SectionLabel>Details</SectionLabel>
+      <div className="space-y-1.5">
+        <DetailRow label="Type">{kindLabel(selected)}</DetailRow>
+        <DetailRow label="Distance">
+          {formatMetres(distanceTo(selected))} {compass(here, selected.location)} in a straight line
+        </DetailRow>
+        {selected.kind === "incident" && (() => {
+          const i = state?.incidents.find((x) => x.id === selected.id)
+          return i ? (
+            <>
+              <DetailRow label="Severity">{i.severity}{i.severity >= 5 ? " — critical" : ""}</DetailRow>
+              <DetailRow label="Reports">{i.reportCount > 1 ? `${i.reportCount} merged into this one` : "One report"}</DetailRow>
+            </>
+          ) : null
+        })()}
+        {selected.kind === "facility" && (() => {
+          const f = state?.facilities.find((x) => x.id === selected.id)
+          if (!f) return null
+          const spare = f.capacity ? Math.max(0, f.capacity - (f.occupancy ?? 0)) : null
+          return (
+            <>
+              <DetailRow label="Status">{words(f.status)}</DetailRow>
+              <DetailRow label="Places free">{spare !== null ? `${spare} of ${f.capacity}` : null}</DetailRow>
+            </>
+          )
+        })()}
+        {selected.kind === "unit" && (() => {
+          const u = state?.unitsNearby.find((x) => x.id === selected.id)
+          return u ? (
+            <>
+              <DetailRow label="Status">{words(u.status)}</DetailRow>
+              <DetailRow label="ETA">{u.etaMinutes ? `${u.etaMinutes} min, from dispatch` : null}</DetailRow>
+            </>
+          ) : null
+        })()}
+        {selected.kind === "block" && (() => {
+          const b = state?.roadBlocks.find((x) => x.id === selected.id)
+          return b ? (
+            <>
+              <DetailRow label="Why">{b.reason}</DetailRow>
+              <DetailRow label="Reported by">{b.reportedBy}</DetailRow>
+              <DetailRow label="Reaches">{b.radiusM ? `about ${formatMetres(b.radiusM)} around the point` : null}</DetailRow>
+            </>
+          ) : null
+        })()}
+        <DetailRow label="Position">
+          <span className="tabular-nums">{selected.location[1].toFixed(5)}, {selected.location[0].toFixed(5)}</span>
+        </DetailRow>
+      </div>
+      <p className="text-[11.5px] leading-snug text-slate-400">
+        {intentFor(selected)
+          ? "The safest route is chosen by the guide from what is open and has room, avoiding reported hazards — it may pick a different one than this. Open in Maps gives road directions to exactly this place, without the hazard data."
+          : "Open in Maps gives road directions to this exact point. It knows nothing about the closures and hazards reported here."}
+      </p>
+    </div>
+  )
+
+  const goTab = (
+    <div className="space-y-3">
+      <div>
+        <div className="flex items-center gap-2 text-sm font-semibold"><Compass className="size-4" /> Where should I go?</div>
+        <p className="mt-0.5 text-xs text-slate-400">
+          Decided from what has room, what is near an open incident, and which
+          roads crews have reported blocked.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("safety")}>
+          {busy === "safety" ? <Loader2 className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
+          Am I safe?
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("shelter")}>
+          <Navigation className="size-3.5" /> Nearest shelter
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("hospital", text || undefined)}>
+          <Hospital className="size-3.5" /> Hospital
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("food")}>
+          {busy === "food" ? <Loader2 className="size-3.5 animate-spin" /> : <Utensils className="size-3.5" />}
+          Food
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("water")}>
+          {busy === "water" ? <Loader2 className="size-3.5 animate-spin" /> : <Droplets className="size-3.5" />}
+          Drinking water
+        </Button>
+        <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => ask("medical_supplies")}>
+          {busy === "medical_supplies" ? <Loader2 className="size-3.5 animate-spin" /> : <Pill className="size-3.5" />}
+          Medicine
+        </Button>
+      </div>
+
+      {nav && !nav.arrived && (
+        <div className="flex items-center gap-2 rounded-2xl bg-white/[0.04] px-3 py-2 text-xs">
+          {/* Asked before arrival, not after, because at the door nobody is
+              looking at a phone. One phone is usually a family. */}
+          <span className="text-slate-400">People with you</span>
+          <div className="ml-auto flex items-center gap-1">
+            <button type="button" className="size-7 rounded-full border border-white/15 tabular-nums disabled:opacity-40"
+                    disabled={partySize <= 1} onClick={() => setPartySize((n) => Math.max(1, n - 1))} aria-label="One fewer">−</button>
+            <span className="w-6 text-center tabular-nums">{partySize}</span>
+            <button type="button" className="size-7 rounded-full border border-white/15 tabular-nums disabled:opacity-40"
+                    disabled={partySize >= 20} onClick={() => setPartySize((n) => Math.min(20, n + 1))} aria-label="One more">+</button>
+          </div>
+        </div>
       )}
 
-      {state?.alerts?.[0] && (
-        <Alert variant="destructive">
-          <Siren className="size-4" />
-          <AlertDescription>
-            <div className="font-medium">{state.alerts[0].headline}</div>
-            <div className="text-sm">{state.alerts[0].action}</div>
-            {state.alerts[0].safeLocation && (
-              <div className="mt-1 text-sm">
-                Go to <span className="font-medium">{state.alerts[0].safeLocation.name}</span>,{" "}
-                {state.alerts[0].safeLocation.distance_km} km away.{" "}
-                {guide?.route?.length
-                  ? "The route is on the map and the directions are below."
-                  : "Working out the safest way there…"}
+      {nav?.arrived && arrival && (
+        <p className="rounded-2xl bg-emerald-500/10 px-3 py-2 text-xs tabular-nums text-emerald-100">
+          {arrival.turnedAway > 0 ? (
+            <>{arrival.name} is full. {arrival.turnedAway} of your party could not be taken in — finding you somewhere else now.</>
+          ) : (
+            <>Checked in. {arrival.name} now holds {arrival.occupancy.toLocaleString()}
+              {arrival.capacity ? ` of ${arrival.capacity.toLocaleString()}` : ""}.</>
+          )}
+        </p>
+      )}
+
+      {guide && (
+        <div className="space-y-2.5">
+          <p className="text-sm font-medium">{guide.headline}</p>
+          {guide.shouldMove && guide.destination && (
+            <div className="space-y-1">
+              <div className="text-xs text-slate-400">
+                {guide.routeKm} km · about {guide.routeMinutes} min ·{" "}
+                {roadRoute ? "road route" : "straight-line estimate, the router was unreachable"}
+                {guide.hazardsConsidered > 0 && ` · ${guide.hazardsConsidered} hazard(s) taken into account`}
               </div>
-            )}
-            {/* Never a dead end. If the automatic route did not happen — the
-                person had already chosen somewhere, the guidance call failed,
-                they pressed stop — an advisory naming a shelter still has one
-                press between it and directions. This banner used to say
-                "working out the safest way there" and offer nothing. */}
-            {state.alerts[0].safeLocation && !navOn && (
-              <button
-                type="button"
-                className="mt-2 rounded-md bg-background/90 px-3 py-1.5 text-sm font-medium text-foreground disabled:opacity-60"
-                disabled={busy === "shelter"}
-                onClick={() => void ask("shelter")}
-              >
-                {busy === "shelter" ? "Finding the way…" : "Take me there"}
-              </button>
-            )}
-          </AlertDescription>
-        </Alert>
+              <div className="flex flex-wrap gap-2">
+                {!navOn && guide.route?.length > 1 && (
+                  <ActionButton tone="primary" onClick={() => { setNavOn(true); frameRoute(guide.route) }}>
+                    <Navigation className="size-4" /> Navigate
+                  </ActionButton>
+                )}
+                {guide.route?.length > 1 && (
+                  <ActionButton onClick={() => { setFollowing(false); frameRoute(guide.route) }}>View route</ActionButton>
+                )}
+                {(() => {
+                  const end = guide.route?.[guide.route.length - 1]
+                  return end ? (
+                    <>
+                      <ActionButton href={externalMapsUrl(end[0], end[1])}><ExternalLink className="size-4" /> Open in Maps</ActionButton>
+                      <ActionButton onClick={() => void share(guide.destination?.name ?? "Destination", [end[0], end[1]])}>
+                        <Share2 className="size-4" /> Share
+                      </ActionButton>
+                    </>
+                  ) : null
+                })()}
+              </div>
+            </div>
+          )}
+
+          {guide.shouldMove && guide.routeSteps?.length > 0 && (
+            <div className="rounded-2xl bg-white/[0.04] p-3">
+              <SectionLabel>The way there</SectionLabel>
+              <ol className="mt-1.5 space-y-1">
+                {guide.routeSteps.slice(0, 12).map((st, i) => (
+                  <li key={i} className={`flex gap-2 text-xs ${nav && nav.index === i ? "font-semibold text-white" : nav && i < nav.index ? "text-slate-500" : ""}`}>
+                    <span className="w-12 shrink-0 tabular-nums text-slate-400">
+                      {st.distanceM >= 1000 ? `${(st.distanceM / 1000).toFixed(1)} km` : `${st.distanceM} m`}
+                    </span>
+                    <span>{st.instruction}</span>
+                  </li>
+                ))}
+              </ol>
+              {guide.exposedPoints > 0 && (
+                <p className="mt-2 text-xs text-red-300">
+                  This is the least exposed way we could find, but it still
+                  passes close to {guide.exposedPoints} reported hazard(s).
+                  Turn back if the water is moving.
+                </p>
+              )}
+            </div>
+          )}
+          <ul className="space-y-1">
+            {guide.reasoning.map((r, i) => (
+              <li key={i} className="text-xs text-slate-400">• {r}</li>
+            ))}
+          </ul>
+          {guide.alternatives.length > 0 && (
+            <p className="text-xs text-slate-400">
+              Also open: {guide.alternatives.map((a) => a.name).join(", ")}
+            </p>
+          )}
+          {guide.warnings.map((w, i) => (
+            <Alert key={i} variant="destructive" className="py-2">
+              <AlertDescription className="text-xs">{w}</AlertDescription>
+            </Alert>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
+  const reportTab = (
+    <div className="space-y-2.5">
+      <div>
+        <div className="text-sm font-semibold">Tell us what you can see</div>
+        <p className="mt-0.5 text-xs text-slate-400">
+          Say it or type it, in English, Hindi or Marathi. No account needed.
+        </p>
+      </div>
+      {/* Hold to talk. One hand, no form, no dropdown. The transcript lands in
+          the box below so the person can read it before it becomes a report. */}
+      <Button
+        type="button"
+        variant={recording ? "destructive" : "secondary"}
+        className="w-full"
+        disabled={busy === "voice" || voiceOff}
+        onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
+        onPointerUp={() => { if (recording) stopRecording() }}
+        onPointerLeave={() => { if (recording) stopRecording() }}
+      >
+        {busy === "voice" ? (
+          <><Loader2 className="size-4 animate-spin" /> Listening back…</>
+        ) : recording ? (
+          <><Square className="size-4" /> Release to stop</>
+        ) : (
+          <><Mic className="size-4" /> Hold to speak</>
+        )}
+      </Button>
+      {voiceOff && (
+        <p className="text-xs text-slate-400">
+          Speaking a report is not switched on for this deployment, so type it
+          instead. Everything after the words is identical — spoken reports go
+          through the same parser and the same scoring.
+        </p>
       )}
 
-      <OfflineBar manifest="/manifest.webmanifest" />
+      {heard && (
+        <div className="space-y-1 rounded-xl border border-white/10 p-2 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge variant="outline">{heard.languageName}</Badge>
+            {heard.translated && <Badge variant="secondary">translated to English</Badge>}
+            <span className="tabular-nums text-slate-400">{heard.latencyMs} ms</span>
+          </div>
+          <div className="text-slate-400">
+            Read as <span className="text-slate-100">{heard.readAsLabel}</span>.
+            Correct the text below if that is wrong, then send.
+          </div>
+          {heard.notes.map((n, i) => (
+            <div key={i} className="italic text-slate-400">{n}</div>
+          ))}
+        </div>
+      )}
 
+      <Textarea
+        value={text}
+        onChange={(e) => { setText(e.target.value); setHeard(null) }}
+        placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
+        rows={3}
+        className="text-base"
+      />
+
+      <Button
+        type="button"
+        variant="secondary"
+        className="w-full"
+        disabled={busy === "photo"}
+        onClick={() => photoInput.current?.click()}
+        title={
+          state?.capabilities?.vision === false
+            ? "Your photo will be attached, but no model will look at it here."
+            : undefined
+        }
+      >
+        {busy === "photo" ? (
+          <><Loader2 className="size-4 animate-spin" /> Looking at the photo…</>
+        ) : (
+          <><Camera className="size-4" /> {photo ? "Change photo" : "Add a photo"}</>
+        )}
+      </Button>
+
+      {photoPreview && (
+        <div className="space-y-2 rounded-xl border border-white/10 p-2">
+          <div className="flex items-start gap-2">
+            <img src={photoPreview} alt="The photo attached to this report"
+                 className="size-20 shrink-0 rounded object-cover" />
+            <div className="min-w-0 flex-1 space-y-1 text-xs">
+              {photo?.unanalysed ? (
+                <p className="text-slate-400">
+                  Attached. Nobody has looked at it — photo analysis is not
+                  switched on here — so it counts for a little and not for much.
+                </p>
+              ) : photo ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge
+                      variant={
+                        (photo.agreement ?? 0) > 0.15 ? "default"
+                          : (photo.agreement ?? 0) < -0.15 ? "destructive" : "outline"
+                      }
+                    >
+                      {(photo.agreement ?? 0) > 0.15
+                        ? "Backs up what you wrote"
+                        : (photo.agreement ?? 0) < -0.15
+                          ? "Does not match what you wrote"
+                          : "Adds little either way"}
+                    </Badge>
+                    {photo.lifeSafetySignal && <Badge variant="destructive">People visible</Badge>}
+                    {photo.water?.depthBand && <Badge variant="outline">water {photo.water.depthBand}</Badge>}
+                  </div>
+                  {photo.hazards?.length ? (
+                    <p className="text-slate-400">Seen in the photo: {photo.hazards.join(", ")}.</p>
+                  ) : (
+                    <p className="text-slate-400">Nothing it recognises as a hazard.</p>
+                  )}
+                  {photo.imageQuality && photo.imageQuality !== "good" && (
+                    <p className="text-slate-400">The image is {photo.imageQuality}, so this counts for less.</p>
+                  )}
+                  <p className="text-slate-400">
+                    A photo can only raise or lower how much your report is
+                    believed. It never decides what happens next.
+                  </p>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <button type="button" className="text-xs text-slate-400 underline" onClick={clearPhoto}>
+            Remove photo
+          </button>
+        </div>
+      )}
+      <Button className="w-full" onClick={fileReport} disabled={busy !== null || !text.trim()}>
+        {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+        Send report
+      </Button>
+      {state && !state.inside && (
+        <p className="text-xs text-slate-400">
+          You are outside the covered area, so this will be refused until you
+          move inside it. Pressing send will say so.
+        </p>
+      )}
+      {filed?.queued ? (
+        <div className="space-y-1 rounded-xl border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+          <div className="font-medium">Saved on this phone.</div>
+          <div className="text-slate-300">
+            {String(filed.message ?? "There is no signal right now. It sends itself the moment there is.")}
+          </div>
+          <div className="text-slate-400">
+            It will be timed from now, not from when it finally sends, so
+            nothing is lost by the wait.
+          </div>
+        </div>
+      ) : filed ? (
+        <div className="space-y-1 rounded-xl border border-white/10 p-2 text-xs">
+          <div className="font-medium">{String(filed.readHow ?? "")}</div>
+          <div className="text-slate-400">{String(filed.summary ?? "")}</div>
+          {Boolean(filed.linked) && (
+            <Badge variant="outline">
+              Merged with an existing report at {((filed.linkScore as number) * 100).toFixed(0)}%
+            </Badge>
+          )}
+          {Number(filed.urgencyBoost ?? 0) > 0 && <Badge variant="destructive">Flagged urgent</Badge>}
+          {filed.photo != null && (
+            <div className="text-slate-400">Your photo was taken into account when scoring this report.</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+
+  const nearTab = (
+    <div className="space-y-3">
+      <OfflineBar manifest="/manifest.webmanifest" />
       {/* Online nothing changes. With the server out of reach, reports and
           alerts go through bitchat on this phone instead. */}
       {unreachable && (
@@ -1103,610 +1803,197 @@ export default function CitizenApp() {
           facilities={state?.facilities ?? []}
           savedRoute={(guide ?? savedGuide)?.route ?? null}
           savedDestination={(guide ?? savedGuide)?.destination?.name ?? null}
+          onViewOnMap={(at, label) => {
+            setSelectedKey(null)
+            setPinned({ lng: at[0], lat: at[1], label })
+            setFollowing(false)
+            fly({ center: at })
+            snapTo("peek")
+          }}
         />
       )}
-
-      {staleSince !== null && (
-        <Alert className="border-amber-500/40 bg-amber-500/10 py-2">
-          <AlertDescription className="text-xs">
-            This is the last map this phone managed to fetch
-            {Date.now() - staleSince > 60_000
-              ? `, about ${Math.round((Date.now() - staleSince) / 60_000)} minute(s) ago`
-              : ""}
-            . Roads close faster than that, so treat closures as the minimum
-            rather than the whole picture.
-          </AlertDescription>
-        </Alert>
+      {pinned && (
+        <PlaceRow
+          disc={<span className="size-8 shrink-0 rounded-full" style={{ background: MAP.caution, boxShadow: "0 0 0 2px #0b0f17" }} />}
+          title={pinned.label}
+          subtitle={`From the mesh · ${formatMetres(metresBetween(here, [pinned.lng, pinned.lat]))} ${compass(here, [pinned.lng, pinned.lat])}`}
+          trailing={<span onClick={(e) => { e.stopPropagation(); setPinned(null) }}>Clear</span>}
+          onClick={() => fly({ center: [pinned.lng, pinned.lat] })}
+        />
       )}
-
-      {/* The report box, above the map.
-       *
-       *  It was in the right-hand column, and on a phone that column stacks
-       *  *after* the map — so a resident had to scroll past a full-height map
-       *  they cannot read one-handed to reach a text box and a Send button.
-       *  Moving the three action buttons up fixed reaching the microphone and
-       *  not this; typing is what most people do, and it was still below the
-       *  fold. */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Tell us what you can see</CardTitle>
-          <CardDescription>
-            Say it or type it, in English, Hindi or Marathi. No account needed.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {/* Hold to talk. One hand, no form, no dropdown. The transcript
-              lands in the box below so the person can read it before it
-              becomes a report. */}
-          <Button
-            type="button"
-            variant={recording ? "destructive" : "secondary"}
-            className="w-full"
-            disabled={busy === "voice" || voiceOff}
-            onPointerDown={() => { if (!recording && !voiceOff) void startRecording() }}
-            onPointerUp={() => { if (recording) stopRecording() }}
-            onPointerLeave={() => { if (recording) stopRecording() }}
-          >
-            {busy === "voice" ? (
-              <><Loader2 className="size-4 animate-spin" /> Listening back…</>
-            ) : recording ? (
-              <><Square className="size-4" /> Release to stop</>
-            ) : (
-              <><Mic className="size-4" /> Hold to speak</>
-            )}
-          </Button>
-          {voiceOff && (
-            <p className="text-muted-foreground text-xs">
-              Speaking a report is not switched on for this deployment, so
-              type it instead. Everything after the words is identical —
-              spoken reports go through the same parser and the same
-              scoring.
-            </p>
-          )}
-
-          {heard && (
-            <div className="space-y-1 rounded border p-2 text-xs">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant="outline">{heard.languageName}</Badge>
-                {heard.translated && (
-                  <Badge variant="secondary">translated to English</Badge>
-                )}
-                <span className="text-muted-foreground tabular-nums">
-                  {heard.latencyMs} ms
-                </span>
-              </div>
-              <div className="text-muted-foreground">
-                Read as <span className="text-foreground">{heard.readAsLabel}</span>.
-                Correct the text below if that is wrong, then send.
-              </div>
-              {heard.notes.map((n, i) => (
-                <div key={i} className="text-muted-foreground italic">{n}</div>
-              ))}
-            </div>
-          )}
-
-          <Textarea
-            value={text}
-            onChange={(e) => { setText(e.target.value); setHeard(null) }}
-            placeholder="रस्त्यावर पाणी आले आहे / water on the road, cannot cross"
-            rows={3}
-            className="text-base"
-          />
-
-          {/* A photo, if there is one to take.
-              `capture="environment"` opens the rear camera straight away on
-              a phone and is ignored on a laptop, where it falls back to a
-              file picker — which is the right behaviour in both places
-              without asking which one you are on. */}
-          <input
-            ref={photoInput}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) void attachPhoto(f)
-            }}
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            className="w-full"
-            disabled={busy === "photo"}
-            onClick={() => photoInput.current?.click()}
-            title={
-              state?.capabilities?.vision === false
-                ? "Your photo will be attached, but no model will look at it here."
-                : undefined
-            }
-          >
-            {busy === "photo" ? (
-              <><Loader2 className="size-4 animate-spin" /> Looking at the photo…</>
-            ) : (
-              <><Camera className="size-4" /> {photo ? "Change photo" : "Add a photo"}</>
-            )}
-          </Button>
-
-          {photoPreview && (
-            <div className="space-y-2 rounded border p-2">
-              <div className="flex items-start gap-2">
-                <img
-                  src={photoPreview}
-                  alt="The photo attached to this report"
-                  className="size-20 shrink-0 rounded object-cover"
-                />
-                <div className="min-w-0 flex-1 space-y-1 text-xs">
-                  {photo?.unanalysed ? (
-                    <p className="text-muted-foreground">
-                      Attached. Nobody has looked at it — photo analysis is
-                      not switched on here — so it counts for a little and
-                      not for much.
-                    </p>
-                  ) : photo ? (
-                    <>
-                      {/* What the model saw, said plainly, before the
-                          report goes. The agreement number is the whole
-                          point: a photo that backs the text raises how much
-                          this report is trusted, one that contradicts it
-                          lowers it, and either way the person gets to see
-                          that and fix their wording first. */}
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge
-                          variant={
-                            (photo.agreement ?? 0) > 0.15
-                              ? "default"
-                              : (photo.agreement ?? 0) < -0.15
-                                ? "destructive"
-                                : "outline"
-                          }
-                        >
-                          {(photo.agreement ?? 0) > 0.15
-                            ? "Backs up what you wrote"
-                            : (photo.agreement ?? 0) < -0.15
-                              ? "Does not match what you wrote"
-                              : "Adds little either way"}
-                        </Badge>
-                        {photo.lifeSafetySignal && (
-                          <Badge variant="destructive">People visible</Badge>
-                        )}
-                        {photo.water?.depthBand && (
-                          <Badge variant="outline">
-                            water {photo.water.depthBand}
-                          </Badge>
-                        )}
-                      </div>
-                      {photo.hazards?.length ? (
-                        <p className="text-muted-foreground">
-                          Seen in the photo: {photo.hazards.join(", ")}.
-                        </p>
-                      ) : (
-                        <p className="text-muted-foreground">
-                          Nothing it recognises as a hazard.
-                        </p>
-                      )}
-                      {photo.imageQuality && photo.imageQuality !== "good" && (
-                        <p className="text-muted-foreground">
-                          The image is {photo.imageQuality}, so this counts
-                          for less.
-                        </p>
-                      )}
-                      <p className="text-muted-foreground">
-                        A photo can only raise or lower how much your report
-                        is believed. It never decides what happens next.
-                      </p>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="text-muted-foreground text-xs underline"
-                onClick={clearPhoto}
-              >
-                Remove photo
-              </button>
-            </div>
-          )}
-          <Button className="w-full" onClick={fileReport}
-                  disabled={busy !== null || !text.trim()}>
-            {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            Send report
-          </Button>
-          {state && !state.inside && (
-            <p className="text-muted-foreground text-xs">
-              You are outside the covered area, so this will be refused
-              until you move inside it. Pressing send will say so.
-            </p>
-          )}
-          {filed?.queued ? (
-            <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
-              <div className="font-medium">Saved on this phone.</div>
-              <div className="text-muted-foreground">
-                {String(
-                  filed.message ??
-                    "There is no signal right now. It sends itself the moment there is."
-                )}
-              </div>
-              <div className="text-muted-foreground">
-                It will be timed from now, not from when it finally sends, so
-                nothing is lost by the wait.
-              </div>
-            </div>
-          ) : filed ? (
-            <div className="space-y-1 rounded border p-2 text-xs">
-              <div className="font-medium">{String(filed.readHow ?? "")}</div>
-              <div className="text-muted-foreground">{String(filed.summary ?? "")}</div>
-              {Boolean(filed.linked) && (
-                <Badge variant="outline">
-                  Merged with an existing report at{" "}
-                  {((filed.linkScore as number) * 100).toFixed(0)}%
-                </Badge>
-              )}
-              {Number(filed.urgencyBoost ?? 0) > 0 && (
-                <Badge variant="destructive">Flagged urgent</Badge>
-              )}
-              {filed.photo != null && (
-                <div className="text-muted-foreground">
-                  Your photo was taken into account when scoring this report.
-                </div>
-              )}
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-3 lg:grid-cols-[1fr_360px]">
-        <div className="space-y-3">
-          <MapStage
-            panelTitle="Near you"
-            panel={
-              <div className="space-y-2 text-xs">
-                {(state?.incidents ?? []).slice(0, 12).map((i) => (
-                  <div key={i.id} className="rounded border border-slate-500/25 p-2">
-                    <div className="font-medium text-slate-100">{i.title}</div>
-                    <div className="text-slate-400">
-                      severity {i.severity} · {(i.distanceM / 1000).toFixed(1)} km away
-                    </div>
-                  </div>
-                ))}
-                {(state?.incidents?.length ?? 0) === 0 && (
-                  <p className="text-slate-400">Nothing reported near you.</p>
-                )}
-              </div>
-            }
-            map={(expanded) => (
-              <LiveMap
-                className={expanded ? "h-full w-full" : "h-[460px] w-full rounded-lg border"}
-                wards={[]}
-                incidents={state?.incidents ?? []}
-                resources={state?.unitsNearby?.map((u) => ({ ...u, capabilities: [] })) ?? []}
-                facilities={state?.facilities ?? []}
-                route={guide?.route}
-                routeLabel={guide?.headline}
-                blocks={state?.roadBlocks ?? []}
-                me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
-                center={[pos.lng, pos.lat]}
-                zoom={14.3}
-                followMe
-                recentreKey={recentre}
-              />
-            )}
-            footer={
-              /* The keys have always worked. They were also invisible, needed a
-                 focused window, and did nothing at all on a phone — which is
-                 the device this screen is for. Buttons, then, with the keys
-                 kept for anyone at a desk. */
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="grid w-[132px] shrink-0 grid-cols-3 gap-1">
-                  <span />
-                  <Button size="icon" variant="secondary" aria-label="Move north"
-                          className="size-10" onClick={() => nudge(0, 1)}>
-                    <ChevronUp className="size-5" />
-                  </Button>
-                  <span />
-                  <Button size="icon" variant="secondary" aria-label="Move west"
-                          className="size-10" onClick={() => nudge(-1, 0)}>
-                    <ChevronLeft className="size-5" />
-                  </Button>
-                  <Button size="icon" variant="outline" aria-label="Recentre on me"
-                          className="size-10"
-                          onClick={() => setRecentre((n) => n + 1)}>
-                    <Navigation className="size-4" />
-                  </Button>
-                  <Button size="icon" variant="secondary" aria-label="Move east"
-                          className="size-10" onClick={() => nudge(1, 0)}>
-                    <ChevronRight className="size-5" />
-                  </Button>
-                  <span />
-                  <Button size="icon" variant="secondary" aria-label="Move south"
-                          className="size-10" onClick={() => nudge(0, -1)}>
-                    <ChevronDown className="size-5" />
-                  </Button>
-                  <span />
-                </div>
-                <p className="text-muted-foreground min-w-[220px] flex-1 text-xs">
-                  These buttons, or WASD and the arrow keys, move you. The green
-                  line is the route the agent recommends, on real streets, chosen
-                  against every hazard that has been reported rather than for
-                  being shortest. Open the legend for what the colours mean.
-                </p>
-              </div>
-            }
-          />
+      <SectionLabel>
+        {filter === "all" ? "Near you" : `${filterDef.label} near you`}
+        {sorted.length > 0 ? ` · ${sorted.length}` : ""}
+      </SectionLabel>
+      {sorted.length === 0 ? (
+        <p className="text-xs text-slate-400">
+          {state ? "Nothing reported near you." : "Waiting for the first map from the server…"}
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {sorted.slice(0, 40).map(({ item, d }) => (
+            <PlaceRow
+              key={item.key}
+              active={item.key === selectedKey}
+              disc={<ItemDisc item={item} />}
+              title={item.title}
+              subtitle={`${kindLabel(item)}${item.status ? ` · ${words(item.status)}` : ""}`}
+              trailing={`${formatMetres(d)} ${compass(here, item.location)}`}
+              onClick={() => select(item)}
+            />
+          ))}
         </div>
-
-        <div className="space-y-3">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Compass className="size-4" /> Where should I go?
-              </CardTitle>
-              <CardDescription>
-                Decided from what has room, what is near an open incident, and
-                which roads crews have reported blocked.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("safety")}>
-                  {busy === "safety" ? <Loader2 className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
-                  Am I safe?
-                </Button>
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("shelter")}>
-                  <Navigation className="size-3.5" /> Nearest shelter
-                </Button>
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("hospital", text || undefined)}>
-                  <Hospital className="size-3.5" /> Hospital
-                </Button>
-                {/* PS20's first sentence is food, medical supplies and shelter.
-                    A resident could be told where to shelter and never where to
-                    eat, which is most of a relief operation missing. Each of
-                    these excludes places that have run the line out rather than
-                    ranking them low: queueing for food that is not there is
-                    worse than walking further. */}
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("food")}>
-                  {busy === "food" ? <Loader2 className="size-3.5 animate-spin" /> : <Utensils className="size-3.5" />}
-                  Food
-                </Button>
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("water")}>
-                  {busy === "water" ? <Loader2 className="size-3.5 animate-spin" /> : <Droplets className="size-3.5" />}
-                  Drinking water
-                </Button>
-                <Button size="sm" variant="secondary" disabled={busy !== null}
-                        onClick={() => ask("medical_supplies")}>
-                  {busy === "medical_supplies" ? <Loader2 className="size-3.5 animate-spin" /> : <Pill className="size-3.5" />}
-                  Medicine
-                </Button>
-              </div>
-
-              {/* Turn by turn, as you move.
-                  The static list is still below, because a person wants to see
-                  the whole way before they set off. This is the one instruction
-                  that is true right now, in the size you can read while
-                  walking, and it changes as the position does. */}
-              {nav && (
-                <div className="space-y-2 rounded-lg border-2 border-emerald-500/50 bg-emerald-500/5 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <Badge variant="secondary" className="gap-1">
-                      <Navigation className="size-3" /> Navigating
-                    </Badge>
-                    <button type="button" className="text-muted-foreground text-xs underline"
-                            onClick={() => { setNavOn(false); setAdvice(null) }}>
-                      Stop
-                    </button>
-                  </div>
-
-                  {nav.arrived ? (
-                    <>
-                      <p className="text-base font-semibold">
-                        You have arrived at {guide?.destination?.name ?? "your destination"}.
-                      </p>
-                      {/* What the building now knows, said back to the person
-                          who changed it. Somebody who has just walked two
-                          kilometres in the rain deserves confirmation that it
-                          counted, and the control room is reading the same
-                          number at the same moment. */}
-                      {arrival && (
-                        <p className="text-muted-foreground text-xs tabular-nums">
-                          {arrival.turnedAway > 0 ? (
-                            <>
-                              {arrival.name} is full. {arrival.turnedAway} of your
-                              party could not be taken in — finding you somewhere
-                              else now.
-                            </>
-                          ) : (
-                            <>
-                              Checked in. {arrival.name} now holds{" "}
-                              {arrival.occupancy.toLocaleString()}
-                              {arrival.capacity
-                                ? ` of ${arrival.capacity.toLocaleString()}`
-                                : ""}
-                              .
-                            </>
-                          )}
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {/* Asked before arrival, not after, because at the door
-                          nobody is looking at a phone. One phone is usually a
-                          family and a shelter counting handsets rather than
-                          heads runs out sooner than its own figures say. */}
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-muted-foreground">People with you</span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            className="size-6 rounded border tabular-nums disabled:opacity-40"
-                            disabled={partySize <= 1}
-                            onClick={() => setPartySize((n) => Math.max(1, n - 1))}
-                            aria-label="One fewer"
-                          >
-                            −
-                          </button>
-                          <span className="w-6 text-center tabular-nums">{partySize}</span>
-                          <button
-                            type="button"
-                            className="size-6 rounded border tabular-nums disabled:opacity-40"
-                            disabled={partySize >= 20}
-                            onClick={() => setPartySize((n) => Math.min(20, n + 1))}
-                            aria-label="One more"
-                          >
-                            +
-                          </button>
-                        </div>
-                      </div>
-                      <div className="text-2xl font-semibold tabular-nums leading-tight">
-                        {readable(nav.toNextM)}
-                      </div>
-                      <p className="text-base leading-snug">{nav.step.instruction}</p>
-                      {nav.next && (
-                        <p className="text-muted-foreground text-xs">
-                          Then: {nav.next.instruction}
-                        </p>
-                      )}
-                      <p className="text-muted-foreground text-xs tabular-nums">
-                        {readable(nav.remainingM)} left · {nav.remaining} turn(s) to go
-                      </p>
-                    </>
-                  )}
-
-                  {/* Being off the line is not a failure, but it does mean the
-                      instruction above is about a street you are not on. */}
-                  {/* The route redrew itself. Said out loud, because a line
-                      that moves on its own otherwise reads as a glitch and
-                      somebody may keep following the one they memorised. */}
-                  {rerouted && !nav.arrived && (
-                    <Alert className="py-2">
-                      <AlertDescription className="text-xs">{rerouted}</AlertDescription>
-                    </Alert>
-                  )}
-
-                  {/* They asked something while walking and the answer was
-                      "stay put". Worth saying, not worth their directions. */}
-                  {advice && !nav.arrived && (
-                    <Alert className="py-2">
-                      <AlertDescription className="text-xs">
-                        {advice} Your route to{" "}
-                        {guide?.destination?.name ?? "the destination"} is still
-                        on screen.
-                      </AlertDescription>
-                    </Alert>
-                  )}
-
-                  {/* Being off the line is not a failure, but it does mean the
-                      instruction above is about a street you are not on. Hidden
-                      while the automatic re-solve is handling it, so the screen
-                      never asks for something it is already doing. */}
-                  {nav.strayed && !nav.arrived && !rerouted && (
-                    <Alert variant="destructive" className="py-2">
-                      <AlertDescription className="text-xs">
-                        You are about {readable(nav.offBy)} off this route.
-                        Redrawing it from where you are now.
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                </div>
-              )}
-
-              {guide && (
-                <div className="space-y-2 rounded border p-2">
-                  <p className="text-sm font-medium">{guide.headline}</p>
-                  {guide.shouldMove && guide.destination && (
-                    <div className="text-muted-foreground text-xs">
-                      {guide.routeKm} km · about {guide.routeMinutes} min ·{" "}
-                      {guide.routeEngine === "mapbox" || guide.routeEngine === "osrm"
-                        ? "road route"
-                        : "straight-line estimate, the router was unreachable"}
-                      {guide.hazardsConsidered > 0 &&
-                        ` · ${guide.hazardsConsidered} hazard(s) taken into account`}
-                    </div>
-                  )}
-
-                  {guide.shouldMove && guide.routeSteps?.length > 0 && (
-                    <div className="rounded border p-2">
-                      <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">
-                        The way there
-                      </div>
-                      <ol className="space-y-1">
-                        {guide.routeSteps.slice(0, 8).map((st, i) => (
-                          <li key={i} className="flex gap-2 text-xs">
-                            <span className="text-muted-foreground w-12 shrink-0 tabular-nums">
-                              {st.distanceM >= 1000
-                                ? `${(st.distanceM / 1000).toFixed(1)} km`
-                                : `${st.distanceM} m`}
-                            </span>
-                            <span>{st.instruction}</span>
-                          </li>
-                        ))}
-                      </ol>
-                      {guide.exposedPoints > 0 && (
-                        <p className="text-destructive mt-2 text-xs">
-                          This is the least exposed way we could find, but it still
-                          passes close to {guide.exposedPoints} reported hazard(s).
-                          Turn back if the water is moving.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  <ul className="space-y-1">
-                    {guide.reasoning.map((r, i) => (
-                      <li key={i} className="text-muted-foreground text-xs">• {r}</li>
-                    ))}
-                  </ul>
-                  {guide.alternatives.length > 0 && (
-                    <p className="text-muted-foreground text-xs">
-                      Also open: {guide.alternatives.map((a) => a.name).join(", ")}
-                    </p>
-                  )}
-                  {guide.warnings.map((w, i) => (
-                    <Alert key={i} variant="destructive" className="py-2">
-                      <AlertDescription className="text-xs">{w}</AlertDescription>
-                    </Alert>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-
-          {/* The resident account, on the resident's screen. Nothing here
-              requires an account, so this is for the person being handed a
-              tablet who wants the signed-in version with a report history. */}
-          <DemoCredentials
-            portal="citizen"
-            title="Demo resident sign-in (optional)"
-          />
-
-          {state?.risk && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Why this area is rated as it is</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-1">
-                {state.risk.drivers.slice(0, 4).map((d, i) => (
-                  <div key={i} className="text-xs">
-                    <span className="font-medium">{d.label}</span>{" "}
-                    <span className="text-muted-foreground">
-                      {(d.contribution * 100).toFixed(0)}% — {d.detail}
-                    </span>
-                  </div>
-                ))}
-                <p className="text-muted-foreground pt-1 text-xs">
-                  About {state.risk.leadTimeHours}h of lead time.
-                </p>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-      </div>
+      )}
     </div>
   )
+
+  const areaTab = (
+    <div className="space-y-4">
+      {state?.risk && (
+        <div className="space-y-1.5">
+          <div className="text-sm font-semibold">Why this area is rated as it is</div>
+          {state.risk.drivers.slice(0, 4).map((d, i) => (
+            <div key={i} className="text-xs">
+              <span className="font-medium">{d.label}</span>{" "}
+              <span className="text-slate-400">{(d.contribution * 100).toFixed(0)}% — {d.detail}</span>
+            </div>
+          ))}
+          <p className="pt-1 text-xs text-slate-400">About {state.risk.leadTimeHours}h of lead time.</p>
+        </div>
+      )}
+      <div className="space-y-2">
+        <SectionLabel>Move (demo)</SectionLabel>
+        {/* The keys have always worked; these are for a phone, where there are none. */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="grid w-[132px] shrink-0 grid-cols-3 gap-1">
+            <span />
+            <Button size="icon" variant="secondary" aria-label="Move north" className="size-10" onClick={() => nudge(0, 1)}>
+              <ChevronUp className="size-5" />
+            </Button>
+            <span />
+            <Button size="icon" variant="secondary" aria-label="Move west" className="size-10" onClick={() => nudge(-1, 0)}>
+              <ChevronLeft className="size-5" />
+            </Button>
+            <Button size="icon" variant="outline" aria-label="Recentre on me" className="size-10"
+                    onClick={() => { setFollowing(true); setRecentre((n) => n + 1) }}>
+              <Navigation className="size-4" />
+            </Button>
+            <Button size="icon" variant="secondary" aria-label="Move east" className="size-10" onClick={() => nudge(1, 0)}>
+              <ChevronRight className="size-5" />
+            </Button>
+            <span />
+            <Button size="icon" variant="secondary" aria-label="Move south" className="size-10" onClick={() => nudge(0, -1)}>
+              <ChevronDown className="size-5" />
+            </Button>
+            <span />
+          </div>
+          <p className="min-w-[180px] flex-1 text-xs text-slate-400">
+            These buttons, or WASD and the arrow keys, move you. The route the
+            agent recommends is chosen against every hazard that has been
+            reported rather than for being shortest.
+          </p>
+        </div>
+      </div>
+      {/* The resident account, on the resident's screen. Nothing here requires
+          an account, so this is for the person handed a tablet who wants the
+          signed-in version with a report history. */}
+      <DemoCredentials portal="citizen" title="Demo resident sign-in (optional)" />
+      <a href="/login" className="block text-xs text-slate-400 underline">Sign in</a>
+    </div>
+  )
+
+  const body = (
+    <div className="space-y-4 pb-2 pt-1">
+      {selectedDetails}
+      {notices}
+      <ChoicePills
+        value={tab}
+        onChange={setTab}
+        options={[
+          { id: "near", label: "Nearby" },
+          { id: "go", label: navOn ? "Directions" : "Go" },
+          { id: "report", label: "Report" },
+          { id: "area", label: "Area" },
+        ]}
+      />
+      {tab === "near" ? nearTab : tab === "go" ? goTab : tab === "report" ? reportTab : areaTab}
+    </div>
+  )
+
+  const selection = selected
+    ? { lng: selected.location[0], lat: selected.location[1], colour: selected.colour }
+    : pinned
+      ? { lng: pinned.lng, lat: pinned.lat, colour: MAP.caution }
+      : null
+
+  const show = <T extends { id: string }>(kind: MapItem["kind"], list: T[] | undefined) =>
+    (list ?? []).filter((x) => visible.has(`${kind}:${x.id}`))
+
+  return (
+    <MapExperience
+      top={top}
+      banner={banner}
+      controls={controls}
+      peek={peek}
+      body={body}
+      snapRequest={snapRequest}
+      panelTitle={
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-base font-semibold">Indradhanu</div>
+            <div className="text-xs text-slate-400">Report what you can see, and find out where to go.</div>
+          </div>
+          <a href="/login" className="text-xs text-slate-400 underline">Sign in</a>
+        </div>
+      }
+      map={(padding) => (
+        <LiveMap
+          className="h-full w-full"
+          basemap="night"
+          lightPreset={lightPreset}
+          markers="badge"
+          cluster
+          pulseCritical
+          hoverCards={canHover}
+          wards={[]}
+          incidents={show("incident", state?.incidents)}
+          resources={show("unit", state?.unitsNearby).map((u) => ({ ...u, capabilities: [] }))}
+          facilities={show("facility", state?.facilities)}
+          blocks={show("block", state?.roadBlocks)}
+          route={guide?.route}
+          routeLabel={guide?.headline}
+          routeStatus={routeStatus}
+          routeProgress={navOn && nav && nav.totalM > 0 ? nav.travelledM / nav.totalM : 0}
+          me={{ lng: pos.lng, lat: pos.lat, label: "You" }}
+          center={[pos.lng, pos.lat]}
+          zoom={14.3}
+          followMe={following}
+          recentreKey={recentre}
+          onUserMove={() => setFollowing(false)}
+          onSelect={onMapSelect}
+          selection={selection}
+          camera={camera}
+          padding={padding}
+        />
+      )}
+    />
+  )
 }
+
+/** The citizen map's filters. Each is a real kind of thing on this map, and a
+ *  filter with nothing in it is not offered. */
+const CITIZEN_FILTERS: { id: string; label: string; colour?: string; match: (i: MapItem) => boolean }[] = [
+  { id: "all", label: "All", match: () => true },
+  { id: "critical", label: "Critical", colour: MAP.critical, match: (i) => i.critical },
+  { id: "incidents", label: "Incidents", colour: MAP.sev4, match: (i) => i.kind === "incident" },
+  {
+    id: "medical", label: "Medical", colour: MAP.medical,
+    match: (i) => (i.kind === "facility" && placeGroupOf(i.sub) === "medical") ||
+      (i.kind === "unit" && serviceOf(i.sub) === "medical"),
+  },
+  { id: "shelter", label: "Shelter & relief", colour: MAP.shelter, match: (i) => i.kind === "facility" && placeGroupOf(i.sub) === "shelter" },
+  { id: "fire", label: "Fire", colour: MAP.fire, match: (i) => i.kind === "unit" && serviceOf(i.sub) === "fire" },
+  { id: "rescue", label: "Rescue", colour: MAP.rescue, match: (i) => i.kind === "unit" && serviceOf(i.sub) === "rescue" },
+  { id: "units", label: "All responders", colour: MAP.logistics, match: (i) => i.kind === "unit" },
+  { id: "blocks", label: "Road blocks", colour: MAP.block, match: (i) => i.kind === "block" },
+]

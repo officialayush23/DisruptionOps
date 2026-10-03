@@ -24,7 +24,7 @@ type Facility = { id: string; name: string; kind: string; location: [number, num
  *     heading, not a route, because no street router is reachable.
  */
 export function MeshPanel({
-  pos, text, onSent, facilities, savedRoute, savedDestination,
+  pos, text, onSent, facilities, savedRoute, savedDestination, onViewOnMap,
 }: {
   pos: Point
   text: string
@@ -32,6 +32,8 @@ export function MeshPanel({
   facilities: Facility[]
   savedRoute: number[][] | null
   savedDestination: string | null
+  /** Focus the map on a notice that carries a position. */
+  onViewOnMap?: (at: [number, number], label: string) => void
 }) {
   const [status, setStatus] = useState<MeshStatus | null>(null)
   const [notices, setNotices] = useState<MeshNotice[]>([])
@@ -188,6 +190,18 @@ export function MeshPanel({
                   <span className="text-muted-foreground">
                     {" "}· {n.distanceM >= 1000 ? `${(n.distanceM / 1000).toFixed(1)} km` : `${n.distanceM} m`} away
                   </span>
+                )}
+                {onViewOnMap && n.lat !== undefined && n.lng !== undefined && (
+                  <button
+                    type="button"
+                    className="ml-1.5 text-sky-600 underline underline-offset-2 dark:text-sky-400"
+                    onClick={() => onViewOnMap(
+                      [n.lng!, n.lat!],
+                      n.kind === "block" ? "Road closed (mesh)" : n.kind === "alert" ? "Alert area (mesh)" : "Mesh notice",
+                    )}
+                  >
+                    View on map
+                  </button>
                 )}
               </span>
             </li>

@@ -304,6 +304,17 @@ export const TINTS = [
 export const imageName = (icon: string, colour: string) =>
   `${icon}|${colour}`
 
+/** The round marker: the same glyph, in a disc centred on the coordinate.
+ *
+ *  This is the marker system the citizen and crew maps share with the BiChat
+ *  Android map: a filled disc in the colour that carries the meaning, a dark
+ *  keyline that separates it from any basemap, and the glyph in white. It is
+ *  smaller than the pin and has no tip, so it must be drawn with
+ *  `icon-anchor: "center"`. Built on demand through `styleimagemissing`, like
+ *  every non-default tint. */
+export const badgeName = (icon: string, colour: string) =>
+  imageName(`bd/${icon}`, colour)
+
 /** How large each pin is rasterised, and the ratio Mapbox is told to divide by.
  *
  *  96×128 at `pixelRatio: 4` is a 24×32 pt pin that stays crisp on a retina
@@ -313,6 +324,18 @@ export const imageName = (icon: string, colour: string) =>
 const PIN_W = 96
 const PIN_H = 128
 const PIN_RATIO = 4
+
+/** Badges are 28 pt across, rasterised at 3x like the pins are at 4x. */
+const BADGE_PX = 84
+const BADGE_RATIO = 3
+
+const wrapBadge = (body: Svg): Svg =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28">${body}</svg>`
+
+const badge = (c: string, glyph: Svg) =>
+  `<circle cx="14" cy="14" r="13.4" fill="#0b0f17" opacity=".92"/>` +
+  `<circle cx="14" cy="14" r="11.4" fill="${c}"/>` +
+  `<g transform="translate(14 14) scale(.62) translate(-12 -12)">${glyph}</g>`
 
 /** Rasterise one SVG at 4× and hand Mapbox an ImageBitmap.
  *
@@ -371,10 +394,14 @@ function build(key: string): Promise<ImageBitmap | null> {
   if (hit) return Promise.resolve(hit)
   const inflight = PENDING.get(key)
   if (inflight) return inflight
-  const [name, colour] = key.split("|")
+  const [rawName, colour] = key.split("|")
+  const isBadge = rawName.startsWith("bd/")
+  const name = isBadge ? rawName.slice(3) : rawName
   const spec = ICONS[name as keyof typeof ICONS]
   if (!spec || !colour) return Promise.resolve(null)
-  const job = raster(wrap(pin(colour, spec[0])))
+  const job = (isBadge
+    ? raster(wrapBadge(badge(colour, spec[0])), BADGE_PX, BADGE_PX)
+    : raster(wrap(pin(colour, spec[0]))))
     .then((bitmap) => {
       READY.set(key, bitmap)
       return bitmap
@@ -389,14 +416,15 @@ function build(key: string): Promise<ImageBitmap | null> {
  *  already built (no warning, no pop-in), otherwise build it and add it. */
 export function provideIcon(map: MapLike, key: string): void {
   if (map.hasImage(key)) return
+  const ratio = key.startsWith("bd/") ? BADGE_RATIO : PIN_RATIO
   const hit = READY.get(key)
   if (hit) {
-    map.addImage(key, hit, { pixelRatio: PIN_RATIO })
+    map.addImage(key, hit, { pixelRatio: ratio })
     return
   }
   void build(key).then((bitmap) => {
     if (bitmap && !map.hasImage(key)) {
-      map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
+      map.addImage(key, bitmap, { pixelRatio: ratio })
       map.triggerRepaint?.()
     }
   })
@@ -410,6 +438,8 @@ export async function registerIcons(map: MapLike): Promise<void> {
   for (const key of READY.keys()) if (!keys.includes(key)) keys.push(key)
   await Promise.all(keys.map(async (key) => {
     const bitmap = await build(key)
-    if (bitmap && !map.hasImage(key)) map.addImage(key, bitmap, { pixelRatio: PIN_RATIO })
+    if (bitmap && !map.hasImage(key)) {
+      map.addImage(key, bitmap, { pixelRatio: key.startsWith("bd/") ? BADGE_RATIO : PIN_RATIO })
+    }
   }))
 }
