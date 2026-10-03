@@ -764,6 +764,11 @@ export default function CitizenApp() {
       )
       return
     }
+    setError(null)
+    setFiled(null)
+    // A photo still being read is sent as attached-but-unread rather than
+    // holding the report back for it.
+    const photoPending = busy === "photo"
     setBusy("report")
     try {
       const r = await request<Record<string, unknown>>("/citizen/report", {
@@ -775,7 +780,7 @@ export default function CitizenApp() {
           // A photo nobody could look at is still a photo. The trust model
           // scores "attached an image" separately from "the image agreed", so
           // saying so is worth a little rather than nothing.
-          photoUrl: photo?.unanalysed ? "device://photo" : undefined,
+          photoUrl: photo?.unanalysed || photoPending ? "device://photo" : undefined,
         },
       })
       setFiled(r)
@@ -1507,7 +1512,7 @@ export default function CitizenApp() {
           <AlertDescription className="text-xs">{state.note}</AlertDescription>
         </Alert>
       )}
-      {error && (
+      {error && tab !== "report" && (
         <Alert variant="destructive"><AlertDescription className="text-xs">{error}</AlertDescription></Alert>
       )}
       {/* Nothing answered. Said plainly, with the address it tried, because the
@@ -1857,10 +1862,26 @@ export default function CitizenApp() {
           </button>
         </div>
       )}
-      <Button className="w-full" onClick={fileReport} disabled={busy !== null || !text.trim()}>
+      {/* Only its own send (or a recording being read back) holds this button.
+          A photo still being analysed or a route being worked out used to keep
+          it disabled for up to two minutes, which looked like "send does
+          nothing". A report sent before its photo is read counts the photo as
+          attached but unread. */}
+      <Button className="w-full" onClick={fileReport}
+              disabled={busy === "report" || busy === "voice" || !text.trim()}>
         {busy === "report" ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-        Send report
+        {busy === "report" ? "Sending…" : "Send report"}
       </Button>
+      {!text.trim() && (
+        <p className="text-xs text-slate-400">Type what you see, or hold to speak, then send.</p>
+      )}
+      {/* The answer belongs next to the button that asked. Errors used to show
+          only at the top of the sheet, out of sight on a phone. */}
+      {error && (
+        <Alert variant="destructive" role="alert">
+          <AlertDescription className="text-xs">{error}</AlertDescription>
+        </Alert>
+      )}
       {state && !state.inside && (
         <p className="text-xs text-slate-400">
           You are outside the covered area, so this will be refused until you
@@ -1879,7 +1900,8 @@ export default function CitizenApp() {
           </div>
         </div>
       ) : filed ? (
-        <div className="space-y-1 rounded-xl border border-white/10 p-2 text-xs">
+        <div className="space-y-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs" role="status">
+          <div className="font-semibold text-emerald-300">Report sent to the command centre.</div>
           <div className="font-medium">{String(filed.readHow ?? "")}</div>
           <div className="text-slate-400">{String(filed.summary ?? "")}</div>
           {Boolean(filed.linked) && (
