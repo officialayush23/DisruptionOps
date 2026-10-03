@@ -756,14 +756,8 @@ export default function CitizenApp() {
       )
       return
     }
-    if (!state.inside) {
-      setError(
-        state.note ||
-        "You are outside the area this deployment covers, so there is no ward " +
-        "to file this against. Move the marker into the city, or call 112."
-      )
-      return
-    }
+    // Outside the covered area is not a refusal any more: the server files the
+    // report against the nearest covered ward and says so in the receipt.
     setError(null)
     setFiled(null)
     // A photo still being read is sent as attached-but-unread rather than
@@ -1884,8 +1878,8 @@ export default function CitizenApp() {
       )}
       {state && !state.inside && (
         <p className="text-xs text-slate-400">
-          You are outside the covered area, so this will be refused until you
-          move inside it. Pressing send will say so.
+          You are outside the covered area. Your report will go to the nearest
+          covered ward{state.ward ? `, ${state.ward.name}` : ""}.
         </p>
       )}
       {filed?.queued ? (
@@ -1902,6 +1896,7 @@ export default function CitizenApp() {
       ) : filed ? (
         <div className="space-y-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs" role="status">
           <div className="font-semibold text-emerald-300">Report sent to the command centre.</div>
+          {filed.filedNote ? <div className="text-slate-300">{String(filed.filedNote)}</div> : null}
           <div className="font-medium">{String(filed.readHow ?? "")}</div>
           <div className="text-slate-400">{String(filed.summary ?? "")}</div>
           {Boolean(filed.linked) && (

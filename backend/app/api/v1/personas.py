@@ -41,6 +41,32 @@ from app.world import events as ev
 log = get_logger(__name__)
 router = APIRouter(tags=["personas"])
 
+def _nearest_ward_or_refuse(loc) -> None:
+    """Reports from outside every ward go to the nearest covered ward.
+
+    A person a few kilometres past the boundary is still reporting something the
+    nearest ward's officers need to hear about; refusing it helped nobody. Only a
+    deployment with no wards at all refuses.
+    """
+    if loc.ward is None:
+        raise BadRequest(loc.note or "No wards are configured for this deployment yet.")
+
+
+def _filed_to(loc) -> dict:
+    """Where the report was filed, said plainly when that was not where the person is."""
+    return {
+        "wardId": loc.ward.id,
+        "wardName": loc.ward.name,
+        "outsideArea": not loc.inside,
+        "distanceKm": loc.distance_km,
+        "filedNote": (
+            None if loc.inside else
+            f"You are about {loc.distance_km:g} km outside the covered area, so this was "
+            f"sent to the nearest covered ward, {loc.ward.name}."
+        ),
+    }
+
+
 # Camera and VLM detections are for the command centre. An incident that only
 # cameras have reported stays off the resident and crew views until an operator
 # confirms it (any status past 'reported') or a person reports it too. Used as
@@ -153,11 +179,7 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
     so the person can correct it.
     """
     loc = await q.locate_ward(body.lng, body.lat, body.city_id)
-    if loc.ward is None or not loc.inside:
-        raise BadRequest(
-            loc.note or "You are outside the area this deployment covers, so "
-            "there is no ward to file this against."
-        )
+    _nearest_ward_or_refuse(loc)
 
     parsed = (
         parse.Parsed(category=body.category, confidence=1.0, method="chosen", note=body.text)
@@ -220,8 +242,7 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         "incidentId": result.incident_id,
         "createdIncident": result.created_incident,
         "linked": result.linked,
-        "wardId": loc.ward.id,
-        "wardName": loc.ward.name,
+        **_filed_to(loc),
         "readAs": parsed.category,
         "readAsLabel": (taxonomy.categories[parsed.category].display_name
                         if parsed.category in taxonomy.categories else parsed.category),
@@ -383,11 +404,7 @@ async def citizen_voice_report(
         return payload
 
     loc = await q.locate_ward(body.lng, body.lat, body.city_id)
-    if loc.ward is None or not loc.inside:
-        raise BadRequest(
-            loc.note or "You are outside the area this deployment covers, so "
-            "there is no ward to file this against."
-        )
+    _nearest_ward_or_refuse(loc)
 
     try:
         result = await intake.receive(
@@ -429,8 +446,7 @@ async def citizen_voice_report(
         "incidentId": result.incident_id,
         "createdIncident": result.created_incident,
         "linked": result.linked,
-        "wardId": loc.ward.id,
-        "wardName": loc.ward.name,
+        **_filed_to(loc),
         "trust": result.trust.score,
         "trustStatus": result.trust.status,
         "trustReasons": result.trust.reasons,
@@ -1039,10 +1055,7 @@ async def field_report(body: FieldHazardIn, principal: CurrentPrincipal) -> dict
     who sent them.
     """
     loc = await q.locate_ward(body.lng, body.lat, body.city_id)
-    if loc.ward is None or not loc.inside:
-        raise BadRequest(
-            loc.note or "That position is outside the area this deployment covers."
-        )
+    _nearest_ward_or_refuse(loc)
 
     parsed = (
         parse.Parsed(category=body.category, confidence=1.0, method="chosen", note=body.text)
@@ -1092,8 +1105,7 @@ async def field_report(body: FieldHazardIn, principal: CurrentPrincipal) -> dict
         "incidentId": result.incident_id,
         "createdIncident": result.created_incident,
         "linked": result.linked,
-        "wardId": loc.ward.id,
-        "wardName": loc.ward.name,
+        **_filed_to(loc),
         "readAs": parsed.category,
         "readAsLabel": (taxonomy.categories[parsed.category].display_name
                         if parsed.category in taxonomy.categories else parsed.category),
