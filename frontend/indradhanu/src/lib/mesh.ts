@@ -18,11 +18,27 @@
  *  The API scores unsigned packets lower and never lets one dispatch on its own.
  */
 
+import { nativeMesh } from "./native"
+
 export const BITCHAT = "http://127.0.0.1:8765"
 
 type LocalInit = RequestInit & { targetAddressSpace?: "local" | "private" }
 
 async function local<T>(path: string, init: LocalInit = {}, timeoutMs = 2500): Promise<T> {
+  // Inside the BiChat phone app the mesh is one call away, no loopback HTTP needed.
+  const native = nativeMesh()
+  if (native) {
+    if (path === "/status") return native.status() as T
+    if (path === "/send/text") {
+      const { text } = JSON.parse(String(init.body ?? "{}")) as { text?: string }
+      if (!text || !native.send(text)) throw new Error("BiChat did not accept the message")
+      return { ok: true } as T
+    }
+    if (path.startsWith("/inbox")) {
+      const since = Number(new URLSearchParams(path.split("?")[1] ?? "").get("since") ?? 0)
+      return native.inbox(since) as T
+    }
+  }
   const ctl = new AbortController()
   const t = setTimeout(() => ctl.abort(), timeoutMs)
   try {

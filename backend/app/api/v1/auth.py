@@ -18,6 +18,7 @@ from pydantic import Field
 
 from fastapi import APIRouter
 
+from app.core.config import settings
 from app.core.security import STAFF, CurrentPrincipal, Role
 from app.schemas.domain import Camel
 
@@ -66,4 +67,39 @@ async def me(principal: CurrentPrincipal) -> Me:
         can_escalate=principal.can_escalate,
         interfaces=_interfaces(principal.role),
         development_identity=principal.user_id is None and principal.role is not Role.CITIZEN,
+    )
+
+
+class ClientConfig(Camel):
+    supabase_url: str
+    #: The publishable key. Public by design (row level security does the work), and the
+    #: same value the PWA ships in its bundle.
+    supabase_anon_key: str
+    #: Where the PWA lives, so a phone can open it in online mode. Empty when unknown.
+    app_url: str
+    sign_in_available: bool
+
+
+def _app_url() -> str:
+    if settings.public_app_url:
+        return settings.public_app_url.rstrip("/")
+    for origin in settings.cors_origin_list:
+        if "localhost" not in origin and "127.0.0.1" not in origin:
+            return origin.rstrip("/")
+    return ""
+
+
+@router.get("/auth/client-config", response_model=ClientConfig)
+async def client_config() -> ClientConfig:
+    """What a native client needs to sign in with the same accounts as the PWA.
+
+    The phone app is configured with one address, the command centre's. Everything else
+    it needs to sign a person in (which Supabase project, its public key, where the web
+    app is) comes from here, so it never drifts from what the PWA uses.
+    """
+    return ClientConfig(
+        supabase_url=settings.supabase_url.rstrip("/"),
+        supabase_anon_key=settings.supabase_anon_public_key,
+        app_url=_app_url(),
+        sign_in_available=bool(settings.supabase_url and settings.supabase_anon_public_key),
     )

@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react"
 import type { Session } from "@supabase/supabase-js"
+import { nativeSession, notifySignedOut } from "@/lib/native"
 import { supabase, supabaseConfigured } from "@/lib/supabase"
 import { fetchMe, type Me } from "@/api/httpClient"
 
@@ -103,6 +104,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     supabase.auth.getSession().then(async ({ data }) => {
       if (!alive) return
+      // Inside the BiChat phone app, the person already signed in on the phone:
+      // adopt that session rather than asking for the password a second time.
+      const phone = nativeSession()
+      if (phone && phone.email !== data.session?.user?.email) {
+        const { data: adopted } = await supabase.auth.setSession({
+          access_token: phone.accessToken, refresh_token: phone.refreshToken,
+        })
+        if (!alive) return
+        if (adopted.session) {
+          setSession(adopted.session)
+          await refresh()
+          if (alive) setLoading(false)
+          return
+        }
+      }
       setSession(data.session)
       await refresh()
       if (alive) setLoading(false)
@@ -168,6 +184,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     if (supabaseConfigured) await supabase.auth.signOut()
+    notifySignedOut()
     setSession(null)
     setMe(ANONYMOUS)
     setEntitlementUnavailable(false)

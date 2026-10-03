@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
+import { inBiChat, switchToMesh } from "@/lib/native"
 import {
   AlertTriangle, ArrowLeft, Crosshair, Layers, LocateFixed, Minus, Navigation2, Plus,
   SlidersHorizontal, X,
@@ -245,6 +246,16 @@ export function ConnectivityPill({
     <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-400" role="status">
       <span className="inline-flex size-2 shrink-0 rounded-full" style={{ background: dot }} />
       <span className="truncate">{text}</span>
+      {inBiChat() && (
+        // Inside the BiChat phone app: hand over to the offline mesh screens on request.
+        <button
+          type="button"
+          onClick={switchToMesh}
+          className="-my-2 shrink-0 cursor-pointer rounded-full px-2 py-2 font-medium text-sky-300 transition-colors duration-200 hover:text-sky-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400"
+        >
+          Use mesh
+        </button>
+      )}
     </span>
   )
 }

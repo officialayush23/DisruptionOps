@@ -28,6 +28,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { DemoCredentials } from "@/auth/DemoCredentials"
 import { useLiveSync, pollInterval } from "@/hooks/useLiveSync"
 import { REPORT_STATUS, trustWords } from "@/lib/plain"
+import { inBiChat, saveHandoff } from "@/lib/native"
 
 /** The crew's interface.
  *
@@ -326,6 +327,28 @@ export default function FieldApp() {
   const reportAt = (fixUsable ? myPos : null) ?? unit?.location ?? null
   const reportSource: "gps" | "unit" | "none" =
     fixUsable && myPos ? "gps" : unit?.location ? "unit" : "none"
+
+  // Inside the BiChat phone app: tell the mesh side which unit this crew is and
+  // where its task is, so status updates and guidance carry on offline.
+  const unitId = unit?.id ?? null
+  const taskLng = unit?.incidentLocation?.[0]
+  const taskLat = unit?.incidentLocation?.[1]
+  const taskName = unit?.assignedTo ?? undefined
+  const fixLng = fix?.lng
+  const fixLat = fix?.lat
+  useEffect(() => {
+    if (!inBiChat()) return
+    saveHandoff({
+      unitId: unitId ?? undefined,
+      navigating: taskLng !== undefined && taskLat !== undefined,
+      destName: taskName,
+      destKind: taskName ? "task" : undefined,
+      destLng: taskLng,
+      destLat: taskLat,
+      lat: fixLat,
+      lng: fixLng,
+    })
+  }, [unitId, taskLng, taskLat, taskName, fixLng, fixLat])
 
   /** File a hazard at the crew's own position, through the same intake door
    *  every other report goes through. */

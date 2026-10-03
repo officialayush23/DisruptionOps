@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # be enumerated. Every Vercel preview deploy gets its own hostname, so the
     # alternative is editing an environment variable on every push.
     cors_origin_regex: str = ""
+    # Where the PWA is served, for the phone app to open `/citizen` and `/field` in its
+    # online mode. Empty means "the first CORS origin that is not localhost".
+    public_app_url: str = ""
 
     # ---- database ----
     supabase_url: str = ""

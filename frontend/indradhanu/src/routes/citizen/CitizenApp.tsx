@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Textarea } from "@/components/ui/textarea"
+import { inBiChat, readHandoff, saveHandoff } from "@/lib/native"
 
 /* `deviceId` now lives in the http client and is sent as a header on every
    request, because the rate limiter needs the same value the trust scorer does:
@@ -202,7 +203,8 @@ export default function CitizenApp() {
   const [recording, setRecording] = useState(false)
   const [heard, setHeard] = useState<VoiceResult | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
-  const [text, setText] = useState("")
+  // A report half-written on the mesh side of the BiChat app carries over.
+  const [text, setText] = useState(() => (inBiChat() ? readHandoff().draft ?? "" : ""))
   const [busy, setBusy] = useState<string | null>(null)
   const [filed, setFiled] = useState<Record<string, unknown> | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -435,6 +437,22 @@ export default function CitizenApp() {
     )
     return () => navigator.geolocation.clearWatch(id)
   }, [])
+
+  useEffect(() => {
+    if (!inBiChat()) return
+    const end = guide?.route?.[guide.route.length - 1]
+    saveHandoff({
+      navigating: navOn && Boolean(end),
+      intent: lastIntent.current,
+      destName: guide?.destination?.name,
+      destKind: guide?.destination?.kind,
+      destLng: end?.[0],
+      destLat: end?.[1],
+      draft: text,
+      lat: pos.lat,
+      lng: pos.lng,
+    })
+  }, [guide, navOn, text, pos])
 
   // Asked once, quietly. Declining is fine: the banner above still appears,
   // it just will not reach them on a locked phone.
@@ -1103,6 +1121,21 @@ export default function CitizenApp() {
 
   const alert = state?.alerts?.[0]
   const showAlert = Boolean(alert && dismissedAlert !== alert.id)
+
+  // Inside the BiChat phone app: carry on from the mesh side (a route it was
+  // following) once there is a real fix to route from,
+  // and keep it told where this person is headed for the next switch.
+  const restoredHandoff = useRef(false)
+  useEffect(() => {
+    if (restoredHandoff.current || !inBiChat()) return
+    if (pos.lng === ALANDI[0] && pos.lat === ALANDI[1]) return
+    restoredHandoff.current = true
+    const h = readHandoff()
+    const intent = h.intent ?? (h.destKind?.includes("shelter") ? "shelter" : undefined)
+    // Next tick: asking for a route sets state, which an effect body should not do itself.
+    if (h.navigating && intent) setTimeout(() => void ask(intent, undefined, false, false), 0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the first real fix
+  }, [pos])
 
   // ---- pieces
 
