@@ -149,6 +149,28 @@ function progressAlong(route: number[][], at: [number, number]) {
   return { travelled, offBy, total }
 }
 
+/** Compass bearing of the route a little ahead of `travelled` metres along it:
+ *  the direction the way goes next, used to turn the map heading-up when the
+ *  phone is not moving fast enough for GPS to know its own heading. */
+function routeBearingAhead(route: number[][], travelled: number, lookAheadM = 25): number | null {
+  if (route.length < 2) return null
+  const target = travelled + lookAheadM
+  let run = 0
+  for (let i = 0; i < route.length - 1; i++) {
+    const a = route[i] as [number, number]
+    const b = route[i + 1] as [number, number]
+    const seg = metres(a, b)
+    if (run + seg >= target || i === route.length - 2) {
+      const dx = (b[0] - a[0]) * Math.cos(((a[1] + b[1]) / 2) * Math.PI / 180)
+      const dy = b[1] - a[1]
+      if (dx === 0 && dy === 0) return null
+      return (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360
+    }
+    run += seg
+  }
+  return null
+}
+
 /** Which instruction applies right now, and how far until the next one.
  *
  *  The steps carry a distance each and no coordinates, so the position is
@@ -226,6 +248,7 @@ export default function CitizenApp() {
   const [staleSince, setStaleSince] = useState<number | null>(null)
   /** Turn-by-turn is on only when the person asked to go somewhere. */
   const [navOn, setNavOn] = useState(false)
+  const [gpsHeading, setGpsHeading] = useState<number | null>(null)
   /** A "stay where you are" answer that arrived while a route was being walked.
    *  Shown next to the navigation rather than replacing it. */
   const [advice, setAdvice] = useState<string | null>(null)
@@ -274,6 +297,8 @@ export default function CitizenApp() {
    *  because the poll was keyed on that object's identity. Recentring the view
    *  and asking the API a question are different things and now say so. */
   const [recentre, setRecentre] = useState(0)
+
+
 
   /** The request currently in flight, so a newer one can cancel it.
    *
@@ -424,6 +449,10 @@ export default function CitizenApp() {
         // the more dangerous failure.
         setGpsNote(null)
         setPos({ lng: g.coords.longitude, lat: g.coords.latitude })
+        // The compass direction of travel, when the device is actually moving.
+        // Standing still, GPS heading is noise; the route's direction is used instead.
+        const hd = g.coords.heading
+        setGpsHeading(hd !== null && Number.isFinite(hd) && (g.coords.speed ?? 0) > 0.7 ? hd : null)
       },
       (e) => {
         setGpsNote(
@@ -545,10 +574,17 @@ export default function CitizenApp() {
       setRecording(true)
       // The speech service takes about 30 seconds per recording; stop a little before.
       stopTimer.current = setTimeout(() => stopRecording(), 25_000)
-    } catch {
+    } catch (e) {
+      // Say which of the three it was: refused, missing, or busy elsewhere.
+      const name = e instanceof DOMException ? e.name : ""
       setError(
-        "The microphone is not available. Check the permission, or type the " +
-        "report instead."
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "Microphone permission was refused. Allow it for this app in your phone's settings, or type the report instead."
+          : name === "NotFoundError"
+            ? "No microphone was found on this device. Type the report instead."
+            : name === "NotReadableError"
+              ? "The microphone is in use by another app. Close it and try again, or type the report."
+              : "The microphone is not available. Check the permission, or type the report instead."
       )
     }
   }
@@ -624,7 +660,9 @@ export default function CitizenApp() {
       // before they set off. A silent re-solve mid-walk leaves the camera be.
       if (!silent) {
         setTab("go")
-        if (movable) frameRoute(g.route)
+        // A new route is shown whole first, as a preview; the locate button
+        // (or Start) drops into the close, heading-up view.
+        if (movable) { setFollowing(false); frameRoute(g.route) }
       }
     } catch (e) {
       // A silent re-solve that fails leaves the previous route on screen, which
@@ -907,6 +945,12 @@ export default function CitizenApp() {
     }
   })()
 
+  /** Heading-up for the navigation camera: the phone's own heading while it
+   *  moves, the direction of the route ahead otherwise. */
+  const navHeading = navOn && nav
+    ? gpsHeading ?? routeBearingAhead(guide?.route ?? [], nav.travelledM)
+    : null
+
   /** Keep the route true while the world and the person both move.
    *
    *  Until now the route was solved once when the advisory arrived and then
@@ -1028,6 +1072,21 @@ export default function CitizenApp() {
   }, [])
   /** Follows the person until they move the map themselves. */
   const [following, setFollowing] = useState(true)
+
+  /** Start following the way, Google Maps style: close, tilted, heading-up. */
+  const startNav = () => {
+    setNavOn(true)
+    setFollowing(true)
+    setRecentre((n) => n + 1)
+  }
+
+  /** Stop navigating and go back to the wide, flat, north-up view of the area. */
+  const stopNav = () => {
+    setNavOn(false)
+    setAdvice(null)
+    setFollowing(true)
+    fly({ center: [pos.lng, pos.lat], zoom: 14.3 })
+  }
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [filter, setFilter] = useState("all")
   const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
@@ -1186,7 +1245,7 @@ export default function CitizenApp() {
         : null
       }
       arrived={nav.arrived ? <>You have arrived at {guide?.destination?.name ?? "your destination"}.</> : null}
-      onExit={() => { setNavOn(false); setAdvice(null) }}
+      onExit={stopNav}
     />
   ) : (
     <TopBar
@@ -1315,7 +1374,7 @@ export default function CitizenApp() {
       {photoPicker}
       {navOn && nav ? (
         <div className="flex items-center gap-2">
-          <ActionButton tone="danger" onClick={() => { setNavOn(false); setAdvice(null) }}>Stop</ActionButton>
+          <ActionButton tone="danger" onClick={stopNav}>Stop</ActionButton>
           <ActionButton onClick={() => { setTab("go"); snapTo("half") }} className="flex-1">
             <Navigation className="size-4" /> Directions
           </ActionButton>
@@ -1605,7 +1664,7 @@ export default function CitizenApp() {
               </div>
               <div className="flex flex-wrap gap-2">
                 {!navOn && guide.route?.length > 1 && (
-                  <ActionButton tone="primary" onClick={() => { setNavOn(true); frameRoute(guide.route) }}>
+                  <ActionButton tone="primary" onClick={startNav}>
                     <Navigation className="size-4" /> Navigate
                   </ActionButton>
                 )}
@@ -2015,6 +2074,7 @@ export default function CitizenApp() {
           center={[pos.lng, pos.lat]}
           zoom={14.3}
           followMe={following}
+          navigation={navOn && nav && !nav.arrived ? { heading: navHeading } : null}
           recentreKey={recentre}
           onUserMove={() => setFollowing(false)}
           onSelect={onMapSelect}

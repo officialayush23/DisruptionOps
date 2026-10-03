@@ -154,6 +154,10 @@ type Props = {
   routeProgress?: number
   /** Pulse critical incidents. */
   pulseCritical?: boolean
+  /** Turn-by-turn camera, as in Google Maps: while set (and `followMe`), the map
+   *  tilts, zooms in, turns so the way ahead points up, and keeps `me` in the
+   *  lower third. Cleared, the map flattens and faces north again. */
+  navigation?: { heading: number | null } | null
 }
 
 const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
@@ -422,7 +426,7 @@ export function LiveMap({
   onPickIncident, followMe = false, recentreKey = 0, onUserMove,
   onPickWard,
   basemap = "streets", lightPreset = "night", markers = "pin", cluster = false,
-  hoverCards = true, onSelect, selection, camera, padding, routeStatus,
+  hoverCards = true, onSelect, selection, camera, padding, routeStatus, navigation = null,
   routeProgress, pulseCritical = false,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
@@ -1377,6 +1381,9 @@ export function LiveMap({
           left: (pad?.left ?? 0) + 56, right: (pad?.right ?? 0) + 56,
         },
         maxZoom: c.zoom ?? 16.5,
+        // An overview is flat and north-up, even straight out of navigation.
+        pitch: 0,
+        bearing: 0,
         duration: 900,
       })
       return
@@ -1390,8 +1397,9 @@ export function LiveMap({
     const far = Math.abs(here.lng - c.center[0]) + Math.abs(here.lat - c.center[1]) > 0.05
     const zoomTo = c.zoom ?? Math.max(m.getZoom(), 15)
     const withPad = pad ? { padding: pad } : {}
-    if (far) m.flyTo({ center: c.center, zoom: zoomTo, speed: 1.6, curve: 1.3, essential: true, ...withPad })
-    else m.easeTo({ center: c.center, zoom: zoomTo, duration: 650, ...withPad })
+    const level = { pitch: 0, bearing: 0 }
+    if (far) m.flyTo({ center: c.center, zoom: zoomTo, speed: 1.6, curve: 1.3, essential: true, ...level, ...withPad })
+    else m.easeTo({ center: c.center, zoom: zoomTo, duration: 650, ...level, ...withPad })
   }, [ready, cameraKey])
 
   useEffect(() => {
@@ -1418,6 +1426,9 @@ export function LiveMap({
   // or not the person had moved a millimetre.
   const meLng = me?.lng
   const meLat = me?.lat
+  const navActive = Boolean(navigation)
+  // Whole degrees: GPS heading jitters by fractions, and each change is a camera move.
+  const navHeading = navigation?.heading == null ? null : Math.round(navigation.heading)
   const meLabel = me?.label
   const meAccuracy = me?.accuracyM ?? null
   useEffect(() => {
@@ -1431,10 +1442,48 @@ export function LiveMap({
                `<div class="ip-sub">${meLat.toFixed(5)}, ${meLng.toFixed(5)}</div>`,
         })])
       : fc([]))
-    if (here && followMe) {
-      map.current?.easeTo({ center: [meLng, meLat], duration: 400 })
+    const m = map.current
+    if (here && followMe && m) {
+      if (navActive) {
+        // Driving view: close, tilted, heading-up, with the person low on the
+        // screen so most of the map shows what is ahead. Linear easing over
+        // about one GPS interval makes successive fixes read as motion.
+        const h = m.getContainer().clientHeight
+        m.easeTo({
+          center: [meLng, meLat],
+          zoom: Math.max(17, Math.min(18, m.getZoom())),
+          pitch: 55,
+          bearing: navHeading ?? m.getBearing(),
+          offset: [0, Math.round(h * 0.22)],
+          duration: 900,
+          easing: (t) => t,
+          essential: true,
+        })
+      } else {
+        m.easeTo({ center: [meLng, meLat], duration: 400 })
+      }
     }
-  }, [ready, meLng, meLat, meLabel, meAccuracy, followMe, recentreKey])
+  }, [ready, meLng, meLat, meLabel, meAccuracy, followMe, recentreKey, navActive, navHeading])
+
+  // Leaving navigation: flat, north up, zoomed out, centred on the person.
+  const wasNavigating = useRef(false)
+  useEffect(() => {
+    const m = map.current
+    if (!ready || !m) return
+    if (wasNavigating.current && !navActive) {
+      m.easeTo({
+        pitch: 0,
+        bearing: 0,
+        zoom: Math.min(m.getZoom(), 14.3),
+        ...(meLng !== undefined && meLat !== undefined ? { center: [meLng, meLat] as [number, number] } : {}),
+        offset: [0, 0],
+        duration: 1100,
+        essential: true,
+      })
+    }
+    wasNavigating.current = navActive
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on the transition
+  }, [ready, navActive])
 
   /** A touch or a scroll on the canvas is the person taking the camera.
    *
