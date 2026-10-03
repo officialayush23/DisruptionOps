@@ -243,7 +243,7 @@ async def _touch_node(pkt: envelope.Packet, gateway_id: str) -> None:
 
 
 async def _intake(pkt: envelope.Packet, *, category: str, note: str, source: str,
-                  city_id: str) -> tuple[str, str | None]:
+                  city_id: str, sensor: bool = False) -> tuple[str, str | None]:
     loc = pkt.location
     if loc is None:
         return "refused", "no location"
@@ -251,10 +251,15 @@ async def _intake(pkt: envelope.Packet, *, category: str, note: str, source: str
     if ward_id is None:
         return "refused", "outside every ward"
     node = str(pkt.body.get("n") or "unknown")[:60]
+    # Camera detections are keyed `device:sensor:` whether or not they were signed:
+    # citizen and crew views hide incidents only cameras have reported (see
+    # `api/v1/personas.CAMERA_ONLY`), which needs to tell them apart from people.
     result = await intake.receive(
         ward_id=ward_id, category=category, location=loc, note=note[:500],
-        source=source, reporter_key=f"device:mesh:{node}",
-        reporter_name="Via mesh" if source.startswith("mesh") else f"Sensor {node}",
+        source=source,
+        reporter_key=f"device:sensor:{node}" if sensor else f"device:mesh:{node}",
+        reporter_name=(f"Sensor {node}" if sensor
+                       else "Via mesh" if source.startswith("mesh") else f"Sensor {node}"),
         device_id=f"mesh:{node}", occurred_at=_when(pkt.body.get("t")),
         city_id=city_id, clock=clocks.WALL,
     )
@@ -301,7 +306,7 @@ async def _sensor(pkt: envelope.Packet, *, city_id: str) -> tuple[str, str | Non
     # Unsigned sensor packets are treated as a person's unverified report.
     source = "sensor" if pkt.verified or not settings.mesh_hmac_key else "mesh_unsigned"
     outcome, ref = await _intake(pkt, category=category, note=note, source=source,
-                                 city_id=city_id)
+                                 city_id=city_id, sensor=True)
     if outcome in ("report", "linked") and conf >= 0.6:
         from app.agents import commander
 

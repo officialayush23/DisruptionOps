@@ -41,6 +41,19 @@ from app.world import events as ev
 log = get_logger(__name__)
 router = APIRouter(tags=["personas"])
 
+# Camera and VLM detections are for the command centre. An incident that only
+# cameras have reported stays off the resident and crew views until an operator
+# confirms it (any status past 'reported') or a person reports it too. Used as
+# `and not <CAMERA_ONLY>` against an `incidents i` row.
+CAMERA_ONLY = """(
+    i.status = 'reported'
+    and exists (select 1 from citizen_reports cr where cr.incident_id = i.id)
+    and not exists (
+        select 1 from citizen_reports cr
+         where cr.incident_id = i.id
+           and coalesce(cr.reporter_key, '') not like 'device:sensor:%'
+           and coalesce(cr.reporter_name, '') not like 'Sensor %'))"""
+
 
 # =========================================================== citizen =========
 class GuideIn(Camel):
@@ -685,6 +698,7 @@ async def _citizen_scope(lng: float, lat: float, city_id: str, metres: float):
               from incidents i, me
              where i.city_id = $3 and i.status <> 'resolved'
                and extensions.ST_DWithin(i.location, me.g, $4)
+               and not """ + CAMERA_ONLY + """
              order by m limit 40
             """,
             lng, lat, city_id, metres,
@@ -1282,6 +1296,7 @@ async def field_state(
                -- than an empty result — 'triaged' and 'assigned' are not
                -- members of it, whatever the domain vocabulary suggests.
                and i.status in ('reported', 'confirmed', 'dispatched', 'in_progress')
+               and not """ + CAMERA_ONLY + """
              group by i.id
              order by i.severity desc, i.created_at desc
              limit 200
