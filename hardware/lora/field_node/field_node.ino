@@ -46,10 +46,15 @@
                                   // resistor; with 1M across the disc use ~60. Raise if it
                                   // counts knocks in silence, lower if light taps are missed.
 #define KNOCK_GAP_MS     120      // one knock cannot be counted twice inside this
+#define PIEZO_PULLUP     1        // 1 = no resistor on the piezo: the Uno's internal pull-up
+                                  //     drains it and a knock shows as a dip (read inverted).
+                                  // 0 = a resistor (10k-1M) from the piezo pin to GND.
+#define LORA_RST_WIRED   1        // 0 = SX1278 RST left unconnected (saves a resistor; the
+                                  //     module resets itself at power-up). 1 = RST on D9.
 
 // ----------------------------------------------------------------- pins ---
 // SX1278: NSS D10, SCK D13, MOSI D11, MISO D12 (hardware SPI), RST D9, DIO0 D2
-const int LORA_NSS = 10, LORA_RST = 9, LORA_DIO0 = 2;
+const int LORA_NSS = 10, LORA_RST = LORA_RST_WIRED ? 9 : -1, LORA_DIO0 = 2;
 const int PIN_MQ2   = A0;
 const int PIN_MQ135 = A1;
 const int PIN_MIC   = A3;
@@ -139,12 +144,13 @@ void setup() {
 #if THERMAL_DS18B20
   ds.begin();
   tempOk = ds.getDeviceCount() > 0;
+  pinMode(PIN_PIEZO_A, PIEZO_PULLUP ? INPUT_PULLUP : INPUT);
   ds.setResolution(10);                  // 0.25 C, ~190 ms conversion
   ds.setWaitForConversion(false);        // start it, collect it at the end of the window
 #else
   tempOk = true;
-  pinMode(PIN_PIEZO_D, INPUT);
-  attachInterrupt(digitalPinToInterrupt(PIN_PIEZO_D), onKnock, RISING);
+  pinMode(PIN_PIEZO_D, PIEZO_PULLUP ? INPUT_PULLUP : INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_PIEZO_D), onKnock, PIEZO_PULLUP ? FALLING : RISING);
 #endif
 
   LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
@@ -192,6 +198,7 @@ void loop() {
 #if PIEZO_ANALOG
     analogRead(PIN_PIEZO_A);             // piezo is high impedance: throw away the first read
     int p = analogRead(PIN_PIEZO_A);
+    if (PIEZO_PULLUP) p = 1023 - p;      // pulled up: a knock pulls the pin down
     if (p > piezoMax) piezoMax = p;
     if (p > KNOCK_THRESHOLD && millis() - lastKnock > KNOCK_GAP_MS) {
       knocks++;

@@ -25,7 +25,8 @@
 #define LORA_SYNC  0xA5      // must match the field node
 #define USE_LCD    1         // 0 to skip the LCD entirely
 
-const int LORA_NSS = 10, LORA_RST = 9, LORA_DIO0 = 2;
+#define LORA_RST_WIRED 1   // 1 = RST on D9 through a 10k (R4/R10); 0 = RST left unconnected
+const int LORA_NSS = 10, LORA_RST = LORA_RST_WIRED ? 9 : -1, LORA_DIO0 = 2;
 const int PIN_LED = 7;
 
 LiquidCrystal_I2C *lcd = nullptr;

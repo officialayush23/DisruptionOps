@@ -98,23 +98,22 @@ lines the module drives go straight across.
 > damage the radio. Ra-02 pads are 2 mm pitch, so solder wires or use a
 > breakout board rather than pushing it into a breadboard.
 
-### Only have six 10 kΩ resistors (brown-black-orange-gold)?
+### Resistors actually used: 9 × 10 kΩ, 2 × 220 Ω
 
-The sketches are set up for exactly that (`LORA_RST_WIRED 0`, `PIEZO_PULLUP 1`):
+10 kΩ = brown-black-orange-gold, 220 Ω = red-red-brown-gold.
 
-| Where | What |
-|---|---|
-| SX1278 NSS, SCK, MOSI (both boards) | **one 10k in series** on each line: Uno pin → 10k → radio pin. No resistor to GND. 3 per board = **6 total** |
-| SX1278 RST | **leave unconnected** on both radios |
-| SX1278 MISO, DIO0 | straight wire, no resistor |
-| Piezo disc | **no resistor**: red lead → A2, black → GND; the sketch turns on A2's internal pull-up and reads knocks as dips |
-| Tilt switch | no resistor (internal pull-up) |
-| DS18B20 | fine as a PCB module; a *bare* 3-leg one needs one more 4.7k–10k between DQ and 5V, otherwise it reports no temperature and everything else still works. LM35 needs none |
+| Tag | Value | Where | Job |
+|---|---|---|---|
+| R1–R3 | 10k | field node: in series on D10→NSS, D13→SCK, D11→MOSI | limit the Uno's 5 V into the 3.3 V radio |
+| R4 | 10k | field node: D9→RST | radio reset (`LORA_RST_WIRED 1`) |
+| R5 | 10k | DQ ↔ 5V | DS18B20 pull-up, only for a bare 3-leg sensor |
+| R6 | 220 Ω | D7 → LED long leg; short leg → GND | status LED |
+| R7–R10 | 10k | gateway: same as R1–R4 | same |
+| R11 | 220 Ω | gateway D7 → LED | status LED |
 
-A series resistor is a demo-grade shortcut: it limits the 5 V signal to a
-trickle that the radio's own input protection absorbs. It is not the
-datasheet-correct fix. A 4-channel logic level shifter module is.
-SPI runs at 1 MHz so the resistors don't slow the signals too much.
+No resistor: radio MISO/DIO0, piezo (internal pull-up on A2), tilt switch.
+Never put a 220 Ω on a radio line. Series 10k is a demo-grade shortcut; a
+4-channel logic level shifter is the proper part. SPI runs at 1 MHz for it.
 
 ### Sensors → Uno
 
