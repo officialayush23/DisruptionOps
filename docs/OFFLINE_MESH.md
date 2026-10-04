@@ -100,6 +100,29 @@ validated internet it:
 6. **Phone browser**: the first time mesh mode calls bitchat, Chrome asks to
    allow access to devices on the local network. Allow it.
 
+## LoRa link between two meshes (radio-only build)
+
+Bluetooth covers tens of metres per hop. Two Unos with SX1278 radios join two
+mesh areas, or an offline area and the command centre, over hundreds of
+metres to kilometres, carrying the same IDX1 packets unchanged.
+
+- Firmware: `hardware/lora/modem/modem.ino`, the same on both Unos. Radio only:
+  7 jumpers, 10k in series on NSS/SCK/MOSI, RST unconnected, SF7 by default.
+- Laptop script: `hardware/lora/lora_mesh_link.py`, one per Uno.
+  - `--phone <ip>`: a bitchat phone with the VLM API on.
+    Inbox → LoRa; LoRa → `/send/text`.
+  - `--api … --key …`: LoRa and phone packets → `/mesh/inbound`;
+    `/mesh/outbox` → LoRa and phone; acked.
+  - Typing `sos <text>` (with `--lat/--lon/--hmac`) sends a signed R packet.
+- Messages over 232 bytes are split into frames and reassembled. Each
+  message is sent twice, and everything is de-duplicated by content, so
+  nothing loops.
+
+```
+python lora_mesh_link.py --name field-A --phone 192.168.43.20 --lat 18.52 --lon 73.85 --hmac $MESH_HMAC_KEY
+python lora_mesh_link.py --name hq-B --api https://disruptionops.onrender.com --key $MESH_GATEWAY_KEY
+```
+
 ## Limits
 
 - Bluetooth mesh: tens of metres per hop, 7 hops (TTL), needs phones in range.
