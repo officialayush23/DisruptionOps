@@ -37,6 +37,13 @@
 #define NODE_ID          "RN01"   // give every field node its own id
 #define THERMAL_DS18B20  1        // 1 = DS18B20 on D4,  0 = LM35 on A2
 #define HAS_PIR          0        // 1 if a PIR (HC-SR501) is on D6
+#define HAS_MIC          0        // 1 if an ANALOG sound module (KY-037/KY-038/MAX4466 "AO"/"OUT")
+                                  // is on A3. 0 for none, and for an INMP441 (SD/WS/SCK/L-R pins):
+                                  // that mic speaks I2S, which an Uno cannot read.
+#define HAS_PIEZO        0        // 1 if a piezo disc is on A2 (red) / GND (black)
+#define HAS_TILT         1        // 1 if a ball tilt switch is on D5 / GND
+                                  // A missing sensor sends an empty field, never a made-up 0.
+                                  // The MPU-6050 (gyro) is detected on its own; none = empty fields.
 #define LORA_FREQ        433E6    // must match the gateway
 #define LORA_SYNC        0xA5     // must match the gateway
 #define TX_POWER_DBM     14       // 14 is plenty indoors and easy on the Uno's 3.3 V pin
@@ -191,11 +198,13 @@ void loop() {
   int nImu = 0;
 
   while (millis() - start < SAMPLE_MS) {
+#if HAS_MIC
     int m = analogRead(PIN_MIC);
     if (m < micMin) micMin = m;
     if (m > micMax) micMax = m;
+#endif
 
-#if PIEZO_ANALOG
+#if PIEZO_ANALOG && HAS_PIEZO
     analogRead(PIN_PIEZO_A);             // piezo is high impedance: throw away the first read
     int p = analogRead(PIN_PIEZO_A);
     if (PIEZO_PULLUP) p = 1023 - p;      // pulled up: a knock pulls the pin down
@@ -219,7 +228,7 @@ void loop() {
     }
   }
 
-#if !PIEZO_ANALOG
+#if !PIEZO_ANALOG && HAS_PIEZO
   noInterrupts(); knocks = isrKnocks; interrupts();
 #endif
 
@@ -263,14 +272,10 @@ void loop() {
   addFloat(tilt, 1, imuData);
   addFloat(gMax, 1, imuData);
   addFloat(vib, 3, imuData);
-  addInt(micMax - micMin);
-#if PIEZO_ANALOG
-  addInt(piezoMax);
-#else
-  addInt(0, false);                      // digital piezo: no level, only knocks
-#endif
-  addInt(knocks);
-  addInt(tiltSw);
+  addInt(micMax - micMin, HAS_MIC);
+  addInt(piezoMax, PIEZO_ANALOG && HAS_PIEZO);   // digital piezo: no level, only knocks
+  addInt(knocks, HAS_PIEZO);
+  addInt(tiltSw, HAS_TILT);
   addInt(pir);
 
   digitalWrite(PIN_LED, HIGH);

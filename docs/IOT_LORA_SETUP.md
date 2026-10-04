@@ -98,6 +98,16 @@ lines the module drives go straight across.
 > damage the radio. Ra-02 pads are 2 mm pitch, so solder wires or use a
 > breakout board rather than pushing it into a breadboard.
 
+### Parts this build actually uses
+
+Your kit: MQ-2, MQ-135, DS18B20 waterproof probe (red = VDD, black = GND,
+yellow = DQ → D4, 10k R5 between yellow and red), tilt switch, LCD.
+Not used: the **INMP441** mic (SD/WS/SCK/L-R pins) is an I2S digital mic that
+an Uno cannot read (`HAS_MIC 0`; a KY-037/KY-038 analog sound sensor on A3
+works with `HAS_MIC 1`), no piezo (`HAS_PIEZO 0`), no MPU-6050 (auto-detected,
+sends empty fields). Without sound or piezo the human-presence score has
+little evidence; gas, heat and tilt work normally.
+
 ### Resistors actually used: 9 × 10 kΩ, 2 × 220 Ω
 
 10 kΩ = brown-black-orange-gold, 220 Ω = red-red-brown-gold.
