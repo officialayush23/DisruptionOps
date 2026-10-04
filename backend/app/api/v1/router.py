@@ -12,6 +12,7 @@ from app.api.v1 import (
     copilot,
     demo,
     geography,
+    iot,
     mesh,
     operations,
     ops,
@@ -45,3 +46,4 @@ api_router.include_router(replay.router)
 api_router.include_router(ops.router)
 api_router.include_router(mesh.router)
 api_router.include_router(agent_graph.router)
+api_router.include_router(iot.router)

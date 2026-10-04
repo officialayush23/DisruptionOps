@@ -298,6 +298,18 @@ async def get_alerts(limit: int = 15) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@tool("get_sensor_field", "read",
+      "LoRa field sensor nodes: per node the latest human-presence, structural-movement and "
+      "gas/heat scores (0..1), what drove them (sound, tapping on rubble, lean, gas rise...), "
+      "flags, raw readings and location. Use it before sending people into a building or "
+      "when asked whether anyone is trapped. Nodes named SIM-* are simulated.",
+      city_id="City")
+async def get_sensor_field(city_id: str = "pune") -> list[dict]:
+    from app.iot import service as iot
+
+    return await iot.field_summary(city_id)
+
+
 @tool("get_agency_status", "read", "Which agency holds what, and open mutual-aid requests.",
       city_id="City")
 async def get_agency_status(city_id: str = "pune") -> dict:

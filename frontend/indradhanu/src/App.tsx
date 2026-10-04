@@ -27,6 +27,7 @@ import CommandWall from "@/routes/admin/CommandWall"
 import AgentGraph from "@/routes/admin/AgentGraph"
 import IncidentResponse from "@/routes/admin/IncidentResponse"
 import MeshDevices from "@/routes/admin/MeshDevices"
+import SensorAnalytics from "@/routes/admin/SensorAnalytics"
 
 /** Three interfaces, three URLs.
  *
@@ -71,6 +72,8 @@ export function App() {
                 <Route path="feed" element={<LiveFeed />} />
                 <Route path="response" element={<IncidentResponse />} />
                 <Route path="mesh" element={<MeshDevices />} />
+                {/* LoRa field nodes: heatmap over the map, then each node's history. */}
+                <Route path="analytics" element={<SensorAnalytics />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="forecast" element={<Forecast />} />
                 <Route path="incidents" element={<IncidentQueue />} />

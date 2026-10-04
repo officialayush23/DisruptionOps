@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
   Bluetooth,
+  Thermometer,
   BrainCircuit,
   ClipboardCheck,
   Gauge,
@@ -99,6 +100,8 @@ const NAV: {
   },
   // The bitchat gateway phones linked to this control room, and what they carried.
   { group: "Operations", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
+  // LoRa field sensors: gas, heat, sound, tapping, tilt — on a map and over time.
+  { group: "Operations", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
   // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
   // authorises, and this is the ledger of what it did — which is what an
   // officer was missing, not a second way to move a vehicle by hand.
