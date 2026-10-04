@@ -42,7 +42,9 @@
 #define TX_POWER_DBM     14       // 14 is plenty indoors and easy on the Uno's 3.3 V pin
 #define SAMPLE_MS        1500     // how long each reading window is
 #define PERIOD_MS        2000     // one packet every PERIOD_MS
-#define KNOCK_THRESHOLD  60       // piezo level that counts as a knock (raise if it counts noise)
+#define KNOCK_THRESHOLD  25       // piezo level that counts as a knock. 25 suits a 10k bleed
+                                  // resistor; with 1M across the disc use ~60. Raise if it
+                                  // counts knocks in silence, lower if light taps are missed.
 #define KNOCK_GAP_MS     120      // one knock cannot be counted twice inside this
 
 // ----------------------------------------------------------------- pins ---
@@ -146,6 +148,9 @@ void setup() {
 #endif
 
   LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
+  // 1 MHz SPI: the 10k/20k resistor dividers on the SX1278 lines are too slow
+  // for the library's default 8 MHz. 1 MHz is still far faster than LoRa needs.
+  LoRa.setSPIFrequency(1E6);
   if (!LoRa.begin(LORA_FREQ)) {
     Serial.println(F("#ERR LoRa not found - check SX1278 wiring and 3.3V"));
     while (true) { digitalWrite(PIN_LED, !digitalRead(PIN_LED)); delay(150); }

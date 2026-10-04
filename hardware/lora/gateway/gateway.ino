@@ -95,6 +95,9 @@ void setup() {
 #endif
 
   LoRa.setPins(LORA_NSS, LORA_RST, LORA_DIO0);
+  // 1 MHz SPI: the 10k/20k resistor dividers on the SX1278 lines are too slow
+  // for the library's default 8 MHz. 1 MHz is still far faster than LoRa needs.
+  LoRa.setSPIFrequency(1E6);
   if (!LoRa.begin(LORA_FREQ)) {
     Serial.println(F("#ERR LoRa not found - check SX1278 wiring and 3.3V"));
     lcdLine(0, "LoRa NOT FOUND");

@@ -98,6 +98,19 @@ lines the module drives go straight across.
 > damage the radio. Ra-02 pads are 2 mm pitch, so solder wires or use a
 > breakout board rather than pushing it into a breadboard.
 
+### Only have 10 kΩ resistors (brown-black-orange-gold)?
+
+That works for everything:
+
+| Where | Use |
+|---|---|
+| SX1278 dividers (×4 per board) | **10k** from the Uno pin, then **two 10k in series (20k)** to GND. The sketches run SPI at 1 MHz so these slower dividers are fine |
+| Piezo bleed (instead of 1 MΩ) | **one 10k** from A2 to GND. Knocks read smaller, so `KNOCK_THRESHOLD` defaults to 25; for stronger readings put several 10k in series (up to 10 = 100k) and raise the threshold |
+| DS18B20 pull-up (instead of 4.7k) | **two 10k in parallel** (5k) between D4 and 5V; a single 10k also works on short wires |
+| LED (instead of 220 Ω) | 10k works, just dim; or skip the LED |
+
+Per board that is 12 resistors for the dividers; the field node needs up to 3 more.
+
 ### Sensors → Uno
 
 | Sensor | Pin on sensor | Uno |
