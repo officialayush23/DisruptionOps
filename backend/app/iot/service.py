@@ -573,8 +573,8 @@ async def ward_field(city_id: str = "pune") -> dict[str, dict]:
         w["nodes"] += 1
         for k in ("human", "structural", "environmental", "overall"):
             v = float(latest.get(k) or 0.0)
-            if v > w[k]:
-                w[k] = v
+            if v > w[k] or (k == "overall" and w["top"] is None):
+                w[k] = max(v, w[k])
                 if k == "overall":
                     w["top"] = r["id"]
         w["flags"].update(f for f in (latest.get("flags") or [])

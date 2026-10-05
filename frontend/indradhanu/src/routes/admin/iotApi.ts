@@ -28,9 +28,18 @@ export type Scores = {
   overall: number | null
 }
 
+export type NodeKind = "field" | "gas" | "struct" | "rescue"
+
 export type SensorNode = Raw & Scores & {
   id: string
   label: string | null
+  kind: NodeKind
+  kind_label: string
+  kind_detail: string
+  channels: string[]
+  virtual: boolean
+  is_new: boolean
+  first_seen: string
   lat: number | null
   lon: number | null
   ward_id: string | null
@@ -70,6 +79,10 @@ export type Overview = {
     environmental: Peak
     overall: Peak
     escalated_1h: number
+    simulated: number
+    real: number
+    new: string[]
+    by_kind: Record<string, { label: string; total: number; online: number }>
   }
   events: SensorEvent[]
 }
@@ -119,3 +132,38 @@ export const fetchOverview = (minutes = 30) =>
 
 export const fetchSeries = (node: string, minutes: number) =>
   request<Series>(`/analytics/timeseries?node=${encodeURIComponent(node)}&minutes=${minutes}&points=240`)
+
+export type FleetStatus = {
+  enabled: boolean
+  period_s: number
+  nodes: number
+  by_kind: Partial<Record<NodeKind, number>>
+  episodes: { node: string; code: string; major: boolean }[]
+  deployed: { id: string; kind: NodeKind; label: string; reason: string; at: number }[]
+  kinds: Record<NodeKind, { label: string; detail: string }>
+}
+
+export const fetchFleet = () => request<FleetStatus>("/iot/virtual", { toast: false })
+
+export const setFleet = (enabled: boolean) =>
+  request<FleetStatus>("/iot/virtual", {
+    method: "POST", body: { enabled },
+    toast: { success: enabled ? "Simulated sensor fleet on" : "Simulated sensor fleet off" },
+  })
+
+export const deployNode = (kind: NodeKind, region: string, episode?: "f" | "c" | "t") =>
+  request<{ id: string; label: string }>("/iot/virtual/deploy", {
+    method: "POST", body: { kind, region, episode },
+    toast: {
+      loading: "Deploying a node…",
+      success: (d) => `Deployed ${(d as { id: string; label: string }).id}: ${(d as { label: string }).label}`,
+    },
+  })
+
+/** Colour per node kind: the ring around a node on the map and its chip. */
+export const KIND_STYLE: Record<NodeKind, { color: string; short: string }> = {
+  field: { color: "#2a78d6", short: "Field" },
+  gas: { color: "#fab219", short: "Gas" },
+  struct: { color: "#ec835a", short: "Struct" },
+  rescue: { color: "#8b5cf6", short: "Rescue" },
+}

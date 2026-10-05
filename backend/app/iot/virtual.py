@@ -60,6 +60,8 @@ KEEP_HOURS = 6
 #: Mean seconds between unprompted episodes in one region.
 SPONTANEOUS_S = 200.0
 CITY = "pune"
+#: Readings written at once; the API's pool is 10 connections.
+CONCURRENCY = 6
 REGION_CODE = {"pune": "PUN", "ncr": "NCR"}
 #: The fleet every region starts with.
 BASE = ("field", "gas", "gas", "struct", "struct", "rescue", "rescue")
@@ -175,7 +177,7 @@ class VNode:
             if r.random() < lvl:
                 v["mic"] += r.uniform(60, 160) * s                # voices
             v["temp_c"] += 3.0 * lvl
-            v["mq135"] += 110 * s * lvl                           # breath in a void
+            v["mq135"] += 45 * s * lvl                            # breath in a void
             v["tilt_deg"] += (6.5 if ep.major else 2.5) * lvl     # the rubble settled
             v["pir"] = 1 if ep.major and lvl > 0.5 and r.random() < 0.6 else 0
 
@@ -357,7 +359,9 @@ async def _tick() -> None:
     # 2. the field's own rhythm: now and then something happens unprompted
     for region in regions.REGIONS:
         if _rng.random() < PERIOD_S / SPONTANEOUS_S:
-            idle = [n for n in fleet.nodes.values() if n.region == region and n.episode is None]
+            # only nodes that have learned their quiet baseline (fusion.LEARN_N)
+            idle = [n for n in fleet.nodes.values()
+                    if n.region == region and n.episode is None and n.seq >= 20]
             if idle:
                 n = _rng.choice(idle)
                 code = _rng.choice(kinds.KINDS[n.kind]["cues"])
@@ -375,15 +379,20 @@ async def _tick() -> None:
                              episode=_rng.choice(kinds.KINDS[kind]["cues"]) if _rng.random() < 0.5 else None)
 
     # 4. readings, through the same door as the real gateway
+    # Nodes are independent, so they are written side by side: one after the
+    # other, a remote database turns a 6 s period into 20 s.
     uptime = int(now - fleet.started) + 900       # gas heaters long since warm
-    by_region: dict[str, list[dict]] = {}
-    for n in list(fleet.nodes.values()):
-        by_region.setdefault(n.region, []).append(n.reading(now, uptime))
-    for region, obs in by_region.items():
-        try:
-            await service.ingest(obs, gateway_id=f"virtual-gw-{region}", city_id=CITY)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("iot_virtual_ingest_failed", region=region, error=str(exc)[:200])
+    gate = asyncio.Semaphore(CONCURRENCY)
+
+    async def send(n: VNode) -> None:
+        async with gate:
+            try:
+                await service.ingest([n.reading(now, uptime)], gateway_id=f"virtual-gw-{n.region}",
+                                     city_id=CITY)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("iot_virtual_ingest_failed", node=n.id, error=str(exc)[:200])
+
+    await asyncio.gather(*(send(n) for n in list(fleet.nodes.values())))
 
     # 5. keep the table small
     if now - fleet.last_prune > 600:

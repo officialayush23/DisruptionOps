@@ -130,7 +130,7 @@ class AgentGraph(unittest.TestCase):
         self.assertEqual(run.outcome, "dispatched")
         self.assertEqual(self.rp.commits, 1)
         nodes = [t["node"] for t in run.trace]
-        self.assertEqual(nodes.count("sense"), 4)                 # parallel fan-out
+        self.assertEqual(nodes.count("sense"), 5)                 # parallel fan-out (incl. sensors)
         self.assertIn("domain", nodes)                             # rescue + medical
         self.assertEqual({t.get("domain") for t in run.trace if t["node"] == "domain"}, {"rescue", "medical"})
         self.assertNotIn("command", nodes)                         # S3: commander not woken

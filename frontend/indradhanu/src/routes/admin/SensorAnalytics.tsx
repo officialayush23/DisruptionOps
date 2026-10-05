@@ -5,12 +5,13 @@ import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ReferenceLine,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts"
-import { Activity, Flame, HardHat, Radio, Siren, UserRound } from "lucide-react"
+import { Activity, Flame, HardHat, Plus, Radio, Siren, UserRound } from "lucide-react"
+import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
-  fetchOverview, fetchSeries, usePoll,
-  type Evidence, type SensorEvent, type SensorNode, type SeriesPoint,
+  deployNode, fetchFleet, fetchOverview, fetchSeries, KIND_STYLE, setFleet, usePoll,
+  type Evidence, type FleetStatus, type NodeKind, type SensorEvent, type SensorNode, type SeriesPoint,
 } from "./iotApi"
 import { regionOf } from "./zones"
 import { useRegion } from "@/lib/region"
@@ -129,6 +130,7 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
       properties: {
         id: n.id, w: norm(n, metric) ?? 0, online: n.online ? 1 : 0,
         sel: n.id === selected ? 1 : 0, label: n.id,
+        ring: KIND_STYLE[n.kind]?.color ?? "#ffffff", fresh: n.is_new && n.online ? 1 : 0,
       },
     })),
   }), [nodes, metric, selected])
@@ -167,6 +169,12 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
           ],
         },
       })
+      // A soft halo behind nodes that joined in the last few minutes.
+      m.addLayer({
+        id: "fresh", type: "circle", source: "nodes", filter: ["==", ["get", "fresh"], 1],
+        paint: { "circle-radius": 20, "circle-color": "#22c55e", "circle-opacity": 0.25,
+          "circle-stroke-width": 2, "circle-stroke-color": "#22c55e", "circle-stroke-opacity": 0.8 },
+      })
       m.addLayer({
         id: "dots", type: "circle", source: "nodes",
         paint: {
@@ -176,8 +184,8 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
             0, "#0ca30c", 0.4, "#fab219", 0.7, "#ec835a", 0.9, "#d03b3b",
           ],
           "circle-opacity": ["case", ["==", ["get", "online"], 1], 1, 0.35],
-          "circle-stroke-width": ["case", ["==", ["get", "sel"], 1], 3, 1.5],
-          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": ["case", ["==", ["get", "sel"], 1], 4, 3],
+          "circle-stroke-color": ["get", "ring"],
         },
       })
       m.addLayer({
@@ -237,6 +245,14 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
           <span>{metric.unit === "%" ? "0%" : `${metric.lo}${metric.unit}`}</span>
           <span>{metric.unit === "%" ? "100%" : `${metric.hi}${metric.unit}`}</span>
         </div>
+        <div className="mt-2 flex flex-wrap gap-x-2.5 gap-y-1">
+          {(Object.keys(KIND_STYLE) as NodeKind[]).map((k) => (
+            <span key={k} className="flex items-center gap-1">
+              <span className="size-2.5 rounded-full border-2" style={{ borderColor: KIND_STYLE[k].color }} />
+              {KIND_STYLE[k].short}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -266,16 +282,18 @@ function NodePanel({ n }: { n: SensorNode | null }) {
       </Card>
     )
   }
-  const raw: [string, number | null, number | undefined, string, number][] = [
-    ["MQ-2", n.mq2, n.baseline.mq2, "", 0],
-    ["MQ-135", n.mq135, n.baseline.mq135, "", 0],
-    ["Temperature", n.temp_c, n.baseline.temp_c, "°C", 1],
-    ["Tilt", n.tilt_deg, n.baseline.tilt_deg, "°", 1],
-    ["Gyro peak", n.gyro_dps, undefined, "°/s", 1],
-    ["Sound", n.mic, n.baseline.mic, "", 0],
-    ["Piezo", n.piezo, n.baseline.piezo, "", 0],
-    ["Knocks", n.knocks, undefined, "", 0],
+  const all: [string, number | null, number | undefined, string, number, string][] = [
+    ["MQ-2", n.mq2, n.baseline.mq2, "", 0, "mq2"],
+    ["MQ-135", n.mq135, n.baseline.mq135, "", 0, "mq135"],
+    ["Temperature", n.temp_c, n.baseline.temp_c, "°C", 1, "temp_c"],
+    ["Tilt", n.tilt_deg, n.baseline.tilt_deg, "°", 1, "tilt_deg"],
+    ["Gyro peak", n.gyro_dps, undefined, "°/s", 1, "gyro_dps"],
+    ["Sound", n.mic, n.baseline.mic, "", 0, "mic"],
+    ["Piezo", n.piezo, n.baseline.piezo, "", 0, "piezo"],
+    ["Knocks", n.knocks, undefined, "", 0, "knocks"],
   ]
+  // Only the channels this kind of node actually has.
+  const raw = all.filter((r) => !n.channels?.length || n.channels.includes(r[5]) || r[1] != null)
   const flags = (n.flags ?? []).filter((f) => f !== "learning" && !f.startsWith("escalated:") && !f.startsWith("simulated"))
   return (
     <Card className="h-full">
@@ -287,8 +305,16 @@ function NodePanel({ n }: { n: SensorNode | null }) {
             {n.online ? "ONLINE" : "OFFLINE"}
           </span>
         </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline" style={{ borderColor: KIND_STYLE[n.kind]?.color, color: KIND_STYLE[n.kind]?.color }}>
+            {n.kind_label}
+          </Badge>
+          {n.simulated ? <Badge variant="secondary">simulated</Badge> : <Badge>real hardware</Badge>}
+          {n.is_new && <Badge className="bg-emerald-600 hover:bg-emerald-600">new</Badge>}
+        </div>
+        {n.label && n.label !== n.id && <p className="text-sm">{n.label}</p>}
         <CardDescription>
-          Last update {ago(n.age_s)} · RSSI {n.rssi ?? "—"} dBm · {n.lost} packets lost
+          {n.kind_detail} · last update {ago(n.age_s)} · RSSI {n.rssi ?? "—"} dBm · {n.lost} packets lost
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -390,6 +416,26 @@ export default function SensorAnalytics() {
 
   const { data, error } = usePoll(() => fetchOverview(60), 3000, [])
   const [regionPick] = useRegion()
+  const [fleetBump, setFleetBump] = useState(0)
+  const { data: fleet } = usePoll(() => fetchFleet().catch(() => null as FleetStatus | null), 10000, [fleetBump])
+
+  // Announce a node the first time it is heard, after the first load.
+  const seen = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (!data) return
+    if (seen.current === null) {
+      seen.current = new Set(data.nodes.map((n) => n.id))
+      return
+    }
+    for (const n of data.nodes) {
+      if (seen.current.has(n.id)) continue
+      seen.current.add(n.id)
+      toast.success(`New sensor node joined: ${n.id}`, {
+        description: `${n.kind_label}${n.simulated ? " (simulated)" : " (real hardware)"}${n.label && n.label !== n.id ? ` · ${n.label}` : ""}`,
+        action: { label: "Show", onClick: () => setSelected(n.id) },
+      })
+    }
+  }, [data])
   // Same region scoping as the rest of the console; a node with no location yet
   // is shown everywhere so it can be found and placed.
   const nodes = useMemo(() => (data?.nodes ?? []).filter((n) =>
@@ -445,11 +491,15 @@ export default function SensorAnalytics() {
         </span>
       </div>
 
+      <FleetBar fleet={fleet} region={regionPick === "all" ? "pune" : regionPick}
+        onChange={() => setFleetBump((b) => b + 1)} />
+
       {error && <Card className="border-destructive/50 p-4 text-sm">Could not read sensor data: {error}</Card>}
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <Kpi icon={<Radio className="size-4" />} label="Active nodes"
-          value={s ? `${s.online}` : "—"} sub={s ? `${s.total} known · online = heard in the last minute` : ""} />
+          value={s ? `${s.online}` : "—"}
+          sub={s ? `${s.total} known · ${s.real ?? 0} real · ${s.simulated ?? 0} simulated` : ""} />
         <Kpi icon={<UserRound className="size-4" />} label="Human signal" v={s?.human?.value}
           sub={s?.human ? `strongest at ${s.human.node}` : "no live nodes"} />
         <Kpi icon={<HardHat className="size-4" />} label="Structural risk" v={s?.structural?.value}
@@ -476,8 +526,8 @@ export default function SensorAnalytics() {
               <FieldMap nodes={nodes} metric={metric} selected={selected} onSelect={setSelected} />
             ) : (
               <div className="text-muted-foreground grid h-[460px] place-items-center rounded-lg border p-6 text-center text-sm">
-                No sensor node has reported yet.<br />
-                Start the LoRa bridge on the command-centre laptop (or run it with --simulate).
+                No sensor node has reported yet in this region.<br />
+                The simulated fleet starts with the API; switch it on above, or start the LoRa bridge.
               </div>
             )}
             <NodePanel n={node} />
@@ -490,7 +540,11 @@ export default function SensorAnalytics() {
                   <button key={n.id} type="button" onClick={() => setSelected(n.id)}
                     className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${n.id === selected ? "border-primary" : ""}`}>
                     <span className={`size-2 rounded-full ${n.online ? l.dot : "bg-zinc-400"}`} />
-                    {n.id} <span className="text-muted-foreground">{fmt(n[metricKey] as number | null, metric, 1)}</span>
+                    <span className="size-2 rounded-full border-2" style={{ borderColor: KIND_STYLE[n.kind]?.color }}
+                      title={n.kind_label} />
+                    {n.id}{!n.simulated && <span className="font-semibold text-sky-600">·HW</span>}
+                    {n.is_new && n.online && <span className="font-semibold text-emerald-600">NEW</span>}
+                    <span className="text-muted-foreground">{fmt(n[metricKey] as number | null, metric, 1)}</span>
                   </button>
                 )
               })}
@@ -668,6 +722,62 @@ function Kpi({ icon, label, value, v, sub }: {
         </CardTitle>
       </CardHeader>
       {sub && <p className="text-muted-foreground px-6 pb-4 text-xs">{sub}</p>}
+    </Card>
+  )
+}
+
+const DEPLOY: { kind: NodeKind; label: string; episode?: "f" | "c" | "t" }[] = [
+  { kind: "rescue", label: "Rubble listening probe" },
+  { kind: "gas", label: "Gas & heat sentinel" },
+  { kind: "struct", label: "Structural monitor" },
+  { kind: "field", label: "Field module" },
+]
+
+function FleetBar({ fleet, region, onChange }: {
+  fleet: FleetStatus | null; region: string; onChange: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [kind, setKind] = useState<NodeKind>("rescue")
+  const [withEvent, setWithEvent] = useState(false)
+  if (!fleet) return null
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    try { await fn() } catch { /* the request already toasted */ } finally { setBusy(false); onChange() }
+  }
+  const episode = ({ rescue: "t", gas: "f", struct: "c", field: "t" } as const)[kind]
+  return (
+    <Card className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-xs">
+      <div className="flex items-center gap-2">
+        <span className={`size-2 rounded-full ${fleet.enabled ? "bg-emerald-500" : "bg-zinc-400"}`} />
+        <span className="font-medium">Simulated sensor fleet</span>
+        <span className="text-muted-foreground">
+          {fleet.enabled ? `${fleet.nodes} nodes · reading every ${fleet.period_s}s` : "off"}
+          {fleet.enabled && fleet.episodes.length > 0 && ` · ${fleet.episodes.length} event(s) in progress`}
+        </span>
+        <button type="button" disabled={busy} onClick={() => act(() => setFleet(!fleet.enabled))}
+          className="hover:bg-muted rounded-md border px-2 py-0.5 disabled:opacity-50">
+          {fleet.enabled ? "Turn off" : "Turn on"}
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={kind} onChange={(e) => setKind(e.target.value as NodeKind)}
+          className="bg-background rounded-md border px-2 py-1">
+          {DEPLOY.map((d) => <option key={d.kind} value={d.kind}>{d.label}</option>)}
+        </select>
+        <label className="text-muted-foreground flex items-center gap-1">
+          <input type="checkbox" checked={withEvent} onChange={(e) => setWithEvent(e.target.checked)} />
+          lands in an active event
+        </label>
+        <button type="button" disabled={busy || !fleet.enabled}
+          onClick={() => act(() => deployNode(kind, region, withEvent ? episode : undefined))}
+          className="bg-primary text-primary-foreground flex items-center gap-1 rounded-md px-2.5 py-1 disabled:opacity-50">
+          <Plus className="size-3.5" /> Deploy node
+        </button>
+      </div>
+      <span className="text-muted-foreground basis-full">
+        Simulated nodes go through the same scoring and escalation as the LoRa hardware and are labelled
+        "simulated"; a real node joins the field the moment the bridge posts its first reading.
+      </span>
     </Card>
   )
 }
