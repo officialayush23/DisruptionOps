@@ -52,9 +52,15 @@ async def lifespan(_: FastAPI):
     from app.iot import virtual as iot_virtual
 
     await iot_virtual.start()
+    # The rescue swarm's live feed: survivors become incidents, obstructions
+    # become road blocks the router avoids. Read-only; retries quietly.
+    from app.drone import swarm as drone_swarm
+
+    await drone_swarm.start()
     try:
         yield
     finally:
+        await drone_swarm.stop()
         await iot_virtual.stop()
         await event_router.stop()
         # Stop the demo loop before the pool closes. Otherwise a reload leaves a

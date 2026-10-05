@@ -12,6 +12,8 @@ supabase>=2.9            # storage + auth admin only; queries go through asyncpg
 
 # --- http / resilience ---
 httpx>=0.27
+# drone swarm live feed listener (app/drone/swarm.py)
+websockets>=13
 tenacity>=9.0            # retry policy in app/ingest/client.py
 
 # --- auth ---
