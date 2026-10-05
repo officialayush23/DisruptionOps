@@ -6,6 +6,7 @@ import {
   Bluetooth,
   Thermometer,
   Plane,
+  GitFork,
   BrainCircuit,
   ClipboardCheck,
   Gauge,
@@ -102,6 +103,8 @@ const NAV: {
   },
   // The bitchat gateway phones linked to this control room, and what they carried.
   { group: "Operations", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
+  // Tamper-evident record of the response on this device; merges after a partition.
+  { group: "Operations", to: "/admin/ledger", label: "Local DAG Ledger", icon: GitFork },
   // LoRa field sensors: gas, heat, sound, tapping, tilt — on a map and over time.
   { group: "Operations", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
   { group: "Operations", to: "/admin/swarm", label: "Drone swarm", icon: Plane },

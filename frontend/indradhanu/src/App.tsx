@@ -29,6 +29,7 @@ import IncidentResponse from "@/routes/admin/IncidentResponse"
 import MeshDevices from "@/routes/admin/MeshDevices"
 import SensorAnalytics from "@/routes/admin/SensorAnalytics"
 import DroneSwarm from "@/routes/admin/DroneSwarm"
+import Ledger from "@/routes/admin/Ledger"
 
 /** Three interfaces, three URLs.
  *
@@ -76,6 +77,7 @@ export function App() {
                 {/* LoRa field nodes: heatmap over the map, then each node's history. */}
                 <Route path="analytics" element={<SensorAnalytics />} />
                 <Route path="swarm" element={<DroneSwarm />} />
+                <Route path="ledger" element={<Ledger />} />
                 <Route path="risk" element={<RiskBoard />} />
                 <Route path="forecast" element={<Forecast />} />
                 <Route path="incidents" element={<IncidentQueue />} />
