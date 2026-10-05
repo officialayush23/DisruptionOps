@@ -113,9 +113,9 @@ function fromDrone(d: DroneFix): Item {
     kind: "drone",
     title: `Frame from ${d.drone}`,
     text: d.accepted
-      ? `Localized from imagery at ${d.lat?.toFixed(6)}, ${d.lon?.toFixed(6)} (tile ${d.tile ?? "?"})`
+      ? `Localized from imagery at ${d.lat?.toFixed(6)}, ${d.lon?.toFixed(6)}${d.place ? ` — ${d.place}` : ""}`
       : `Could not be placed: ${d.reason ?? "no confident match"}`,
-    where: d.wardId,
+    where: d.place ?? d.wardId,
     outcome: d.accepted ? "position fixed" : "no match",
     tone: d.accepted ? "merge" : "info",
     incidentId: null,

@@ -31,6 +31,9 @@ log = get_logger(__name__)
 FINDER_URL = os.environ.get("MAP_FINDER_URL", "https://map-patch-finder.onrender.com").rstrip("/")
 KIND = "drone.localized"
 
+GEOCODE_URL = "https://api.mapbox.com/search/geocode/v6/reverse"
+_places: dict[tuple[float, float], dict] = {}
+
 _recent: deque[dict] = deque(maxlen=40)
 _seen: OrderedDict[str, dict] = OrderedDict()
 
@@ -58,7 +61,37 @@ def _summary(r: dict, source: str, drone: str | None, thumb: str | None) -> dict
         "reason": None if accepted else (r.get("reason") or "No confident match"),
         "thumb": thumb if isinstance(thumb, str) and thumb.startswith("data:image/") and len(thumb) < 200_000 else None,
         "wardId": None,
+        "place": None,
+        "address": None,
     }
+
+
+async def place_name(lat: float, lon: float) -> dict:
+    """Mapbox reverse geocoding: coordinates -> "neighbourhood, locality, city"."""
+    key = (round(lat, 4), round(lon, 4))
+    if key in _places:
+        return _places[key]
+    from app.core.config import settings
+    token = settings.mapbox_token or os.environ.get("MAPBOX_TOKEN", "")
+    out: dict = {"place": None, "address": None}
+    if not token:
+        return out
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(GEOCODE_URL, params={
+                "longitude": lon, "latitude": lat, "language": "en", "access_token": token})
+        feats = r.json().get("features", []) if r.status_code == 200 else []
+        by = {f["properties"].get("feature_type"): f["properties"] for f in feats}
+        parts = [by.get(t, {}).get("name") for t in ("neighborhood", "locality", "place")]
+        parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
+        out["place"] = ", ".join(parts) or (by.get("place") or {}).get("name")
+        addr = by.get("address") or by.get("street")
+        out["address"] = addr.get("full_address") or addr.get("name") if addr else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("drone_geocode_failed", error=str(exc)[:160])
+    if out["place"]:
+        _places[key] = out
+    return out
 
 
 async def record(result: dict, *, source: str, drone: str | None = None,
@@ -71,6 +104,7 @@ async def record(result: dict, *, source: str, drone: str | None = None,
         _seen.popitem(last=False)
 
     if entry["accepted"]:
+        entry.update(await place_name(entry["lat"], entry["lon"]))
         try:
             from app.mesh import service as mesh
             entry["wardId"] = await mesh.ward_at(entry["lon"], entry["lat"], city_id)
@@ -78,7 +112,8 @@ async def record(result: dict, *, source: str, drone: str | None = None,
             log.warning("drone_ward_lookup_failed", error=str(exc)[:160])
     _recent.appendleft(entry)
 
-    text = (f"{entry['drone']} localized its camera frame: {entry['lat']:.5f}, {entry['lon']:.5f} "
+    where = f" — {entry['place']}" if entry.get("place") else ""
+    text = (f"{entry['drone']} localized its camera frame: {entry['lat']:.5f}, {entry['lon']:.5f}{where} "
             f"({entry['inliers']} feature matches, {entry['processingMs']} ms)"
             if entry["accepted"] else
             f"{entry['drone']} frame could not be placed: {entry['reason']}")

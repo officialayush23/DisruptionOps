@@ -10,7 +10,7 @@ Backend only. The frontend stays on Vercel.
 3. Paste the secrets from the table below.
 4. First deploy takes ~4 minutes, most of it installing `ortools`.
 5. Set `CORS_ORIGINS` to your Vercel URL, and point the frontend's
-   `VITE_API_URL` at `https://indradhanu-api.onrender.com/api/v1`.
+   `VITE_API_URL` at `https://disruptionops.onrender.com/api/v1`.
 
 Migrations do **not** run on deploy, deliberately: a container that migrates on
 boot will run `009` five times if Render restarts it five times. Run them from
@@ -93,9 +93,9 @@ browser console first, not the logs.
 ## Verifying
 
 ```bash
-curl https://indradhanu-api.onrender.com/health/live     # {"status":"ok"} — process is up
-curl https://indradhanu-api.onrender.com/health          # includes the database
-curl "https://indradhanu-api.onrender.com/api/v1/status" # per-feed state, and which LLM engine answered
+curl https://disruptionops.onrender.com/health/live     # {"status":"ok"} — process is up
+curl https://disruptionops.onrender.com/health          # includes the database
+curl "https://disruptionops.onrender.com/api/v1/status" # per-feed state, and which LLM engine answered
 ```
 
 `/docs` is disabled when `INDRADHANU_ENV=production`. That is deliberate; flip

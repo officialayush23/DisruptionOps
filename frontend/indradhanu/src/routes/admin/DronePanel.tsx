@@ -19,7 +19,7 @@ export default function DronePanel({ items, error }: { items: DroneFix[]; error:
     setMsg("Matching the frame against the area's reference imagery…")
     try {
       const r = await localizeFrame(f)
-      setMsg(r.accepted ? `Placed at ${r.lat?.toFixed(5)}, ${r.lon?.toFixed(5)}` : `Not placed: ${r.reason}`)
+      setMsg(r.accepted ? `Placed at ${r.lat?.toFixed(5)}, ${r.lon?.toFixed(5)}${r.place ? ` · ${r.place}` : ""}` : `Not placed: ${r.reason}`)
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e))
     } finally {
@@ -65,6 +65,11 @@ export default function DronePanel({ items, error }: { items: DroneFix[]; error:
                   </span>
                 </div>
               ) : <div className="text-muted-foreground">{latest.reason}</div>}
+              {latest.accepted && latest.place && (
+                <div className="font-medium">{latest.place}
+                  {latest.address && <span className="text-muted-foreground ml-2 text-xs font-normal">{latest.address}</span>}
+                </div>
+              )}
             </div>
           </div>
         )}

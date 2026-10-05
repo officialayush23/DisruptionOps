@@ -11,7 +11,7 @@ https://map-patch-finder.onrender.com) stays its own Render service. Two links:
 
    | Key | Value |
    |---|---|
-   | `INDRADHANU_WEBHOOK_URL` | `https://<our-api>.onrender.com/api/v1/drone/localized` |
+   | `INDRADHANU_WEBHOOK_URL` | `https://disruptionops.onrender.com/api/v1/drone/localized` |
    | `INDRADHANU_WEBHOOK_KEY` | same value as `MESH_GATEWAY_KEY` on our API |
    | `DRONE_ID` | optional, e.g. `drone-1` |
 

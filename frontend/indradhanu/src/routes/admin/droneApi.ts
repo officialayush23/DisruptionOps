@@ -19,6 +19,9 @@ export type DroneFix = {
   reason: string | null
   thumb: string | null
   wardId: string | null
+  /** Mapbox reverse geocode, e.g. "Upper Indira Nagar, Bibwewadi, Pune". */
+  place: string | null
+  address: string | null
 }
 
 export function useDroneFixes(everyMs = 3000) {
