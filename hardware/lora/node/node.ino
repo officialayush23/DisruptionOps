@@ -336,6 +336,28 @@ void buildAndSend() {
 
 }
 
+bool radioStart(bool first) {
+  radioOk = LoRa.begin(LORA_FREQ);
+  if (!radioOk) {
+    if (first) {
+      // Keep going: the sensors still report over USB, and the radio is retried every 10 s.
+      Serial.println(F("#radio not found: check 3.3V, GND, NSS->D10, SCK->D13, MOSI->D11, MISO->D12. Retrying every 10 s."));
+#if LCD_ON
+      if (lcd) { lcd->setCursor(0, 1); lcd->print(F("NO RADIO usb-only")); }
+#endif
+    }
+    return false;
+  }
+  LoRa.setSpreadingFactor(LORA_SF);
+  LoRa.setSignalBandwidth(125E3);
+  LoRa.setCodingRate4(5);
+  LoRa.setSyncWord(LORA_SYNC);
+  LoRa.enableCrc();
+  LoRa.setTxPower(TX_POWER_DBM);
+  if (!first) Serial.println(F("#radio found, LoRa on"));
+  return true;
+}
+
 // ---------------------------------------------------------------- setup ---
 void setup() {
   Serial.begin(115200);
@@ -352,21 +374,7 @@ void setup() {
 
   LoRa.setPins(LORA_NSS, LORA_RST_PIN, LORA_DIO0);
   LoRa.setSPIFrequency(1E6);              // 10k series resistors on NSS/SCK/MOSI
-  radioOk = LoRa.begin(LORA_FREQ);
-  if (!radioOk) {
-    // Keep going: the sensors still report over USB, so the laptop can post them.
-    Serial.println(F("#radio not found: check 3.3V, GND, NSS->D10, SCK->D13, MOSI->D11, MISO->D12. USB-only mode."));
-#if LCD_ON
-    if (lcd) { lcd->setCursor(0, 1); lcd->print(F("NO RADIO usb-only")); }
-#endif
-  } else {
-    LoRa.setSpreadingFactor(LORA_SF);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    LoRa.setSyncWord(LORA_SYNC);
-    LoRa.enableCrc();
-    LoRa.setTxPower(TX_POWER_DBM);
-  }
+  radioStart(true);
 
   detect();
   lastDetect = millis();
@@ -444,6 +452,11 @@ void loop() {
   }
 
   // 5. re-detect sensors every 30 s (plug things in while it runs)
+  static unsigned long lastRadioTry = 0;
+  if (!radioOk && millis() - lastRadioTry >= 10000UL) {
+    lastRadioTry = millis();
+    radioStart(false);
+  }
   if (millis() - lastDetect >= 30000UL) {
     uint8_t before = present;
     detect();
