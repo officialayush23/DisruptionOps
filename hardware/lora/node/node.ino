@@ -348,7 +348,7 @@ void setup() {
   detect();
   lastDetect = millis();
   Serial.println(F("READY indradhanu-lora-modem 2 node " NODE_ID));
-  report();
+  // The sensor inventory is printed only on request (send "I").
   periodStart = millis();
   if (present & C_TEMP) ds.requestTemperatures();
 }
@@ -425,7 +425,7 @@ void loop() {
     uint8_t before = present;
     detect();
     lastDetect = millis();
-    if (present != before) report();
+    (void)before;  // inventory changes are reported only on request ("I")
   }
 
   if (lastBlink && millis() - lastBlink > 40) { digitalWrite(PIN_LED, LOW); lastBlink = 0; }
