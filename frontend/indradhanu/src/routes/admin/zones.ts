@@ -179,5 +179,13 @@ export function regionState(state: DemoState, region: Region | null): DemoState 
     routes: state.routes.filter((r) => ids.has(r.incidentId)),
     agencyRequests: state.agencyRequests.filter((a) => wardIds.has(a.wardId)),
     duplicates: state.duplicates.filter((d) => d.wardId == null || wardIds.has(d.wardId)),
+    events: state.events.filter((e) => e.wardId == null || wardIds.has(e.wardId)),
+    beats: state.beats.filter((b) => {
+      const w = b.detail?.wardId
+      const i = b.detail?.incidentId
+      if (typeof w === "string") return wardIds.has(w)
+      if (typeof i === "string") return ids.has(i)
+      return true
+    }),
   }
 }

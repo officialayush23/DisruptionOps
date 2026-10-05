@@ -2,6 +2,8 @@ import {
   createContext, useCallback, useContext, useMemo, useState, type ReactNode,
 } from "react"
 import { useActivityIndex, useDemoPoll } from "./useDemo"
+import { REGIONS, regionState } from "@/routes/admin/zones"
+import { useRegion, type RegionPick } from "@/lib/region"
 
 /** One world, shared by every screen that looks at it.
  *
@@ -24,13 +26,25 @@ type Ctx = ReturnType<typeof useDemoPoll> & {
   setSelected: (id: string | null) => void
   busy: string | null
   run: (key: string, path: string, body?: unknown) => Promise<unknown>
+  /** The operating region every screen is scoped to ("all" = both). */
+  region: RegionPick
+  setRegion: (r: RegionPick) => void
+  /** The unscoped world, for the rare screen that must see every region. */
+  world: ReturnType<typeof useDemoPoll>["state"]
 }
 
 const DemoContext = createContext<Ctx | null>(null)
 
 export function DemoProvider({ children }: { children: ReactNode }) {
   const poll = useDemoPoll(1000)
-  const activity = useActivityIndex(poll.state)
+  const [region, setRegion] = useRegion()
+  // One region at a time: a Pune run never shows Ghaziabad's incidents, units
+  // or decisions, and the reverse. Every screen reads this scoped copy.
+  const scoped = useMemo(
+    () => (region === "all" ? poll.state : regionState(poll.state, REGIONS.find((r) => r.id === region) ?? null)),
+    [poll.state, region],
+  )
+  const activity = useActivityIndex(scoped)
   const [selected, setSelected] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -48,8 +62,8 @@ export function DemoProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo<Ctx>(
-    () => ({ ...poll, activity, selected, setSelected, busy, run }),
-    [poll, activity, selected, busy, run]
+    () => ({ ...poll, state: scoped, world: poll.state, activity, selected, setSelected, busy, run, region, setRegion }),
+    [poll, scoped, activity, selected, busy, run, region, setRegion]
   )
 
   return <DemoContext.Provider value={value}>{children}</DemoContext.Provider>

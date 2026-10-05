@@ -12,7 +12,7 @@ import WallAnalytics from "./WallAnalytics"
 import { WallMiniMap } from "./WallMiniMap"
 import { WardPanel } from "./WardPanel"
 import {
-  autoRegion, REGIONS, regionState, scopeState, zoneLayers, zonesOf, zoomFor, type Region, type Zone,
+  REGIONS, scopeState, zoneLayers, zonesOf, zoomFor, type Region, type Zone,
 } from "./zones"
 
 /** The command wall.
@@ -43,7 +43,6 @@ const PRESETS: Record<"S" | "M" | "L", Size> = {
 }
 const SIZE_KEY = "wall:sizes:v1"
 const PRESET_KEY = "wall:preset:v1"
-const REGION_KEY = "wall:region:v1"
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -356,18 +355,10 @@ function Kpi({ label, value }: { label: string; value: number }) {
 }
 
 export default function CommandWall() {
-  const { state: world } = useDemo()
-  // One region at a time (Pune and Ghaziabad are 1,200 km apart). "auto"
-  // follows wherever the newest report came from.
-  const [regionPick, setRegionPick] = useState<string>(() => load(REGION_KEY, "auto"))
-  const autoId = useMemo(() => autoRegion(world).id, [world])
-  const region = regionPick === "all" ? null
-    : REGIONS.find((r) => r.id === (regionPick === "auto" ? autoId : regionPick)) ?? null
-  const state = useMemo(() => regionState(world, region), [world, region])
-  const pickRegion = (id: string) => {
-    setRegionPick(id)
-    save(REGION_KEY, id)
-  }
+  // The world arrives already scoped to the console's region (header picker).
+  const { state, region: regionPick, setRegion } = useDemo()
+  const region = regionPick === "all" ? null : REGIONS.find((r) => r.id === regionPick) ?? null
+  const pickRegion = (id: string) => setRegion(id as "pune" | "ncr" | "all")
   // Small screens redraw every 4 s; the analytics and the expanded view use the
   // live snapshot.
   const wallState = useThrottledState(state, 4000, region?.id ?? "all")
@@ -445,7 +436,6 @@ export default function CommandWall() {
               aria-label="Region"
               title="Which region the wall shows"
             >
-              <option value="auto">Auto · {REGIONS.find((r) => r.id === autoId)?.name}</option>
               {REGIONS.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
               <option value="all">All regions</option>
             </select>

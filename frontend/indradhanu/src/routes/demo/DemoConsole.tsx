@@ -63,12 +63,12 @@ function BeatFeed({ beats }: { beats: DemoState["beats"] }) {
 }
 
 export default function DemoConsole() {
-  const { state, error, activity, selected, setSelected, busy, run } = useDemo()
-  // Pune and Ghaziabad are 1,200 km apart: the map opens on the region the
-  // newest report came from, and the buttons jump between them.
-  const [regionId, setRegionId] = useState<string | null>(null)
+  const { state, error, activity, selected, setSelected, busy, run, region: regionPick, setRegion } = useDemo()
+  // Pune and Ghaziabad are 1,200 km apart. The console shows one region at a
+  // time; a simulation started here only creates reports in that region.
   const autoId = useMemo(() => autoRegion(state).id, [state])
-  const region = REGIONS.find((r) => r.id === (regionId ?? autoId)) ?? REGIONS[0]
+  const region = REGIONS.find((r) => r.id === (regionPick === "all" ? autoId : regionPick)) ?? REGIONS[0]
+  const setRegionId = (id: string) => setRegion(id as "pune" | "ncr")
   const [ward, setWard] = useState<string | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
   /** Reset throws away the run. It asks once, in place, rather than through a
@@ -95,10 +95,10 @@ export default function DemoConsole() {
     <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-center gap-2">
         {!state.running ? (
-          <Button onClick={() => run("start", "/demo/start", { cityId: "pune", reportEveryTicks: 4 })}
+          <Button onClick={() => run("start", "/demo/start", { cityId: "pune", region: region.id, reportEveryTicks: 4 })}
                   disabled={busy !== null}>
             {busy === "start" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-            Start live ingest
+            Start live ingest · {region.name}
           </Button>
         ) : (
           <Button variant="destructive" onClick={() => run("stop", "/demo/stop")} disabled={busy !== null}>
@@ -129,7 +129,7 @@ export default function DemoConsole() {
               variant="destructive" size="sm" disabled={busy !== null}
               onClick={() => {
                 setConfirmReset(false)
-                void run("reset", "/demo/reset", { cityId: "pune", reportEveryTicks: 4 })
+                void run("reset", "/demo/reset", { cityId: "pune", region: region.id, reportEveryTicks: 4 })
               }}
             >
               {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}

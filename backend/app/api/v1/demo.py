@@ -34,6 +34,8 @@ router = APIRouter(tags=["demo"])
 
 class StartIn(Camel):
     city_id: str = "pune"
+    #: "pune" or "ncr" (Ghaziabad): the run only creates reports there. None = both.
+    region: str | None = None
     #: Ticks between generated reports. One tick is a second.
     report_every_ticks: int = Field(default=4, ge=1, le=30)
 
@@ -54,7 +56,8 @@ class DecisionActionIn(Camel):
 
 @router.post("/demo/start")
 async def demo_start(body: StartIn, _: StaffPrincipal) -> dict:
-    await runner.start(city_id=body.city_id, report_every_ticks=body.report_every_ticks)
+    await runner.start(city_id=body.city_id, report_every_ticks=body.report_every_ticks,
+                       region=body.region)
     return {"running": True, "tick": runner.state.tick}
 
 

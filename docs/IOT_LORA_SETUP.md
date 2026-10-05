@@ -35,6 +35,40 @@ Code:
 
 ---
 
+## 0. Current build: `node.ino` on BOTH Unos (supersedes field_node / gateway / modem)
+
+`hardware/lora/node/node.ino` is one sketch for both boards. Each Uno is at once a
+sensor node, the LoRa modem for `lora_mesh_link.py`, and a receiver.
+
+* Set `#define NODE_ID "RN01"` on one board and `"RN02"` on the other. Everything else is identical.
+* Every 5 s it reads whatever sensors are plugged in and **mimics any that are missing**
+  (all missing = all mimicked). It prints `L<reading>` over USB and sends `N<reading>` over LoRa.
+* The last field `sim` is a hex bitmask of mimicked channels
+  (1 mq2, 2 mq135, 4 temp, 8 imu, 10 mic, 20 piezo, 40 tilt switch). The API stores it, adds a
+  `simulated:<channels>` flag, and does **not** raise incidents from mimicked channels unless
+  `IOT_ESCALATE_SIMULATED=1` is set on Render (those incidents are captioned `[SIMULATED sensor data]`).
+* Sensor detection is re-run every 30 s, so sensors can be plugged in live.
+* Serial commands: `E f` / `E c` / `E t` / `E 0` start a mimicked fire / collapse / trapped event
+  for 60 s (or stop it); `I` prints which sensors are real.
+* Libraries: LoRa (Sandeep Mistry), OneWire, DallasTemperature, LiquidCrystal I2C.
+
+Pins: radio NSS D10, SCK D13, MOSI D11 (each through 10k), MISO D12, DIO0 D2, RST D9 (through 10k).
+Sensors: MQ-2 A0, MQ-135 A1, piezo A2 (+10k A2→GND), analog mic module A3, MPU-6050 SDA A4 / SCL A5,
+DS18B20 D4 (+10k D4→5V), tilt switch D5→GND, LED D7 (+220Ω), optional I2C LCD.
+
+Run on each laptop (`pip install pyserial`):
+
+```
+# field laptop (bitchat phone on the same Wi-Fi)
+python hardware/lora/lora_mesh_link.py --phone <phone-ip> --name field-A --hmac <MESH_HMAC> --lat .. --lon .. --keyboard
+# command-centre laptop (internet)
+python hardware/lora/lora_mesh_link.py --api https://<render-api> --key <MESH_GATEWAY_KEY> --name hq-B \
+       --hmac <MESH_HMAC> --loc RN01=lat,lon --loc RN02=lat,lon --keyboard
+```
+
+Readings from both nodes reach `/iot/observations` through whichever laptop has `--api`.
+In the keyboard prompt: `event fire|collapse|trapped|stop`, `sensors`, `sos <text>`, `stats`.
+
 ## 1. Power: will USB or a power bank do?
 
 The two MQ gas sensors carry heaters that run all the time and draw most of the

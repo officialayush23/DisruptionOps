@@ -28,6 +28,28 @@ log = get_logger(__name__)
 LIVE_S = 60                 # a node heard within this is "online"
 ESCALATE_SIMULATED = os.environ.get("IOT_ESCALATE_SIMULATED", "") in ("1", "true", "yes")
 
+# Channels a node can report as MIMICKED rather than measured (node.ino `sim`
+# bitmask), and which evidence each one feeds. A score driven only by mimicked
+# channels is labelled simulated and, unless IOT_ESCALATE_SIMULATED is set,
+# never files an incident.
+SIM_BITS = {1: "mq2", 2: "mq135", 4: "temp_c", 8: "imu", 0x10: "mic", 0x20: "piezo", 0x40: "tilt_sw"}
+ALL_SIM = 0x7F
+EVIDENCE_CHANNEL = {"gas_mq2": 1, "gas_mq135": 2, "breath": 2, "heat": 4, "warmth": 4,
+                    "lean": 8, "shock": 8, "shaking": 8, "audio": 0x10, "tapping": 0x20,
+                    "tilt_switch": 0x40, "pir": 0}
+
+
+def simulated_channels(mask: int | None) -> list[str]:
+    return [n for b, n in SIM_BITS.items() if (mask or 0) & b]
+
+
+def driven_by_simulation(s: fusion.Scored, mask: int | None) -> bool:
+    """True when every piece of evidence that matters came from a mimicked channel."""
+    if not mask:
+        return False
+    strong = [k for k, v in s.evidence.items() if v >= 0.3]
+    return bool(strong) and all(EVIDENCE_CHANNEL.get(k, 0) & mask for k in strong)
+
 # Columns a client may ask the analytics endpoints for, raw and derived.
 METRICS = {
     "overall": "overall", "human": "human", "structural": "structural",
@@ -98,7 +120,8 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
         lat = lon = None
     observed = _when(obs.get("received_at") or obs.get("receivedAt"))
     seq = obs.get("seq")
-    simulated = node.upper().startswith("SIM-")
+    sim_mask = _int(obs.get("sim"))
+    simulated = node.upper().startswith("SIM-") or sim_mask == ALL_SIM
 
     async with db.transaction() as conn:
         row = await conn.fetchrow(
@@ -108,7 +131,8 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
             on conflict (id) do update
                set lat = coalesce(excluded.lat, sensor_nodes.lat),
                    lon = coalesce(excluded.lon, sensor_nodes.lon),
-                   gateway_id = excluded.gateway_id
+                   gateway_id = excluded.gateway_id,
+                   simulated = excluded.simulated
             returning lat, lon, ward_id, last_seq, baseline, state, escalated,
                       (xmax = 0) as created
             """,
@@ -116,6 +140,16 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
         )
         lat, lon = row["lat"], row["lon"]
         ward_id = row["ward_id"]
+        # The same reading can arrive twice: once from its own laptop over USB,
+        # once from the other side over LoRa. Seq + uptime identify it.
+        if seq is not None and obs.get("up") is not None:
+            dup = await conn.fetchval(
+                """select 1 from sensor_readings
+                    where node_id = $1 and seq = $2 and uptime_s = $3
+                      and observed_at > now() - interval '1 hour' limit 1""",
+                node, _int(seq), _int(obs.get("up")))
+            if dup:
+                return {"node": node, "duplicate": True}
         if lat is not None and lon is not None and (ward_id is None or obs.get("lat") is not None):
             ward_id = await mesh.ward_at(lon, lat, city_id)
 
@@ -131,6 +165,8 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
         last_esc = _json(row["escalated"])
         found = fusion.escalations(s, s.state, observed.timestamp(), last_esc)
         flags = list(s.flags) + (["packet_loss"] if lost else [])
+        if sim_mask:
+            flags.append("simulated:" + ",".join(simulated_channels(sim_mask)))
         flags += [f"escalated:{e['kind']}" for e in found]
 
         await conn.execute(
@@ -138,9 +174,9 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
             insert into sensor_readings
               (node_id, city_id, observed_at, seq, uptime_s, lat, lon,
                mq2, mq135, temp_c, tilt_deg, gyro_dps, vib_g, mic, piezo, knocks, tilt_sw, pir,
-               rssi, snr, human, structural, environmental, overall, evidence, flags, raw)
+               rssi, snr, human, structural, environmental, overall, evidence, flags, raw, extra)
             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21,$22,$23,$24,$25,$26,$27)
+                    $19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
             """,
             node, city_id, observed, _int(seq), _int(obs.get("up")), lat, lon,
             *[_f(obs.get(c)) if c not in ("knocks", "tilt_sw", "pir") else _int(obs.get(c))
@@ -148,6 +184,7 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
             _int(obs.get("rssi")), _f(obs.get("snr")),
             s.human, s.structural, s.environmental, s.overall, s.evidence, flags,
             (str(obs.get("raw")) if obs.get("raw") else None),
+            {"simulated": simulated_channels(sim_mask)} if sim_mask else {},
         )
 
         state = s.state | {"latest": s.as_dict() | {"at": observed.isoformat()}}
@@ -169,15 +206,19 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
     await _touch_mesh_node(node, lat, lon, ward_id, s, obs)
 
     filed = []
-    if found and lat is not None and lon is not None and (not simulated or ESCALATE_SIMULATED):
+    from_sim = simulated or driven_by_simulation(s, sim_mask)
+    if found and lat is not None and lon is not None and (not from_sim or ESCALATE_SIMULATED):
         for e in found:
+            if from_sim:
+                e = e | {"why": "[SIMULATED sensor data] " + e["why"]}
             filed.append(await _escalate(node, e, lat, lon, s, city_id))
     elif found:
         log.info("iot_escalation_not_filed", node=node, kinds=[e["kind"] for e in found],
-                 reason="simulated node" if simulated else "node has no location")
+                 reason="simulated data (set IOT_ESCALATE_SIMULATED=1 to file it)" if from_sim
+                 else "node has no location")
 
     return {"node": node, **s.as_dict(), "escalated": [f["kind"] for f in filed] or None,
-            "lost": lost}
+            "lost": lost, "simulated": simulated_channels(sim_mask) or None}
 
 
 def _int(v: Any) -> int | None:

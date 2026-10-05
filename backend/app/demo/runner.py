@@ -120,6 +120,8 @@ class DemoState:
     sim_now: datetime | None = None
     speed: float = 1.0
     city_id: str = "pune"
+    #: Operating region the run is confined to ("pune" / "ncr"); None = both.
+    region: str | None = None
     report_every_ticks: int = 4
     adversarial_at_tick: int = 26
     #: The person watching, as a movable marker. Their reports are real reports.
@@ -181,7 +183,8 @@ _world = asyncio.Lock()
 
 
 # ------------------------------------------------------------------ control ---
-async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoState:
+async def start(*, city_id: str = "pune", report_every_ticks: int = 4,
+                region: str | None = None) -> DemoState:
     global _task, _rng, _hazard_task
     await stop()
 
@@ -190,6 +193,8 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     state.started_at = datetime.now(UTC)
     state.sim_now = WALL.now()
     state.city_id = city_id
+    from app import regions
+    state.region = regions.valid(region)
     state.report_every_ticks = max(1, report_every_ticks)
     state.beats.clear()
     state.working.clear()
@@ -207,7 +212,9 @@ async def start(*, city_id: str = "pune", report_every_ticks: int = 4) -> DemoSt
     state.error = None
     _rng = random.Random(state.seed)
 
-    state.beat("start", "Demo started. Reports will arrive a few seconds apart.")
+    state.beat("start", "Demo started"
+               + (f" in {_region_name(state.region)}" if state.region else "")
+               + ". Reports will arrive a few seconds apart.")
 
     # Score the hazard before the first report arrives.
     #
@@ -1518,6 +1525,14 @@ async def _refill(resource_id: str, incident_id: str) -> None:
     )
 
 
+def _region_name(region: str | None) -> str:
+    from app import regions
+    return regions.REGIONS.get(region or "", {}).get("name", "all regions")
+
+
+_REGION_SQL = "(case when extensions.ST_X(w.centroid::extensions.geometry) > 75.5 then 'ncr' else 'pune' end)"
+
+
 async def _pick_ward() -> dict | None:
     """Weight report arrival toward wards that are actually at risk."""
     rows = await db.fetch(
@@ -1532,8 +1547,10 @@ async def _pick_ward() -> dict | None:
              order by created_at desc limit 1
           ) r on true
          where w.city_id = $1
-        """,
-        state.city_id,
+           and ($2::text is null
+                or REGION_EXPR = $2)
+        """.replace("REGION_EXPR", _REGION_SQL),
+        state.city_id, state.region,
     )
     if not rows:
         return None

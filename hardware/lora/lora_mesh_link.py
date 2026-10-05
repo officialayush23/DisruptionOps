@@ -136,6 +136,7 @@ class Modem:
         self.ser = serial.Serial(port, baud, timeout=0.2)
         self.resp: queue.Queue[str] = queue.Queue()
         self.frames: queue.Queue[tuple[int, float, bytes]] = queue.Queue()
+        self.local: queue.Queue[str] = queue.Queue()      # this Uno's own sensor readings
         self.tx_lock = threading.Lock()
         self.ready = threading.Event()
         threading.Thread(target=self._read, daemon=True).start()
@@ -163,6 +164,10 @@ class Modem:
                         self.frames.put((int(rssi), float(snr), bytes.fromhex(hx)))
                     except ValueError:
                         log("modem", f"garbled line: {line[:60]}")
+                elif line.startswith("L") and "|" in line:
+                    self.local.put(line[1:])
+                elif line.startswith("#"):
+                    log("node", line[1:].strip())
                 elif line.startswith("READY"):
                     self.ready.set()
                     log("modem", f"{self.port}: {line}")
@@ -188,6 +193,11 @@ class Modem:
             r = self._cmd("P", "P")
             self.ready.set()
             return r
+
+    def raw(self, cmd: str) -> None:
+        """A one-line command with no reply to wait for (E…, I)."""
+        with self.tx_lock:
+            self.ser.write((cmd + "\n").encode())
 
     def send_frame(self, frame: bytes) -> None:
         with self.tx_lock:
@@ -229,6 +239,46 @@ def idx1(type_: str, body: dict, key: str = "", human: str = "") -> str:
     return f"{human.strip()} {text}" if human else text
 
 
+# ------------------------------------------------------------ sensor readings ---
+FIELDS = ["node", "seq", "up", "mq2", "mq135", "temp_c", "tilt_deg", "gyro_dps", "vib_g",
+          "mic", "piezo", "knocks", "tilt_sw", "pir", "sim"]
+INTS = {"seq", "up", "mq2", "mq135", "mic", "piezo", "knocks", "tilt_sw", "pir"}
+SIM_BITS = {1: "mq2", 2: "mq135", 4: "temp", 8: "imu", 0x10: "mic", 0x20: "piezo", 0x40: "tilt"}
+
+
+def parse_reading(line: str) -> dict | None:
+    """'RN01|12|60|180|...|sim' -> observation dict for POST /iot/observations."""
+    parts = line.strip().split("|")
+    if len(parts) < 5 or not parts[0]:
+        return None
+    obs: dict = {"raw": line.strip()[:200],
+                 "received_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"}
+    for i, name in enumerate(FIELDS):
+        v = parts[i] if i < len(parts) else ""
+        if v == "":
+            obs[name] = None
+        elif name == "node":
+            obs[name] = v[:40]
+        elif name == "sim":
+            try:
+                obs[name] = int(v, 16)
+            except ValueError:
+                obs[name] = None
+        else:
+            try:
+                obs[name] = int(v) if name in INTS else float(v)
+            except ValueError:
+                obs[name] = None
+    return obs
+
+
+def sim_names(mask: int | None) -> str:
+    if not mask:
+        return "all real"
+    names = [n for b, n in SIM_BITS.items() if mask & b]
+    return "all mimicked" if len(names) == len(SIM_BITS) else "mimicked: " + ",".join(names)
+
+
 # --------------------------------------------------------------------- link ---
 class Link:
     def __init__(self, a: argparse.Namespace, modem):
@@ -240,7 +290,17 @@ class Link:
         self.phone = f"http://{a.phone}:{a.phone_port}" if a.phone else None
         self.api = a.api.rstrip("/") + ("" if a.api.rstrip("/").endswith("/api/v1") else "/api/v1") if a.api else None
         self.gw = {"X-Mesh-Gateway-Key": a.key}
-        self.stats = {"lora_in": 0, "lora_out": 0, "phone_in": 0, "phone_out": 0, "api_in": 0, "api_out": 0}
+        self.stats = {"lora_in": 0, "lora_out": 0, "phone_in": 0, "phone_out": 0, "api_in": 0, "api_out": 0,
+                      "readings_local": 0, "readings_remote": 0, "readings_posted": 0}
+        self.locs: dict[str, tuple[float, float]] = {}
+        for spec in a.loc or []:
+            try:
+                node, ll = spec.split("=")
+                la, lo = (float(x) for x in ll.split(","))
+                self.locs[node.strip()] = (la, lo)
+            except ValueError:
+                sys.exit(f"[link] bad --loc {spec!r}; use NODE=lat,lon e.g. RN01=18.5204,73.8567")
+        self.readings: queue.Queue[dict] = queue.Queue()
 
     def relay_ok(self, text: str) -> bool:
         return self.a.all or "IDX1|" in text
@@ -288,6 +348,14 @@ class Link:
     def lora_rx(self) -> None:
         while True:
             rssi, snr, frame = self.modem.frames.get()
+            if frame[:1] == b"N":
+                obs = parse_reading(frame[1:].decode("ascii", "replace"))
+                if obs:
+                    obs["rssi"], obs["snr"] = rssi, snr
+                    self.stats["readings_remote"] += 1
+                    log("<node", f"{obs['node']} #{obs.get('seq')} rssi {rssi} · {sim_names(obs.get('sim'))}")
+                    self.readings.put(obs)
+                continue
             data = self.reasm.add(frame)
             if data is None:
                 continue
@@ -361,14 +429,60 @@ class Link:
                 time.sleep(60)
             time.sleep(self.a.every * 2)
 
+    def local_readings(self) -> None:
+        """This Uno's own readings (USB). It also broadcasts them over LoRa itself."""
+        while True:
+            obs = parse_reading(self.modem.local.get())
+            if obs:
+                self.stats["readings_local"] += 1
+                if self.stats["readings_local"] % 6 == 1:
+                    log("node", f"{obs['node']} #{obs.get('seq')} gas {obs.get('mq2')}/{obs.get('mq135')} "
+                                f"temp {obs.get('temp_c')} · {sim_names(obs.get('sim'))}")
+                self.readings.put(obs)
+
+    def post_readings(self) -> None:
+        """Readings from both nodes -> POST /iot/observations (only with --api)."""
+        while True:
+            batch = [self.readings.get()]
+            time.sleep(0.5)
+            while not self.readings.empty() and len(batch) < 50:
+                batch.append(self.readings.get_nowait())
+            if not self.api:
+                continue
+            for o in batch:
+                if o.get("node") in self.locs:
+                    o["lat"], o["lon"] = self.locs[o["node"]]
+            c, res = http("POST", f"{self.api}/iot/observations",
+                          {"gatewayId": self.a.name, "observations": batch}, self.gw)
+            if c == 200:
+                self.stats["readings_posted"] += len(batch)
+                for sc in res.get("scored", [])[-2:]:
+                    if sc.get("escalated"):
+                        log("api", f"{sc['node']} ESCALATED {sc['escalated']}")
+            else:
+                log("api", f"readings refused ({c}): {str(res)[:160]}")
+                time.sleep(3)
+
     def keyboard(self) -> None:
-        print("Type a message and Enter to send it over LoRa. 'sos <text>' sends a located report. 'stats' shows counters.")
+        print("Type a message + Enter to send it over LoRa. 'sos <text>' = located report. "
+              "'event fire|collapse|trapped|stop' = mimicked event on this node. 'sensors', 'stats'.")
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
             if line == "stats":
                 print(self.stats)
+                continue
+            if line == "sensors":
+                self.modem.raw("I")
+                continue
+            if line.lower().startswith("event"):
+                arg = (line.split(" ", 1) + [""])[1].strip().lower()
+                code = {"fire": "f", "smoke": "f", "collapse": "c", "trapped": "t", "stop": "0", "": "0"}.get(arg)
+                if not code:
+                    print("event fire | collapse | trapped | stop   (mimicked sensors only, 60 s)")
+                    continue
+                self.modem.raw("E" + code)
                 continue
             if line.lower().startswith("sos ") or line.lower().startswith("report "):
                 note = line.split(" ", 1)[1]
@@ -386,7 +500,9 @@ class Link:
             self.to_api([text])
 
     def run(self) -> None:
-        jobs = [self.lora_tx, self.lora_rx]
+        jobs = [self.lora_tx, self.lora_rx, self.post_readings]
+        if hasattr(self.modem, "local"):
+            jobs.append(self.local_readings)
         if self.phone:
             jobs += [self.phone_tx, self.phone_rx]
         if self.api:
@@ -417,6 +533,8 @@ def main() -> None:
     ap.add_argument("--hmac", default=os.getenv("MESH_HMAC_KEY", ""), help="MESH_HMAC_KEY, to sign 'sos' reports typed here")
     ap.add_argument("--lat", type=float, default=None, help="where this end is, for 'sos' reports")
     ap.add_argument("--lon", type=float, default=None)
+    ap.add_argument("--loc", action="append", default=[], metavar="NODE=lat,lon",
+                    help="where a sensor node is (repeat per node), e.g. RN01=18.5204,73.8567")
     ap.add_argument("--all", action="store_true", help="relay every mesh message, not only IDX1 packets")
     ap.add_argument("--repeat", type=int, default=2, help="send each message this many times over LoRa")
     ap.add_argument("--every", type=float, default=3.0, help="seconds between phone polls")

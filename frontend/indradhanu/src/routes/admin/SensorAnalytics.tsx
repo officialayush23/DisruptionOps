@@ -12,6 +12,8 @@ import {
   fetchOverview, fetchSeries, usePoll,
   type Evidence, type SensorEvent, type SensorNode, type SeriesPoint,
 } from "./iotApi"
+import { regionOf } from "./zones"
+import { useRegion } from "@/lib/region"
 
 /** Live LoRa field telemetry.
  *
@@ -388,7 +390,11 @@ export default function SensorAnalytics() {
   const [rawKey, setRawKey] = useState<string>("mq2")
 
   const { data, error } = usePoll(() => fetchOverview(60), 3000, [])
-  const nodes = useMemo(() => data?.nodes ?? [], [data])
+  const [regionPick] = useRegion()
+  // Same region scoping as the rest of the console; a node with no location yet
+  // is shown everywhere so it can be found and placed.
+  const nodes = useMemo(() => (data?.nodes ?? []).filter((n) =>
+    regionPick === "all" || n.lat == null || n.lon == null || regionOf([n.lon, n.lat])?.id === regionPick), [data, regionPick])
 
   useEffect(() => {
     if (!selected && nodes.length) {

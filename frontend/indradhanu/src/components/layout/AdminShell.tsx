@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useRegion, type RegionPick } from "@/lib/region"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
@@ -435,6 +436,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
             })()}
           </div>
           <div className="ml-auto flex items-center gap-3">
+            <RegionPicker />
             <LiveBadge />
             {/* The Copilot, over whatever they are doing rather than instead of
                 it. As its own primary tab it was the clearest example of the
@@ -485,5 +487,26 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     <DemoProvider>
       <Chrome>{children}</Chrome>
     </DemoProvider>
+  )
+}
+
+
+/** Which operating region every screen shows. Pune and Ghaziabad run in one
+ *  deployment; picking one hides the other's incidents, units and decisions
+ *  everywhere, and a simulation started from the console stays in it. */
+function RegionPicker() {
+  const [region, setRegion] = useRegion()
+  return (
+    <select
+      value={region}
+      onChange={(e) => setRegion(e.target.value as RegionPick)}
+      className="border-input bg-background h-8 rounded-md border px-2 text-xs font-medium"
+      aria-label="Operating region"
+      title="Which region the console shows"
+    >
+      <option value="pune">Pune</option>
+      <option value="ncr">Ghaziabad · IPEC</option>
+      <option value="all">Both regions</option>
+    </select>
   )
 }

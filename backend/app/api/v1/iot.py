@@ -36,6 +36,8 @@ class Observation(Camel):
     knocks: int | None = Field(default=None, ge=0, le=1000)
     tilt_sw: int | None = None
     pir: int | None = None
+    #: node.ino bitmask of MIMICKED channels (1 mq2, 2 mq135, 4 temp, 8 imu, 0x10 mic, 0x20 piezo, 0x40 tilt)
+    sim: int | None = Field(default=None, ge=0, le=0xFF)
     rssi: int | None = None
     snr: float | None = None
     lat: float | None = Field(default=None, ge=-90, le=90)
