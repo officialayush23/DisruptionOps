@@ -68,6 +68,7 @@ LiquidCrystal_I2C *lcd = nullptr;
 enum { C_MQ2 = 1, C_MQ135 = 2, C_TEMP = 4, C_IMU = 8, C_MIC = 0x10, C_PIEZO = 0x20, C_TILT = 0x40 };
 uint8_t present = 0;            // bits of channels that are really connected
 bool tiltSeenClosed = false;
+bool radioOk = false;           // false = no radio found: readings still go out over USB
 
 // ------------------------------------------------------- modem (as modem.ino) ---
 const int MAXPKT = 240;
@@ -186,6 +187,7 @@ void command(char *s, int n) {
       break;
     case 'S':
       if (txlen == 0) { Serial.println(F("!empty")); break; }
+      if (!radioOk) { Serial.println(F("!noradio")); txlen = 0; break; }
       LoRa.beginPacket(); LoRa.write(txbuf, txlen); LoRa.endPacket();
       Serial.print('D'); Serial.println(txlen);
       txlen = 0; blink();
@@ -281,11 +283,13 @@ void buildAndSend() {
   Serial.print('L');
   Serial.println(pkt);
 
-  LoRa.beginPacket();
-  LoRa.write('N');
-  LoRa.print(pkt);
-  LoRa.endPacket();
-  blink();
+  if (radioOk) {
+    LoRa.beginPacket();
+    LoRa.write('N');
+    LoRa.print(pkt);
+    LoRa.endPacket();
+    blink();
+  }
 
   if (lcd) {
     char l1[17], l2[17];
@@ -313,17 +317,19 @@ void setup() {
 
   LoRa.setPins(LORA_NSS, LORA_RST_PIN, LORA_DIO0);
   LoRa.setSPIFrequency(1E6);              // 10k series resistors on NSS/SCK/MOSI
-  if (!LoRa.begin(LORA_FREQ)) {
-    Serial.println(F("!radio not found: check 3.3V, GND, NSS->D10, SCK->D13, MOSI->D11, MISO->D12"));
-    if (lcd) { lcd->setCursor(0, 1); lcd->print(F("RADIO NOT FOUND")); }
-    while (true) { digitalWrite(PIN_LED, !digitalRead(PIN_LED)); delay(150); }
+  radioOk = LoRa.begin(LORA_FREQ);
+  if (!radioOk) {
+    // Keep going: the sensors still report over USB, so the laptop can post them.
+    Serial.println(F("#radio not found: check 3.3V, GND, NSS->D10, SCK->D13, MOSI->D11, MISO->D12. USB-only mode."));
+    if (lcd) { lcd->setCursor(0, 1); lcd->print(F("NO RADIO usb-only")); }
+  } else {
+    LoRa.setSpreadingFactor(LORA_SF);
+    LoRa.setSignalBandwidth(125E3);
+    LoRa.setCodingRate4(5);
+    LoRa.setSyncWord(LORA_SYNC);
+    LoRa.enableCrc();
+    LoRa.setTxPower(TX_POWER_DBM);
   }
-  LoRa.setSpreadingFactor(LORA_SF);
-  LoRa.setSignalBandwidth(125E3);
-  LoRa.setCodingRate4(5);
-  LoRa.setSyncWord(LORA_SYNC);
-  LoRa.enableCrc();
-  LoRa.setTxPower(TX_POWER_DBM);
 
   detect();
   lastDetect = millis();
@@ -348,7 +354,7 @@ void loop() {
   }
 
   // 2. radio
-  int size = LoRa.parsePacket();
+  int size = radioOk ? LoRa.parsePacket() : 0;
   if (size > 0) {
     Serial.print('R'); Serial.print(LoRa.packetRssi()); Serial.print(',');
     Serial.print(LoRa.packetSnr(), 1); Serial.print(',');
