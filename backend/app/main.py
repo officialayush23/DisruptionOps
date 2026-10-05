@@ -48,9 +48,14 @@ async def lifespan(_: FastAPI):
     await autonomy.load()
     # Listen to the event log from now on, demo or no demo.
     await event_router.start()
+    # A sensor field that exists with or without the LoRa hardware on the bench.
+    from app.iot import virtual as iot_virtual
+
+    await iot_virtual.start()
     try:
         yield
     finally:
+        await iot_virtual.stop()
         await event_router.stop()
         # Stop the demo loop before the pool closes. Otherwise a reload leaves a
         # task writing into a disconnected pool and the log fills with noise

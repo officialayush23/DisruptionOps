@@ -29,7 +29,7 @@ type Memory = {
 }
 
 const NODES = [
-  ["triage", "Triage"], ["command", "Commander (S5)"], ["sense", "Sense ×4 (parallel)"],
+  ["triage", "Triage"], ["command", "Commander (S5)"], ["sense", "Sense ×5 (parallel)"],
   ["assess", "Assess needs"], ["domain", "Domain planners (parallel)"], ["optimise", "CP-SAT (dry run)"],
   ["validate", "Validate (retry ≤3)"], ["policy_gate", "Policy gate"], ["human_approval", "Officer approval"],
   ["dispatch", "Dispatch"], ["observe", "Observe"],

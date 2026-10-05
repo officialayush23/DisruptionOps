@@ -227,8 +227,18 @@ async def run_hazard(
                 continue
             s = adapter.score(signal, ward)
             scored.append((s, adapter.impact(s, ward), ward))
+        scored, fused = await _fuse_field_sensors(hazard_id, city_id, adapter, scored)
         scored.sort(key=lambda t: t[0].score, reverse=True)
         score_ms = int((time.perf_counter() - t0) * 1000)
+        if fused:
+            trace.add(
+                "hazard_analyst",
+                f"Field sensors raised {len(fused)} ward score(s): "
+                + "; ".join(f"{w} +{d:.0%}" for w, d, _ in fused[:4]),
+                tool="iot.ward_field",
+                tool_output=json.dumps([{"ward": w, "lift": round(d, 3), "why": why}
+                                        for w, d, why in fused[:10]]),
+            )
 
         await conn.executemany(
             """
@@ -561,6 +571,46 @@ async def run_hazard(
 
 
 # ----------------------------------------------------------------- helpers --
+async def _fuse_field_sensors(
+    hazard_id: str, city_id: str, adapter: HazardAdapter,
+    scored: list[tuple[ScoredWard, HazardImpact, WardContext]],
+) -> tuple[list[tuple[ScoredWard, HazardImpact, WardContext]], list[tuple[str, float, str]]]:
+    """Ground truth from the LoRa field (real and simulated nodes) lifts the
+    modelled score of the ward the node sits in. Only upward, never past 1, and
+    only for hazards a sensor can actually speak to (see iot.HAZARD_SENSOR).
+    The lift is written as a risk driver, so it shows wherever drivers do."""
+    from dataclasses import replace
+
+    from app.iot import service as iot
+    from app.schemas.domain import RiskDriver
+
+    try:
+        field_by_ward = await iot.ward_field(city_id)
+    except Exception as exc:  # noqa: BLE001 - sensors are evidence, never a dependency
+        log.warning("sensor_fusion_skipped", error=str(exc)[:160])
+        return scored, []
+    if not field_by_ward:
+        return scored, []
+    out, fused = [], []
+    for s, impact, ward in scored:
+        lift = iot.hazard_lift(hazard_id, field_by_ward.get(ward.ward_id))
+        if lift:
+            add, why = lift
+            old = s.score
+            new = min(1.0, old + (1.0 - old) * add)
+            if new > old + 0.005:
+                s = replace(
+                    s, score=new,
+                    projection=[max(p, new * (0.92 ** i)) for i, p in enumerate(s.projection)],
+                    drivers=[*s.drivers, RiskDriver(label="Field sensors",
+                                                    contribution=min(1.0, add), detail=why[:200])],
+                )
+                impact = adapter.impact(s, ward)
+                fused.append((ward.ward_id, new - old, why))
+        out.append((s, impact, ward))
+    return out, fused
+
+
 def _demands_for(dispatchable: Sequence[dict[str, Any]]) -> list[Demand]:
     """Expand each auto-issued action's capability needs into unit demands."""
     demands: list[Demand] = []

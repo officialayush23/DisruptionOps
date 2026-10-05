@@ -4,6 +4,9 @@
     GET  /analytics/overview     nodes + latest scores + flagged readings (staff)
     GET  /analytics/spatial      one metric per node, for a heatmap (staff)
     GET  /analytics/timeseries   one node's history (staff)
+    GET  /iot/virtual            the simulated fleet: on/off, size, running episodes (staff)
+    POST /iot/virtual            switch the simulated fleet on or off (staff)
+    POST /iot/virtual/deploy     drop a new simulated node into the field (staff)
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ from pydantic import Field
 
 from app.api.v1.mesh import _gateway
 from app.core.security import StaffPrincipal
-from app.iot import service
+from app.iot import service, virtual
 from app.schemas.domain import Camel
 
 router = APIRouter(tags=["iot"])
@@ -86,3 +89,35 @@ async def analytics_spatial(_: StaffPrincipal, metric: str = "overall", city_id:
 async def analytics_timeseries(_: StaffPrincipal, node: str, minutes: int = 30,
                                points: int = 300) -> dict:
     return await service.timeseries(node, minutes, points)
+
+
+class VirtualToggle(Camel):
+    enabled: bool
+
+
+class DeployIn(Camel):
+    kind: str = Field(default="rescue", pattern="^(field|gas|struct|rescue)$")
+    region: str = "pune"
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    #: start an episode on it shortly after it lands: f gas/fire, c structural, t trapped
+    episode: str | None = Field(default=None, pattern="^[fct]$")
+
+
+@router.get("/iot/virtual")
+async def virtual_status(_: StaffPrincipal) -> dict:
+    return virtual.status()
+
+
+@router.post("/iot/virtual")
+async def virtual_toggle(body: VirtualToggle, _: StaffPrincipal) -> dict:
+    return virtual.set_enabled(body.enabled)
+
+
+@router.post("/iot/virtual/deploy")
+async def virtual_deploy(body: DeployIn, _: StaffPrincipal) -> dict:
+    try:
+        return await virtual.deploy(body.kind, body.region, lat=body.lat, lon=body.lon,
+                                    episode=body.episode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

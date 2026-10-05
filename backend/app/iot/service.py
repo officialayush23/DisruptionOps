@@ -21,11 +21,12 @@ from typing import Any
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db import session as db
-from app.iot import fusion
+from app.iot import fusion, kinds
 
 log = get_logger(__name__)
 
 LIVE_S = 60                 # a node heard within this is "online"
+NEW_S = 180                 # a node first heard within this is shown as new
 ESCALATE_SIMULATED = os.environ.get("IOT_ESCALATE_SIMULATED", "") in ("1", "true", "yes")
 
 # Channels a node can report as MIMICKED rather than measured (node.ino `sim`
@@ -123,22 +124,26 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
     sim_mask = _int(obs.get("sim"))
     # Every node is treated as live: mimicked channels score, flag and escalate
     # exactly like measured ones. The mask is kept in `extra` for the bench only.
-    simulated = False
+    # Nodes of the virtual fleet (app.iot.virtual) are stored as simulated so
+    # the console can say so; they still score and escalate like any other.
+    simulated = bool(obs.get("virtual")) and kinds.is_virtual(node)
+    label = str(obs["label"])[:80] if obs.get("label") else None
 
     async with db.transaction() as conn:
         row = await conn.fetchrow(
             """
             insert into sensor_nodes (id, city_id, label, lat, lon, gateway_id, simulated)
-            values ($1, $2, $1, $3, $4, $5, $6)
+            values ($1, $2, coalesce($7::text, $1), $3, $4, $5, $6)
             on conflict (id) do update
                set lat = coalesce(excluded.lat, sensor_nodes.lat),
                    lon = coalesce(excluded.lon, sensor_nodes.lon),
                    gateway_id = excluded.gateway_id,
-                   simulated = excluded.simulated
+                   simulated = excluded.simulated,
+                   label = coalesce($7::text, sensor_nodes.label)
             returning lat, lon, ward_id, last_seq, baseline, state, escalated,
                       (xmax = 0) as created
             """,
-            node, city_id, lat, lon, gateway_id, simulated,
+            node, city_id, lat, lon, gateway_id, simulated, label,
         )
         lat, lon = row["lat"], row["lon"]
         ward_id = row["ward_id"]
@@ -203,6 +208,8 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
             s.baseline, state, last_esc,
         )
 
+    if row["created"]:
+        log.info("iot_node_joined", node=node, kind=kinds.kind_of(node), simulated=simulated)
     await _touch_mesh_node(node, lat, lon, ward_id, s, obs)
 
     filed = []
@@ -238,7 +245,9 @@ async def _escalate(node: str, e: dict, lat: float, lon: float, s: fusion.Scored
         "S",
         {"id": f"{node}-{kind}-{t}"[:60], "n": node, "k": packet_kind,
          "c": e["confidence"], "la": round(lat, 6), "lo": round(lon, 6),
-         "f": "LoRa sensor node", "x": e["why"][:160], "t": t},
+         "f": (f"Simulated {kinds.KINDS[kinds.kind_of(node)]['label'].lower()}"
+               if kinds.is_virtual(node) else "LoRa sensor node"),
+         "x": e["why"][:160], "t": t},
         key=settings.mesh_hmac_key,
     )
     try:
@@ -265,8 +274,12 @@ async def _touch_mesh_node(node: str, lat, lon, ward_id, s: fusion.Scored, obs: 
                    ward_id = coalesce(excluded.ward_id, mesh_nodes.ward_id),
                    meta = mesh_nodes.meta || excluded.meta
             """,
-            f"lora:{node}", f"LoRa node {node}", lat, lon, ward_id,
-            {"transport": "lora", "rssi": obs.get("rssi"), "overall": round(s.overall, 2)},
+            f"lora:{node}",
+            (f"{kinds.KINDS[kinds.kind_of(node)]['label']} {node} (simulated)"
+             if kinds.is_virtual(node) else f"LoRa node {node}"),
+            lat, lon, ward_id,
+            {"transport": "virtual" if kinds.is_virtual(node) else "lora",
+             "kind": kinds.kind_of(node), "rssi": obs.get("rssi"), "overall": round(s.overall, 2)},
         )
     except Exception as exc:  # noqa: BLE001 - cosmetic
         log.debug("iot_mesh_node_touch_failed", error=str(exc))
@@ -301,6 +314,7 @@ async def overview(city_id: str = "pune", minutes: int = 30) -> dict:
     nodes = await db.fetch(
         """
         select n.id, n.label, n.lat, n.lon, n.ward_id, n.gateway_id, n.simulated,
+               n.first_seen, extract(epoch from now() - n.first_seen)::int first_age_s,
                n.last_seen, n.readings, n.lost, n.rssi, n.snr, n.baseline,
                extract(epoch from now() - n.last_seen)::int age_s,
                r.observed_at, r.seq, r.uptime_s, r.mq2, r.mq135, r.temp_c, r.tilt_deg,
@@ -331,6 +345,9 @@ async def overview(city_id: str = "pune", minutes: int = 30) -> dict:
     for n in nodes:
         d = dict(n)
         d["last_seen"] = d["last_seen"].isoformat()
+        d["first_seen"] = d["first_seen"].isoformat()
+        d.update(kinds.describe(d["id"]))
+        d["is_new"] = (d.pop("first_age_s") or 0) < NEW_S
         d["observed_at"] = d["observed_at"].isoformat() if d["observed_at"] else None
         d["evidence"] = _json(d["evidence"])
         d["baseline"] = {k: round(v, 2) for k, v in _json(d["baseline"]).items()
@@ -338,6 +355,11 @@ async def overview(city_id: str = "pune", minutes: int = 30) -> dict:
         d["online"] = d["age_s"] is not None and d["age_s"] < LIVE_S
         out_nodes.append(d)
     live = [n for n in out_nodes if n["online"]]
+    by_kind: dict[str, dict] = {}
+    for n in out_nodes:
+        k = by_kind.setdefault(n["kind"], {"label": n["kind_label"], "total": 0, "online": 0})
+        k["total"] += 1
+        k["online"] += int(n["online"])
 
     def peak(key: str) -> dict | None:
         best = max(live, key=lambda n: n.get(key) or 0, default=None)
@@ -356,7 +378,11 @@ async def overview(city_id: str = "pune", minutes: int = 30) -> dict:
         "summary": {"total": len(out_nodes), "online": len(live),
                     "human": peak("human"), "structural": peak("structural"),
                     "environmental": peak("environmental"), "overall": peak("overall"),
-                    "escalated_1h": int(escalated or 0)},
+                    "escalated_1h": int(escalated or 0),
+                    "simulated": sum(1 for n in out_nodes if n["simulated"]),
+                    "real": sum(1 for n in out_nodes if not n["simulated"]),
+                    "new": [n["id"] for n in out_nodes if n["is_new"] and n["online"]],
+                    "by_kind": by_kind},
         "events": [_reading(e) for e in events],
         "metrics": list(METRICS),
     }
@@ -419,7 +445,8 @@ async def field_summary(city_id: str = "pune") -> list[dict]:
     out = []
     for n in data["nodes"]:
         out.append({
-            "node": n["id"], "online": n["online"], "age_s": n["age_s"],
+            "node": n["id"], "kind": n["kind_label"], "label": n["label"],
+            "online": n["online"], "age_s": n["age_s"],
             "ward_id": n["ward_id"], "lat": n["lat"], "lon": n["lon"],
             "simulated": n["simulated"],
             "human": n["human"], "structural": n["structural"],
@@ -445,20 +472,34 @@ CUE_FOR = {"power_line": "f", "heat_casualty": "f", "fire": "f", "smoke": "f",
 CUE_GAP_S = 75
 
 
+_vcues: list[dict] = []     # cues for the virtual fleet, which runs in this process
+
+
 def cue(node: str, event: str) -> bool:
     now = time.time()
     if event != "0" and now - _last_cue.get(node, 0) < CUE_GAP_S:
         return False
+    if not kinds.can_cue(node, event):
+        return False
     _last_cue[node] = now
-    _cues.append({"node": node, "event": event, "at": now})
-    del _cues[:-20]
+    q = _vcues if kinds.is_virtual(node) else _cues
+    q.append({"node": node, "event": event, "at": now})
+    del q[:-20]
     return True
 
 
 def take_cues() -> list[dict]:
+    """Cues for the real nodes, pulled by the command-centre LoRa link."""
     now = time.time()
     out = [c for c in _cues if now - c["at"] < 120]
     _cues.clear()
+    return [{"node": c["node"], "event": c["event"]} for c in out]
+
+
+def take_virtual_cues() -> list[dict]:
+    now = time.time()
+    out = [c for c in _vcues if now - c["at"] < 120]
+    _vcues.clear()
     return [{"node": c["node"], "event": c["event"]} for c in out]
 
 
@@ -483,6 +524,8 @@ async def cue_near(category: str, lng: float, lat: float, *, city_id: str,
         return None
     best, best_km = None, within_km
     for n in await online_nodes(city_id, region):
+        if not kinds.can_cue(n["id"], code):
+            continue        # a gas sentinel cannot hear tapping
         km = 111.0 * math.hypot(n["lat"] - lat, (n["lon"] - lng) * math.cos(math.radians(lat)))
         if km <= best_km:
             best, best_km = n["id"], km
@@ -495,5 +538,63 @@ async def cue_any(city_id: str, region: str | None, rng) -> tuple[str, str] | No
     if not nodes:
         return None
     node = rng.choice(nodes)["id"]
-    code = rng.choice("fct")
+    code = rng.choice(kinds.KINDS[kinds.kind_of(node)]["cues"])
     return (node, code) if cue(node, code) else None
+
+
+# ------------------------------------------------------- for orchestration ---
+#: Which sensor score speaks to which hazard model, and how much it may lift a
+#: ward's modelled score. Flood has no water sensor in the field: the overall
+#: score is weak evidence there.
+HAZARD_SENSOR = {"fire": ("environmental", 0.45), "wildfire": ("environmental", 0.45),
+                 "air": ("environmental", 0.4), "air_quality": ("environmental", 0.4),
+                 "heat": ("environmental", 0.3), "heatwave": ("environmental", 0.3),
+                 "seismic": ("structural", 0.45), "earthquake": ("structural", 0.45),
+                 "flood": ("overall", 0.15)}
+
+
+async def ward_field(city_id: str = "pune") -> dict[str, dict]:
+    """Per ward, the strongest live sensor scores and which node gave them."""
+    rows = await db.fetch(
+        f"""
+        select n.id, n.ward_id, n.simulated, n.state -> 'latest' latest
+          from sensor_nodes n
+         where n.city_id = $1 and n.ward_id is not null
+           and n.last_seen > now() - interval '{LIVE_S} seconds'
+        """,
+        city_id,
+    )
+    out: dict[str, dict] = {}
+    for r in rows:
+        latest = _json(r["latest"])
+        w = out.setdefault(r["ward_id"], {"nodes": 0, "human": 0.0, "structural": 0.0,
+                                          "environmental": 0.0, "overall": 0.0, "top": None,
+                                          "flags": set()})
+        w["nodes"] += 1
+        for k in ("human", "structural", "environmental", "overall"):
+            v = float(latest.get(k) or 0.0)
+            if v > w[k]:
+                w[k] = v
+                if k == "overall":
+                    w["top"] = r["id"]
+        w["flags"].update(f for f in (latest.get("flags") or [])
+                          if f not in ("learning", "warming_up"))
+    for w in out.values():
+        w["flags"] = sorted(w["flags"])
+    return out
+
+
+def hazard_lift(hazard_id: str, field_w: dict | None) -> tuple[float, str] | None:
+    """(how much to add to a 0..1 ward score, why) for one ward, or None."""
+    if not field_w:
+        return None
+    key = next((k for k in HAZARD_SENSOR if k in hazard_id.lower()), None)
+    if key is None:
+        return None
+    metric, weight = HAZARD_SENSOR[key]
+    v = float(field_w.get(metric) or 0.0)
+    if v < 0.3:
+        return None
+    flags = ", ".join(field_w.get("flags") or []) or "rising readings"
+    return weight * v, (f"{field_w['nodes']} live field sensor(s); {metric} {v:.0%} "
+                        f"at {field_w.get('top')} ({flags})")

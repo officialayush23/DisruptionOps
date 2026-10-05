@@ -100,7 +100,7 @@ DOMAINS: dict[str, str] = {
     "supply_delivery": "logistics", "mass_transport": "logistics",
     "water_supply": "logistics",
 }
-SOURCES = ("units", "needs", "risk", "facilities")
+SOURCES = ("units", "needs", "risk", "facilities", "sensors")
 
 
 # ----------------------------------------------------------------- schemas ---
@@ -340,6 +340,23 @@ async def sense(view, _mem) -> dict[str, Any]:
             "select distinct on (ward_id) ward_id, severity from ward_risks order by ward_id, created_at desc")
         data = {"severe_wards": [r["ward_id"] for r in rows if (r["severity"] or 0) >= 4]}
         text = f"{len(data['severe_wards'])} wards at risk severity 4+."
+    elif src == "sensors":
+        from app.iot import service as iot
+        try:
+            field_by_ward = await iot.ward_field(city)
+        except Exception:  # noqa: BLE001 - sensors are evidence, never a dependency
+            field_by_ward = {}
+        hot = sorted(((w, f) for w, f in field_by_ward.items() if f["overall"] >= 0.4),
+                     key=lambda wf: -wf[1]["overall"])
+        data = {"live_nodes": sum(f["nodes"] for f in field_by_ward.values()),
+                "wards_covered": len(field_by_ward),
+                "hot_wards": [{"ward_id": w, "overall": round(f["overall"], 2),
+                               "human": round(f["human"], 2), "structural": round(f["structural"], 2),
+                               "environmental": round(f["environmental"], 2), "node": f["top"],
+                               "flags": f["flags"][:5]} for w, f in hot[:8]]}
+        text = (f"{data['live_nodes']} field sensors live over {data['wards_covered']} wards; "
+                + (", ".join(f"{h['ward_id']} {h['overall']:.0%}" for h in data["hot_wards"][:3])
+                   + " flagging." if hot else "nothing flagging."))
     else:
         row = await db.fetchrow(
             """select count(*) filter (where capacity > 0 and occupancy >= capacity) full_, count(*) total
