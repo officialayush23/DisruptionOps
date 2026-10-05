@@ -303,7 +303,7 @@ void buildAndSend() {
 #if LCD_ON
   if (lcd) {
     char l1[17], l2[17];
-    snprintf(l1, sizeof(l1), "%s #%lu %s", NODE_ID, seq, mask ? "SIM" : "LIVE");
+    snprintf(l1, sizeof(l1), "%s #%lu %s", NODE_ID, seq, "LIVE");
     char t[8]; dtostrf(isnan(temp) ? 0 : temp, 0, 1, t);
     snprintf(l2, sizeof(l2), "G%d T%s K%u", mq2, t, kn);
     lcd->setCursor(0, 0); lcd->print(l1); for (int i = strlen(l1); i < 16; i++) lcd->print(' ');
@@ -369,6 +369,18 @@ void loop() {
 
   // 2. radio
   int size = radioOk ? LoRa.parsePacket() : 0;
+  if (size > 0 && size <= 12 && LoRa.peek() == 'E') {
+    // "E<NODE_ID><f|c|t|0>": an event cue for one node, sent by the command centre.
+    char cue[13]; int n = 0;
+    while (LoRa.available() && n < 12) cue[n++] = (char)LoRa.read();
+    cue[n] = 0;
+    int idl = strlen(NODE_ID);
+    if (n == idl + 2 && strncmp(cue + 1, NODE_ID, idl) == 0) {
+      char cmd[3] = {'E', cue[n - 1], 0};
+      command(cmd, 2);
+    }
+    size = 0;
+  }
   if (size > 0) {
     Serial.print('R'); Serial.print(LoRa.packetRssi()); Serial.print(',');
     Serial.print(LoRa.packetSnr(), 1); Serial.print(',');

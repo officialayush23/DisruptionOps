@@ -128,7 +128,7 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
       geometry: { type: "Point", coordinates: [n.lon as number, n.lat as number] },
       properties: {
         id: n.id, w: norm(n, metric) ?? 0, online: n.online ? 1 : 0,
-        sel: n.id === selected ? 1 : 0, label: n.simulated ? `${n.id} (sim)` : n.id,
+        sel: n.id === selected ? 1 : 0, label: n.id,
       },
     })),
   }), [nodes, metric, selected])
@@ -276,7 +276,7 @@ function NodePanel({ n }: { n: SensorNode | null }) {
     ["Piezo", n.piezo, n.baseline.piezo, "", 0],
     ["Knocks", n.knocks, undefined, "", 0],
   ]
-  const flags = (n.flags ?? []).filter((f) => f !== "learning" && !f.startsWith("escalated:"))
+  const flags = (n.flags ?? []).filter((f) => f !== "learning" && !f.startsWith("escalated:") && !f.startsWith("simulated"))
   return (
     <Card className="h-full">
       <CardHeader className="pb-3">
@@ -289,7 +289,6 @@ function NodePanel({ n }: { n: SensorNode | null }) {
         </div>
         <CardDescription>
           Last update {ago(n.age_s)} · RSSI {n.rssi ?? "—"} dBm · {n.lost} packets lost
-          {n.simulated && <Badge variant="outline" className="ml-2">simulated</Badge>}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -366,7 +365,7 @@ function Empty({ text }: { text: string }) {
 }
 
 function eventType(e: SensorEvent): { label: string; value: string; sev: number } {
-  const f = e.flags.filter((x) => x !== "warming_up" && x !== "learning")
+  const f = e.flags.filter((x) => x !== "warming_up" && x !== "learning" && !x.startsWith("simulated"))
   const esc = f.find((x) => x.startsWith("escalated:"))
   if (esc) return { label: `Escalated: ${esc.split(":")[1]}`, value: pct(e.overall), sev: 3 }
   const order = ["tapping", "tilt_shift", "tilt_switch", "heat", "gas_mq2", "shock", "sound", "gas_mq135", "shaking", "packet_loss"]

@@ -121,7 +121,9 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
     observed = _when(obs.get("received_at") or obs.get("receivedAt"))
     seq = obs.get("seq")
     sim_mask = _int(obs.get("sim"))
-    simulated = node.upper().startswith("SIM-") or sim_mask == ALL_SIM
+    # Every node is treated as live: mimicked channels score, flag and escalate
+    # exactly like measured ones. The mask is kept in `extra` for the bench only.
+    simulated = False
 
     async with db.transaction() as conn:
         row = await conn.fetchrow(
@@ -165,8 +167,6 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
         last_esc = _json(row["escalated"])
         found = fusion.escalations(s, s.state, observed.timestamp(), last_esc)
         flags = list(s.flags) + (["packet_loss"] if lost else [])
-        if sim_mask:
-            flags.append("simulated:" + ",".join(simulated_channels(sim_mask)))
         flags += [f"escalated:{e['kind']}" for e in found]
 
         await conn.execute(
@@ -184,7 +184,7 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
             _int(obs.get("rssi")), _f(obs.get("snr")),
             s.human, s.structural, s.environmental, s.overall, s.evidence, flags,
             (str(obs.get("raw")) if obs.get("raw") else None),
-            {"simulated": simulated_channels(sim_mask)} if sim_mask else {},
+            {"sim_mask": sim_mask} if sim_mask else {},
         )
 
         state = s.state | {"latest": s.as_dict() | {"at": observed.isoformat()}}
@@ -206,19 +206,15 @@ async def _one(node: str, obs: dict, *, gateway_id: str, city_id: str) -> dict:
     await _touch_mesh_node(node, lat, lon, ward_id, s, obs)
 
     filed = []
-    from_sim = simulated or driven_by_simulation(s, sim_mask)
-    if found and lat is not None and lon is not None and (not from_sim or ESCALATE_SIMULATED):
+    if found and lat is not None and lon is not None:
         for e in found:
-            if from_sim:
-                e = e | {"why": "[SIMULATED sensor data] " + e["why"]}
             filed.append(await _escalate(node, e, lat, lon, s, city_id))
     elif found:
         log.info("iot_escalation_not_filed", node=node, kinds=[e["kind"] for e in found],
-                 reason="simulated data (set IOT_ESCALATE_SIMULATED=1 to file it)" if from_sim
-                 else "node has no location")
+                 reason="node has no location")
 
     return {"node": node, **s.as_dict(), "escalated": [f["kind"] for f in filed] or None,
-            "lost": lost, "simulated": simulated_channels(sim_mask) or None}
+            "lost": lost}
 
 
 def _int(v: Any) -> int | None:
@@ -434,3 +430,70 @@ async def field_summary(city_id: str = "pune") -> list[dict]:
                                       "piezo", "knocks")},
         })
     return out
+
+
+# ------------------------------------------------------------ event cues ---
+# The demo runner cues a sensor event on a node near what it is reporting, so
+# the node's readings rise with the scenario. The command-centre LoRa link pulls
+# these (GET /iot/commands) and runs them on its own Uno or sends them over LoRa.
+# One API worker (see Dockerfile), so an in-process queue is enough.
+_cues: list[dict] = []
+_last_cue: dict[str, float] = {}
+CUE_FOR = {"power_line": "f", "heat_casualty": "f", "fire": "f", "smoke": "f",
+           "structural_damage": "c", "fallen_tree": "c", "collapse": "c",
+           "person_stranded": "t", "trapped": "t"}
+CUE_GAP_S = 75
+
+
+def cue(node: str, event: str) -> bool:
+    now = time.time()
+    if event != "0" and now - _last_cue.get(node, 0) < CUE_GAP_S:
+        return False
+    _last_cue[node] = now
+    _cues.append({"node": node, "event": event, "at": now})
+    del _cues[:-20]
+    return True
+
+
+def take_cues() -> list[dict]:
+    now = time.time()
+    out = [c for c in _cues if now - c["at"] < 120]
+    _cues.clear()
+    return [{"node": c["node"], "event": c["event"]} for c in out]
+
+
+async def online_nodes(city_id: str, region: str | None = None) -> list[dict]:
+    from app import regions
+    rows = await db.fetch(
+        f"""select id, lat, lon from sensor_nodes
+             where city_id = $1 and lat is not null and lon is not null
+               and last_seen > now() - interval '{LIVE_S * 2} seconds'""",
+        city_id,
+    )
+    return [dict(r) for r in rows
+            if region is None or regions.region_of(r["lon"], r["lat"]) == region]
+
+
+async def cue_near(category: str, lng: float, lat: float, *, city_id: str,
+                   region: str | None = None, within_km: float = 6.0) -> str | None:
+    """Cue the nearest online node if the report is close enough to it."""
+    import math
+    code = CUE_FOR.get(category)
+    if not code:
+        return None
+    best, best_km = None, within_km
+    for n in await online_nodes(city_id, region):
+        km = 111.0 * math.hypot(n["lat"] - lat, (n["lon"] - lng) * math.cos(math.radians(lat)))
+        if km <= best_km:
+            best, best_km = n["id"], km
+    return best if best and cue(best, code) else None
+
+
+async def cue_any(city_id: str, region: str | None, rng) -> tuple[str, str] | None:
+    """A sensor-led event on some online node, for the scenario's own rhythm."""
+    nodes = await online_nodes(city_id, region)
+    if not nodes:
+        return None
+    node = rng.choice(nodes)["id"]
+    code = rng.choice("fct")
+    return (node, code) if cue(node, code) else None

@@ -60,6 +60,14 @@ async def post_observations(body: ObservationsIn,
                                 gateway_id=body.gateway_id, city_id=body.city_id)
 
 
+@router.get("/iot/commands")
+async def iot_commands(gateway_id: str = "lora-gw",
+                       x_mesh_gateway_key: str | None = Header(default=None)) -> dict:
+    """Event cues for the LoRa nodes, pulled by the command-centre link."""
+    _gateway(x_mesh_gateway_key)
+    return {"commands": service.take_cues()}
+
+
 @router.get("/analytics/overview")
 async def analytics_overview(_: StaffPrincipal, city_id: str = "pune", minutes: int = 30) -> dict:
     return await service.overview(city_id, minutes)

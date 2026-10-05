@@ -137,6 +137,8 @@ class Modem:
         self.resp: queue.Queue[str] = queue.Queue()
         self.frames: queue.Queue[tuple[int, float, bytes]] = queue.Queue()
         self.local: queue.Queue[str] = queue.Queue()      # this Uno's own sensor readings
+        self.node_id: str | None = None                   # from the READY line (node.ino)
+        self.asked_sensors = 0.0
         self.tx_lock = threading.Lock()
         self.ready = threading.Event()
         threading.Thread(target=self._read, daemon=True).start()
@@ -167,8 +169,17 @@ class Modem:
                 elif line.startswith("L") and "|" in line:
                     self.local.put(line[1:])
                 elif line.startswith("#"):
-                    log("node", line[1:].strip())
+                    info = line[1:].strip()
+                    # Sensor inventory and event cues are for the bench, not the demo screen.
+                    if info.startswith("SENSORS"):
+                        if time.monotonic() - self.asked_sensors < 5:
+                            log("node", info)
+                    elif not info.startswith("EVENT"):
+                        log("node", info)
                 elif line.startswith("READY"):
+                    parts = line.split()
+                    if "node" in parts and parts.index("node") + 1 < len(parts):
+                        self.node_id = parts[parts.index("node") + 1]
                     self.ready.set()
                     log("modem", f"{self.port}: {line}")
                 elif line.startswith("!radio"):
@@ -353,7 +364,7 @@ class Link:
                 if obs:
                     obs["rssi"], obs["snr"] = rssi, snr
                     self.stats["readings_remote"] += 1
-                    log("<node", f"{obs['node']} #{obs.get('seq')} rssi {rssi} · {sim_names(obs.get('sim'))}")
+                    log("<node", f"{obs['node']} #{obs.get('seq')} rssi {rssi} snr {snr}")
                     self.readings.put(obs)
                 continue
             data = self.reasm.add(frame)
@@ -437,7 +448,7 @@ class Link:
                 self.stats["readings_local"] += 1
                 if self.stats["readings_local"] % 6 == 1:
                     log("node", f"{obs['node']} #{obs.get('seq')} gas {obs.get('mq2')}/{obs.get('mq135')} "
-                                f"temp {obs.get('temp_c')} · {sim_names(obs.get('sim'))}")
+                                f"temp {obs.get('temp_c')}")
                 self.readings.put(obs)
 
     def post_readings(self) -> None:
@@ -463,9 +474,31 @@ class Link:
                 log("api", f"readings refused ({c}): {str(res)[:160]}")
                 time.sleep(3)
 
+    def api_cmds(self) -> None:
+        """Event cues from the command centre: run them on this node or send them over LoRa."""
+        while True:
+            c, out = http("GET", f"{self.api}/iot/commands?gateway_id={self.a.name}", headers=self.gw)
+            if c == 200:
+                for cmd in out.get("commands", []):
+                    node, ev = str(cmd.get("node", ""))[:8], str(cmd.get("event", ""))[:1]
+                    if not node or ev not in "fct0":
+                        continue
+                    if node == getattr(self.modem, "node_id", None):
+                        self.modem.raw("E" + ev)
+                    else:
+                        for _ in range(2):
+                            try:
+                                self.modem.send_frame(("E" + node + ev).encode())
+                            except Exception as e:  # noqa: BLE001
+                                log("lora", f"cue failed: {e}")
+                            time.sleep(0.4)
+            elif c == 404:
+                time.sleep(60)  # API without the endpoint yet
+            time.sleep(2)
+
     def keyboard(self) -> None:
         print("Type a message + Enter to send it over LoRa. 'sos <text>' = located report. "
-              "'event fire|collapse|trapped|stop' = mimicked event on this node. 'sensors', 'stats'.")
+              "'event fire|collapse|trapped|stop [node]' = sensor event. 'sensors', 'stats'.")
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -474,15 +507,21 @@ class Link:
                 print(self.stats)
                 continue
             if line == "sensors":
+                self.modem.asked_sensors = time.monotonic()
                 self.modem.raw("I")
                 continue
             if line.lower().startswith("event"):
-                arg = (line.split(" ", 1) + [""])[1].strip().lower()
+                words = line.split()[1:]
+                arg = (words[0] if words else "").lower()
+                target = words[1].upper() if len(words) > 1 else None
                 code = {"fire": "f", "smoke": "f", "collapse": "c", "trapped": "t", "stop": "0", "": "0"}.get(arg)
                 if not code:
-                    print("event fire | collapse | trapped | stop   (mimicked sensors only, 60 s)")
+                    print("event fire|collapse|trapped|stop [RN01]   (60 s; name a node to cue it over LoRa)")
                     continue
-                self.modem.raw("E" + code)
+                if target and target != getattr(self.modem, "node_id", None):
+                    self.modem.send_frame(("E" + target + code).encode())
+                else:
+                    self.modem.raw("E" + code)
                 continue
             if line.lower().startswith("sos ") or line.lower().startswith("report "):
                 note = line.split(" ", 1)[1]
@@ -506,7 +545,7 @@ class Link:
         if self.phone:
             jobs += [self.phone_tx, self.phone_rx]
         if self.api:
-            jobs.append(self.api_rx)
+            jobs += [self.api_rx, self.api_cmds]
         for j in jobs:
             threading.Thread(target=j, daemon=True).start()
         log("link", f"{self.a.name}: LoRa on {getattr(self.modem, 'port', '?')}"

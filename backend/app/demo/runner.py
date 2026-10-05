@@ -359,6 +359,9 @@ async def _tick_locked() -> None:
     if state.tick % BLOCK_EVERY_TICKS == 0:
         await _report_road_block()
 
+    if state.tick % SENSOR_EVERY_TICKS == SENSOR_EVERY_TICKS // 2:
+        await _sensor_event()
+
     if state.tick % PREPOSITION_EVERY_TICKS == 0:
         await _preposition()
 
@@ -375,6 +378,28 @@ async def _tick_locked() -> None:
 #: Categories where the report is about a road, and so has to be on one.
 ON_ROAD = ("flooded_road", "fallen_tree", "power_line", "blocked_drain",
            "structural_damage")
+
+
+#: How often the field sensors get an event of their own, independent of reports.
+SENSOR_EVERY_TICKS = 150
+
+
+async def _cue_sensors(category: str, lng: float, lat: float) -> None:
+    """A report near a LoRa node: the node's readings follow it."""
+    from app.iot import service as iot
+    try:
+        await iot.cue_near(category, lng, lat, city_id=state.city_id, region=state.region)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("demo_sensor_cue_failed", error=str(exc)[:160])
+
+
+async def _sensor_event() -> None:
+    """Some hazards are found by the field sensors first, before anyone reports them."""
+    from app.iot import service as iot
+    try:
+        await iot.cue_any(state.city_id, state.region, _rng)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("demo_sensor_event_failed", error=str(exc)[:160])
 
 
 async def _inject_report() -> None:
@@ -421,6 +446,7 @@ async def _inject_report() -> None:
             result.report_id, street,
         )
     if result.created_incident:
+        await _cue_sensors(category, lng, lat)
         await _gate_for_incident(result.incident_id, ward, category, result.trust.score)
         state.beat(
             "incident",
