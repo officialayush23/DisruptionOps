@@ -33,6 +33,7 @@ const BEAT_STYLE: Record<string, string> = {
   shortfall: "text-red-600 dark:text-red-400",
   decision: "text-blue-600 dark:text-blue-400",
   field: "text-cyan-600 dark:text-cyan-400",
+  drone: "text-teal-600 dark:text-teal-400",
   plan: "text-blue-600 dark:text-blue-400",
   you: "text-violet-600 dark:text-violet-400 font-medium",
   error: "text-red-600 dark:text-red-400",

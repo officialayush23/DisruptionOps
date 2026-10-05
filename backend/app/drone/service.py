@@ -1,0 +1,125 @@
+"""Drone frame localization, logged into the command centre.
+
+The matching itself runs in a separate service (map-patch-finder, its own
+Render deployment): it takes a camera frame, finds which reference tile of the
+area it shows and returns that tile's latitude/longitude. In the field a drone
+would send its own frames; for the demo a person uploads one.
+
+Two ways in, one record:
+  * the finder POSTs every result to /drone/localized (its webhook), so an
+    upload on the finder's own page shows up here;
+  * the console uploads through /drone/localize, which forwards the image to
+    the finder and records what comes back.
+A result arriving both ways (same request_id) is recorded once.
+"""
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from collections import OrderedDict, deque
+from typing import Any
+
+import httpx
+
+from app.core.logging import get_logger
+from app.world import events as ev
+from app.world.clock import WALL
+
+log = get_logger(__name__)
+
+FINDER_URL = os.environ.get("MAP_FINDER_URL", "https://map-patch-finder.onrender.com").rstrip("/")
+KIND = "drone.localized"
+
+_recent: deque[dict] = deque(maxlen=40)
+_seen: OrderedDict[str, dict] = OrderedDict()
+
+
+def recent(limit: int = 20) -> list[dict]:
+    return list(_recent)[:limit]
+
+
+def _summary(r: dict, source: str, drone: str | None, thumb: str | None) -> dict:
+    coords = r.get("coordinates") or {}
+    accepted = bool(r.get("accepted")) and coords.get("latitude") is not None
+    return {
+        "id": str(r.get("request_id") or uuid.uuid4()),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": source,
+        "drone": drone or "drone-1",
+        "accepted": accepted,
+        "lat": float(coords["latitude"]) if accepted else None,
+        "lon": float(coords["longitude"]) if accepted else None,
+        "tile": r.get("image"),
+        "inliers": r.get("inliers"),
+        "errorPx": round(float(r["error"]), 2) if isinstance(r.get("error"), (int, float)) else None,
+        "processingMs": r.get("processing_ms"),
+        "mode": r.get("mode"),
+        "reason": None if accepted else (r.get("reason") or "No confident match"),
+        "thumb": thumb if isinstance(thumb, str) and thumb.startswith("data:image/") and len(thumb) < 200_000 else None,
+        "wardId": None,
+    }
+
+
+async def record(result: dict, *, source: str, drone: str | None = None,
+                 thumb: str | None = None, city_id: str = "pune") -> dict:
+    entry = _summary(result, source, drone, thumb)
+    if entry["id"] in _seen:
+        return _seen[entry["id"]]
+    _seen[entry["id"]] = entry
+    while len(_seen) > 200:
+        _seen.popitem(last=False)
+
+    if entry["accepted"]:
+        try:
+            from app.mesh import service as mesh
+            entry["wardId"] = await mesh.ward_at(entry["lon"], entry["lat"], city_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("drone_ward_lookup_failed", error=str(exc)[:160])
+    _recent.appendleft(entry)
+
+    text = (f"{entry['drone']} localized its camera frame: {entry['lat']:.5f}, {entry['lon']:.5f} "
+            f"({entry['inliers']} feature matches, {entry['processingMs']} ms)"
+            if entry["accepted"] else
+            f"{entry['drone']} frame could not be placed: {entry['reason']}")
+    try:
+        await ev.append(
+            clock=WALL, kind=KIND, actor=ev.feed("drone"), subject_type="drone_frame",
+            subject_id=entry["id"], city_id=city_id, ward_id=entry["wardId"],
+            payload={k: v for k, v in entry.items() if k != "thumb"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("drone_event_failed", error=str(exc)[:160])
+    try:
+        from app.demo import runner
+        runner.state.beat("drone", text, wardId=entry["wardId"], lat=entry["lat"],
+                          lng=entry["lon"], droneFrame=entry["id"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("drone_beat_failed", error=str(exc)[:160])
+    log.info("drone_localized", id=entry["id"], accepted=entry["accepted"], source=source)
+    return entry
+
+
+async def localize(data: bytes, filename: str, content_type: str, *, drone: str | None,
+                   city_id: str = "pune") -> dict:
+    """Send a frame to the finder and record the answer."""
+    import base64
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
+        resp = await client.post(
+            f"{FINDER_URL}/api/v1/localize",
+            params={"include_images": "false"},
+            files={"query": (filename or "frame.jpg", data, content_type or "image/jpeg")},
+            headers={"X-Indradhanu-Source": "console"},
+        )
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {"error": resp.text[:200]}
+    if resp.status_code != 200:
+        return {"ok": False, "status": resp.status_code, "error": body.get("error") or "Localizer failed",
+                "retryAfter": resp.headers.get("Retry-After")}
+    thumb = None
+    if len(data) < 150_000:
+        thumb = f"data:{content_type or 'image/jpeg'};base64," + base64.b64encode(data).decode()
+    entry = await record(body, source="console", drone=drone, thumb=thumb, city_id=city_id)
+    return {"ok": True, "entry": entry}

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
-  Bluetooth, Camera, HardHat, Heart, Inbox, Pause, Play, Smartphone, Zap,
+  Bluetooth, Camera, Drone, HardHat, Heart, Inbox, Pause, Play, Smartphone, Zap,
 } from "lucide-react"
+import DronePanel from "./DronePanel"
+import { useDroneFixes, type DroneFix } from "./droneApi"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import type { RawReport } from "@/routes/demo/useDemo"
 import { Badge } from "@/components/ui/badge"
@@ -20,12 +22,12 @@ import { PACKET_LABEL, hhmmss, useMeshStatus, type MeshPacket } from "./meshApi"
  *  officer can see the mesh is alive even when nothing is on fire.
  */
 
-type Channel = "all" | "app" | "mesh" | "camera" | "crew"
+type Channel = "all" | "app" | "mesh" | "camera" | "crew" | "drone"
 type Item = {
   key: string
   at: number
   channel: Exclude<Channel, "all">
-  kind: "report" | "packet"
+  kind: "report" | "packet" | "drone"
   title: string
   text: string
   where: string | null
@@ -103,8 +105,31 @@ function fromPacket(p: MeshPacket): Item {
   }
 }
 
+function fromDrone(d: DroneFix): Item {
+  return {
+    key: `d:${d.id}`,
+    at: Date.parse(d.at),
+    channel: "drone",
+    kind: "drone",
+    title: `Frame from ${d.drone}`,
+    text: d.accepted
+      ? `Localized from imagery at ${d.lat?.toFixed(6)}, ${d.lon?.toFixed(6)} (tile ${d.tile ?? "?"})`
+      : `Could not be placed: ${d.reason ?? "no confident match"}`,
+    where: d.wardId,
+    outcome: d.accepted ? "position fixed" : "no match",
+    tone: d.accepted ? "merge" : "info",
+    incidentId: null,
+    meta: [
+      d.inliers != null ? `${d.inliers} feature matches` : "",
+      d.errorPx != null ? `${d.errorPx} px error` : "",
+      d.processingMs != null ? `${d.processingMs} ms` : "",
+      d.mode ?? "",
+    ].filter(Boolean),
+  }
+}
+
 const ICON: Record<Item["channel"], typeof Inbox> = {
-  app: Smartphone, mesh: Bluetooth, camera: Camera, crew: HardHat,
+  app: Smartphone, mesh: Bluetooth, camera: Camera, crew: HardHat, drone: Drone,
 }
 const TONE: Record<Item["tone"], string> = {
   open: "border-l-red-500",
@@ -124,6 +149,7 @@ const OUTCOME_BADGE: Record<Item["tone"], string> = {
 export default function LiveFeed() {
   const { state } = useDemo()
   const { data: mesh, error: meshError } = useMeshStatus(2000)
+  const drone = useDroneFixes(3000)
   const navigate = useNavigate()
   const [channel, setChannel] = useState<Channel>("all")
   const [showPackets, setShowPackets] = useState(true)
@@ -139,10 +165,11 @@ export default function LiveFeed() {
   const all = useMemo(() => {
     const items = state.reports.map(fromReport)
     if (showPackets && mesh) items.push(...mesh.recent.map(fromPacket))
+    items.push(...drone.items.map(fromDrone))
     return items
       .filter((it) => Number.isFinite(it.at))
       .sort((a, b) => b.at - a.at)
-  }, [state.reports, mesh, showPackets])
+  }, [state.reports, mesh, showPackets, drone.items])
 
   const shown = (paused ? snapshot : all).filter(
     (it) => channel === "all" || it.channel === channel,
@@ -160,7 +187,7 @@ export default function LiveFeed() {
   const lastMinute = buckets.reduce((a, b) => a + b, 0)
   const peak = Math.max(1, ...buckets)
   const counts = useMemo(() => {
-    const c = { app: 0, mesh: 0, camera: 0, crew: 0 }
+    const c = { app: 0, mesh: 0, camera: 0, crew: 0, drone: 0 }
     for (const it of all) c[it.channel] += 1
     return c
   }, [all])
@@ -173,10 +200,12 @@ export default function LiveFeed() {
     { id: "mesh", label: "Mesh", n: counts.mesh },
     { id: "camera", label: "Camera / VLM", n: counts.camera },
     { id: "crew", label: "Crews", n: counts.crew },
+    { id: "drone", label: "Drones", n: counts.drone },
   ]
 
   return (
     <div className="space-y-4 p-4 md:p-6">
+      <DronePanel items={drone.items} error={drone.error} />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
