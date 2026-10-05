@@ -5,6 +5,7 @@ import {
   Activity,
   Bluetooth,
   Thermometer,
+  Plane,
   BrainCircuit,
   ClipboardCheck,
   Gauge,
@@ -103,6 +104,7 @@ const NAV: {
   { group: "Operations", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
   // LoRa field sensors: gas, heat, sound, tapping, tilt — on a map and over time.
   { group: "Operations", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
+  { group: "Operations", to: "/admin/swarm", label: "Drone swarm", icon: Plane },
   // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
   // authorises, and this is the ledger of what it did — which is what an
   // officer was missing, not a second way to move a vehicle by hand.
