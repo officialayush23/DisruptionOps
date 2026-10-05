@@ -40,7 +40,13 @@
 #include <LoRa.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+// The LCD library is optional: without it the sketch compiles and just skips the LCD.
+#if __has_include(<LiquidCrystal_I2C.h>)
 #include <LiquidCrystal_I2C.h>
+#define HAVE_LCD_LIB 1
+#else
+#define HAVE_LCD_LIB 0
+#endif
 
 // ------------------------------------------------------------- settings ---
 #define NODE_ID        "RN01"    // RN01 on one Uno, RN02 on the other
@@ -48,11 +54,12 @@
 #define LORA_SYNC      0xA5      // same on both
 #define LORA_SF        7         // 7 fast; 9-10 for more range (same on both)
 #define TX_POWER_DBM   14        // 2 if both radios sit on one breadboard and packets garble
-#define LORA_RST_PIN   -1        // -1 = RST not wired (fine). 9 if you wire RST through a 10k to D9
+#define LORA_RST_PIN   9         // RST through a 10k to D9 (also fine if RST is left unwired)
 #define PERIOD_MS      5000      // one reading every 5 s
 #define KNOCK_LEVEL    40        // piezo level that counts as a knock (10k bleed)
 #define KNOCK_GAP_MS   120
-#define USE_LCD        1         // a 16x2 I2C LCD is used if one is found
+#define USE_LCD        1         // a 16x2 I2C LCD is used if one is found (and its library is installed)
+#define LCD_ON         (USE_LCD && HAVE_LCD_LIB)
 
 // ----------------------------------------------------------------- pins ---
 const int LORA_NSS = 10, LORA_DIO0 = 2;
@@ -62,7 +69,9 @@ const uint8_t MPU = 0x68;
 
 OneWire oneWire(PIN_DS);
 DallasTemperature ds(&oneWire);
+#if LCD_ON
 LiquidCrystal_I2C *lcd = nullptr;
+#endif
 
 // channel bits
 enum { C_MQ2 = 1, C_MQ135 = 2, C_TEMP = 4, C_IMU = 8, C_MIC = 0x10, C_PIEZO = 0x20, C_TILT = 0x40 };
@@ -291,6 +300,7 @@ void buildAndSend() {
     blink();
   }
 
+#if LCD_ON
   if (lcd) {
     char l1[17], l2[17];
     snprintf(l1, sizeof(l1), "%s #%lu %s", NODE_ID, seq, mask ? "SIM" : "LIVE");
@@ -299,6 +309,8 @@ void buildAndSend() {
     lcd->setCursor(0, 0); lcd->print(l1); for (int i = strlen(l1); i < 16; i++) lcd->print(' ');
     lcd->setCursor(0, 1); lcd->print(l2); for (int i = strlen(l2); i < 16; i++) lcd->print(' ');
   }
+#endif
+
 }
 
 // ---------------------------------------------------------------- setup ---
@@ -310,7 +322,7 @@ void setup() {
   Wire.begin();
   Wire.setClock(100000);
 
-#if USE_LCD
+#if LCD_ON
   uint8_t addr = i2cPresent(0x27) ? 0x27 : i2cPresent(0x3F) ? 0x3F : 0;
   if (addr) { lcd = new LiquidCrystal_I2C(addr, 16, 2); lcd->init(); lcd->backlight(); lcd->print(F("INDRADHANU " NODE_ID)); }
 #endif
@@ -321,7 +333,9 @@ void setup() {
   if (!radioOk) {
     // Keep going: the sensors still report over USB, so the laptop can post them.
     Serial.println(F("#radio not found: check 3.3V, GND, NSS->D10, SCK->D13, MOSI->D11, MISO->D12. USB-only mode."));
+#if LCD_ON
     if (lcd) { lcd->setCursor(0, 1); lcd->print(F("NO RADIO usb-only")); }
+#endif
   } else {
     LoRa.setSpreadingFactor(LORA_SF);
     LoRa.setSignalBandwidth(125E3);

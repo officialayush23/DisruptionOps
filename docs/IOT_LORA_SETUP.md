@@ -52,7 +52,7 @@ sensor node, the LoRa modem for `lora_mesh_link.py`, and a receiver.
   for 60 s (or stop it); `I` prints which sensors are real.
 * Libraries: LoRa (Sandeep Mistry), OneWire, DallasTemperature, LiquidCrystal I2C.
 
-Pins: radio NSS D10, SCK D13, MOSI D11 (each through 10k), MISO D12, DIO0 D2, RST not wired (`LORA_RST_PIN -1`; set 9 and add a 10k to D9 if you wire it).
+Pins: radio NSS D10, SCK D13, MOSI D11 (each through 10k), MISO D12, DIO0 D2, RST through 10k to D9 (`LORA_RST_PIN 9`).
 Sensors: MQ-2 A0, MQ-135 A1, piezo A2 (+10k A2→GND), analog mic module A3, MPU-6050 SDA A4 / SCL A5,
 DS18B20 D4 (+10k D4→5V), tilt switch D5→GND, LED D7 (+220Ω), optional I2C LCD.
 
