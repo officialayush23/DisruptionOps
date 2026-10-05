@@ -171,7 +171,9 @@ class Modem:
                 elif line.startswith("#"):
                     info = line[1:].strip()
                     # Sensor inventory and event cues are for the bench, not the demo screen.
-                    if info.startswith("SENSORS"):
+                    if info.startswith("READ"):
+                        pass    # the named copy of an L line, for Serial Monitor only
+                    elif info.startswith("SENSORS"):
                         if time.monotonic() - self.asked_sensors < 5:
                             log("node", info)
                     elif not info.startswith("EVENT"):

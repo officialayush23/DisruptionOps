@@ -229,6 +229,28 @@ void addField(const char *v) { strcat(pkt, "|"); strcat(pkt, v); }
 void addInt(long v) { char t[12]; ltoa(v, t, 10); addField(t); }
 void addFloat(float v, int d) { char t[14]; dtostrf(v, 0, d, t); addField(t); }
 
+// The same reading with a name on every value, for the Serial Monitor.
+// Starts with '#' so lora_mesh_link.py leaves it out of its parsing.
+void printF(const __FlashStringHelper *name, float v, int d, const __FlashStringHelper *unit) {
+  Serial.print(' '); Serial.print(name); Serial.print('=');
+  if (isnan(v)) Serial.print('-'); else Serial.print(v, d);
+  Serial.print(unit);
+}
+void printNamed(int mq2, int mq135, float temp, float tilt, float gyro, float vib,
+                int mic, int piezo, int kn, int tsw) {
+  Serial.print(F("#READ " NODE_ID));
+  printF(F("MQ2_smoke"), mq2, 0, F(""));
+  printF(F("MQ135_air"), mq135, 0, F(""));
+  printF(F("temp"), temp, 1, F("C"));
+  printF(F("tilt"), tilt, 1, F("deg"));
+  printF(F("gyro"), gyro, 1, F("dps"));
+  printF(F("vibration"), vib, 3, F("g"));
+  printF(F("sound"), mic, 0, F(""));
+  printF(F("piezo"), piezo, 0, F(""));
+  printF(F("knocks"), kn, 0, F(""));
+  Serial.print(F(" tilt_switch=")); Serial.println(tsw ? F("closed") : F("open"));
+}
+
 void buildAndSend() {
   bool ev = eventKind && millis() < eventUntil;
   float k = ev ? min(1.0, (millis() - eventStart) / 20000.0) : 0;   // ramps up over 20 s
@@ -291,6 +313,7 @@ void buildAndSend() {
 
   Serial.print('L');
   Serial.println(pkt);
+  printNamed(mq2, mq135, temp, tilt, gyro, vib, mic, piezo, kn, tsw);
 
   if (radioOk) {
     LoRa.beginPacket();
