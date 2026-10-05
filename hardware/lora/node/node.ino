@@ -48,7 +48,7 @@
 #define LORA_SYNC      0xA5      // same on both
 #define LORA_SF        7         // 7 fast; 9-10 for more range (same on both)
 #define TX_POWER_DBM   14        // 2 if both radios sit on one breadboard and packets garble
-#define LORA_RST_PIN   9         // 9 if RST is wired through a 10k to D9, else -1
+#define LORA_RST_PIN   -1        // -1 = RST not wired (fine). 9 if you wire RST through a 10k to D9
 #define PERIOD_MS      5000      // one reading every 5 s
 #define KNOCK_LEVEL    40        // piezo level that counts as a knock (10k bleed)
 #define KNOCK_GAP_MS   120
