@@ -152,6 +152,11 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
       return
     }
     map.current = m
+    // Re-measure whenever the card changes size (sidebar toggle, window resize,
+    // the grid switching to two columns); Mapbox only measures at start.
+    const ro = new ResizeObserver(() => m.resize())
+    ro.observe(box.current)
+    m.once("remove", () => ro.disconnect())
     m.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right")
     m.on("load", () => {
       m.addSource("nodes", { type: "geojson", data: { type: "FeatureCollection", features: [] } })
@@ -234,7 +239,10 @@ function FieldMap({ nodes, metric, selected, onSelect }: {
 
   return (
     <div className="relative h-[460px] w-full overflow-hidden rounded-lg border">
-      <div ref={box} className="absolute inset-0" />
+      {/* Sized explicitly, not with absolute + inset-0: mapbox-gl.css sets
+          .mapboxgl-map { position: relative } on this element, which beats the
+          utility class, and the container then collapses to 0 px tall. */}
+      <div ref={box} className="h-full w-full" />
       {failed && (
         <div className="bg-muted/80 absolute inset-0 grid place-items-center p-6 text-center text-sm">{failed}</div>
       )}
