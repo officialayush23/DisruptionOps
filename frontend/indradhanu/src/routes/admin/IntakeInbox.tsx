@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
   CheckCircle2, Inbox, Link2, Loader2, ShieldX, Sparkles, XCircle,
@@ -25,9 +25,14 @@ import type { RawReport } from "@/routes/demo/useDemo"
  *  from the outside.
  */
 
-type Outcome = "opened" | "merged" | "held" | "pending"
+type Outcome = "opened" | "merged" | "unclassified" | "held" | "pending"
+
+/** Reports nothing could classify. They never open an incident on their own:
+ *  an officer reads them and says what they are (`/reports/{id}/classify`). */
+const isUnclassified = (r: RawReport) => r.category === "unknown_report" && !r.incidentId
 
 function outcomeOf(r: RawReport): Outcome {
+  if (isUnclassified(r)) return "unclassified"
   if (r.status === "quarantined" || r.status === "rejected") return "held"
   if (!r.incidentId) return "pending"
   return r.opened ? "opened" : "merged"
@@ -43,6 +48,11 @@ const OUTCOME: Record<Outcome, { label: string; tone: string; note: string }> = 
     label: "Merged",
     tone: "bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30",
     note: "Matched an incident that already existed, so it did not cause a second dispatch.",
+  },
+  unclassified: {
+    label: "Needs classifying",
+    tone: "bg-violet-500/15 text-violet-600 dark:text-violet-400 border-violet-500/30",
+    note: "No keyword, classifier or model could tell what this describes, so it opened no incident. Read it and say what it is.",
   },
   held: {
     label: "Held",
@@ -108,8 +118,35 @@ export default function IntakeInbox() {
    *  the officer's to change afterwards. */
   const [params] = useSearchParams()
   const [filter, setFilter] = useState<Outcome | "all">(() =>
-    params.get("filter") === "held" ? "held" : "all"
+    params.get("filter") === "held" ? "held"
+    : params.get("filter") === "unclassified" ? "unclassified" : "all"
   )
+  const [categories, setCategories] = useState<{ id: string; label: string; lifeSafety: boolean }[]>([])
+  const [pick, setPick] = useState<Record<string, string>>({})
+  const [classifying, setClassifying] = useState<string | null>(null)
+  useEffect(() => {
+    request<{ id: string; label: string; lifeSafety: boolean }[]>("/reports/categories", { toast: false })
+      .then(setCategories).catch(() => setCategories([]))
+  }, [])
+
+  /** An officer says what a held report is; it then opens or joins an incident
+   *  through the same clustering as any classified report. */
+  async function classify(reportId: string) {
+    const category = pick[reportId]
+    if (!category) return
+    setClassifying(reportId)
+    setRulingError(null)
+    try {
+      await request(`/reports/${reportId}/classify`, {
+        method: "POST", body: { category },
+        toast: { loading: "Classifying…", success: "Classified. It now goes through clustering like any report." },
+      })
+    } catch (e) {
+      setRulingError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setClassifying(null)
+    }
+  }
   const [query, setQuery] = useState("")
   const [open, setOpen] = useState<string | null>(null)
   /** Which report is mid-ruling, and what went wrong on the last attempt. */
@@ -215,7 +252,7 @@ export default function IntakeInbox() {
           placeholder="Search the text, ward, street or device"
           className="h-8 max-w-xs text-xs"
         />
-        {(["all", "opened", "merged", "held", "pending"] as const).map((k) => (
+        {(["all", "unclassified", "opened", "merged", "held", "pending"] as const).map((k) => (
           <Button
             key={k}
             size="sm"
@@ -355,6 +392,35 @@ export default function IntakeInbox() {
                             {r.linkReason && (
                               <p className="text-muted-foreground mt-1">{r.linkReason}</p>
                             )}
+                          </div>
+                        )}
+
+                        {r.outcome === "unclassified" && (
+                          <div className="mt-2 space-y-2 rounded-lg border border-violet-500/30 bg-violet-500/5 p-2.5 text-xs">
+                            <p className="font-medium">What is it?</p>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <select
+                                value={pick[r.id] ?? ""}
+                                onChange={(e) => setPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                                className="border-input bg-card h-8 min-w-44 rounded-lg border px-2 text-xs"
+                                aria-label="Category"
+                              >
+                                <option value="">Choose a category…</option>
+                                {categories.map((c) => (
+                                  <option key={c.id} value={c.id}>{c.label}{c.lifeSafety ? " (life safety)" : ""}</option>
+                                ))}
+                              </select>
+                              <Button size="sm" className="h-8 gap-1.5 text-xs"
+                                      disabled={!pick[r.id] || classifying !== null}
+                                      onClick={() => void classify(r.id)}>
+                                {classifying === r.id ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />}
+                                Classify
+                              </Button>
+                            </div>
+                            <p className="text-muted-foreground">
+                              It then opens an incident or joins the one already open there, with that category&rsquo;s needs.
+                              If it is nothing, use &ldquo;Nothing there&rdquo; below instead.
+                            </p>
                           </div>
                         )}
 

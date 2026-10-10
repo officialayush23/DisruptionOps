@@ -300,6 +300,9 @@ async def _mutual_aid(conn: Any, params: dict, *, actor: str, caused_by: int | N
                  "quantity": quantity},
         caused_by=caused_by, conn=conn,
     )
+    from app.ops import agency_replies
+
+    await agency_replies.schedule(row["id"], conn=conn)
     return {"requestId": row["id"], "agency": agency_id,
             "capability": capability, "quantity": quantity}
 

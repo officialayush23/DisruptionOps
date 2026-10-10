@@ -40,18 +40,24 @@ log = get_logger(__name__)
 SENSOR_CATEGORY = {
     "fire": "fire",
     "smoke": "fire",
-    "fall": "unknown_report",       # a person down: needs eyes, not a guess
-    "fight": "unknown_report",
-    "violence": "unknown_report",
-    "gathering": "unknown_report",
-    "object_left": "unknown_report",
     "water_level": "waterlogging",
     "flood": "flooded_road",
     # Classes the VLM names from a scene description (see the phone's
     # SyncBundleBuilder.hazardKind and the camera's indradhanu_bridge.scene_kind).
-    "collapse": "unknown_report",
-    "medical": "unknown_report",
-    "assault": "unknown_report",
+    # A structural monitor reporting a collapse is a structural-damage report;
+    # it was filed as "not yet classified", which opened a holding incident
+    # every ten minutes for a detection that names exactly what it saw.
+    "collapse": "structural_damage",
+    "structural": "structural_damage",
+    # A person down needs someone to physically reach them: the same capability
+    # as a stranded person (see `parse.VOCAB`, "Medical emergencies...").
+    "fall": "person_stranded",
+    "medical": "person_stranded",
+    "person_down": "person_stranded",
+    "fallen_tree": "fallen_tree",
+    "tree": "fallen_tree",
+    # fight / violence / assault / gathering / object_left are security
+    # detections, not hazards: refused, like phone use and identity.
 }
 
 OUTBOUND_KINDS = (
@@ -243,7 +249,8 @@ async def _touch_node(pkt: envelope.Packet, gateway_id: str) -> None:
 
 
 async def _intake(pkt: envelope.Packet, *, category: str, note: str, source: str,
-                  city_id: str, sensor: bool = False) -> tuple[str, str | None]:
+                  city_id: str, sensor: bool = False,
+                  classification: tuple[float | None, str | None] = (None, None)) -> tuple[str, str | None]:
     loc = pkt.location
     if loc is None:
         return "refused", "no location"
@@ -262,6 +269,7 @@ async def _intake(pkt: envelope.Packet, *, category: str, note: str, source: str
                        else "Via mesh" if source.startswith("mesh") else f"Sensor {node}"),
         device_id=f"mesh:{node}", occurred_at=_when(pkt.body.get("t")),
         city_id=city_id, clock=clocks.WALL,
+        classification_confidence=classification[0], classification_method=classification[1],
     )
     if result.created_incident or result.linked:
         _nudge_planner("report over the mesh")
@@ -273,19 +281,22 @@ async def _intake(pkt: envelope.Packet, *, category: str, note: str, source: str
 async def _report(pkt: envelope.Packet, *, city_id: str) -> tuple[str, str | None]:
     b = pkt.body
     category = _category(str(b.get("k") or ""))
+    conf, method = (1.0, "given") if category != "unknown_report" else (None, None)
     if category == "unknown_report" and b.get("x"):
         # The phone sent words, not a category: read them the way the app's
         # own report endpoint does (keywords first, model if confident).
         from app.incidents import parse
 
         try:
-            category = (await parse.parse_with_model(str(b["x"]))).category or category
-        except Exception:  # noqa: BLE001 - an unread report is still a report
+            parsed = await parse.parse_with_model(str(b["x"]))
+            category, conf, method = parsed.category or category, parsed.confidence, parsed.method
+        except Exception:  # noqa: BLE001 - an unread report is still a report (held, unclassified)
             pass
     return await _intake(
         pkt, category=category,
         note=str(b.get("x") or "Reported over the offline mesh."),
         source="mesh" if pkt.verified else "mesh_unsigned", city_id=city_id,
+        classification=(conf, method),
     )
 
 
@@ -306,7 +317,8 @@ async def _sensor(pkt: envelope.Packet, *, city_id: str) -> tuple[str, str | Non
     # Unsigned sensor packets are treated as a person's unverified report.
     source = "sensor" if pkt.verified or not settings.mesh_hmac_key else "mesh_unsigned"
     outcome, ref = await _intake(pkt, category=category, note=note, source=source,
-                                 city_id=city_id, sensor=True)
+                                 city_id=city_id, sensor=True,
+                                 classification=(round(min(1.0, max(conf, 0.0)), 3) or None, f"detector:{kind}"))
     if outcome in ("report", "linked") and conf >= 0.6:
         from app.agents import commander
 

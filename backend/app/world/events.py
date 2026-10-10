@@ -50,6 +50,10 @@ class Kind:
     REPORT_RECEIVED = "report.received"
     REPORT_LINKED = "report.linked"
     REPORT_REJECTED = "report.rejected"
+    #: Stored but not acted on: nothing could tell what it describes. It opens no
+    #: incident and joins none until a person classifies it.
+    REPORT_HELD = "report.held"
+    REPORT_CLASSIFIED = "report.classified"
 
     INCIDENT_OPENED = "incident.opened"
     INCIDENT_SEVERITY_CHANGED = "incident.severity_changed"

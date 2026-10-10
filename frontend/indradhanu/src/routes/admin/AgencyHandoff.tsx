@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
-  ArrowRight, Building2, Check, Handshake, Loader2, Send, TriangleAlert, X,
+  ArrowRight, Bot, Building2, Check, CornerDownRight, Handshake, Loader2, Send,
+  TriangleAlert, Truck, X,
 } from "lucide-react"
 import { useSearchParams } from "react-router-dom"
 import { useDemo } from "@/routes/demo/DemoProvider"
+import type { AgencyRequest } from "@/routes/demo/useDemo"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -47,6 +49,17 @@ const STATUS: Record<string, { label: string; tone: string }> = {
     label: "Cancelled",
     tone: "bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/30",
   },
+}
+
+/** What each kind of answer means, in the officer's words. */
+const REPLY: Record<string, { label: string; tone: string }> = {
+  accept_full: { label: "Accepted", tone: "text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-500/10 dark:border-emerald-500/30" },
+  accept_partial: { label: "Partly accepted", tone: "text-teal-700 bg-teal-50 border-teal-200 dark:text-teal-300 dark:bg-teal-500/10 dark:border-teal-500/30" },
+  delayed: { label: "Later", tone: "text-amber-700 bg-amber-50 border-amber-200 dark:text-amber-300 dark:bg-amber-500/10 dark:border-amber-500/30" },
+  need_info: { label: "Asked for details", tone: "text-sky-700 bg-sky-50 border-sky-200 dark:text-sky-300 dark:bg-sky-500/10 dark:border-sky-500/30" },
+  decline_capacity: { label: "Declined: no capacity", tone: "text-red-700 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-500/10 dark:border-red-500/30" },
+  decline_jurisdiction: { label: "Declined: jurisdiction", tone: "text-red-700 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-500/10 dark:border-red-500/30" },
+  stand_down: { label: "Stood down", tone: "text-slate-600 bg-slate-50 border-slate-200 dark:text-slate-300 dark:bg-slate-500/10 dark:border-slate-500/30" },
 }
 
 const time = (iso: string | null) =>
@@ -136,7 +149,13 @@ export default function AgencyHandoff() {
     setParams({}, { replace: true })
   }, [params, setParams, shortfalls])
 
-  const open = state.agencyRequests.filter((r) => r.status === "requested")
+  const open = state.agencyRequests.filter(
+    (r) => r.status === "requested" || r.status === "acknowledged"
+  )
+  const byId = useMemo(
+    () => new Map(state.agencyRequests.map((r) => [r.id, r] as const)),
+    [state.agencyRequests]
+  )
   const wardName = useMemo(
     () => new Map(state.wards.map((w) => [w.id, w.name] as const)),
     [state.wards]
@@ -314,8 +333,9 @@ export default function AgencyHandoff() {
               <Building2 className="size-4" /> Requests
             </CardTitle>
             <CardDescription>
-              Every transition is an event. The log answers who was asked, when,
-              and what they said.
+              The other agency answers; the agent acts on the answer (stages
+              their units, asks the next agency, sends details, or escalates).
+              Every step is an event.
             </CardDescription>
           </CardHeader>
           <CardContent className="max-h-[560px] space-y-2 overflow-y-auto">
@@ -350,47 +370,54 @@ export default function AgencyHandoff() {
                       </span>
                     )}
                   </div>
-                  {r.note && (
+                  {r.followupOf && (
+                    <p className="text-muted-foreground mt-1 flex items-center gap-1 text-xs">
+                      <CornerDownRight className="size-3" />
+                      Follow-up by the agent after{" "}
+                      {byId.get(r.followupOf)?.toName ?? "an earlier request"}
+                      {byId.get(r.followupOf)?.replyKind
+                        ? ` (${REPLY[byId.get(r.followupOf)!.replyKind!]?.label.toLowerCase() ?? byId.get(r.followupOf)!.replyKind})`
+                        : ""}
+                    </p>
+                  )}
+                  {r.note && !r.followupOf && (
                     <p className="text-muted-foreground mt-1 text-xs italic">
                       &ldquo;{r.note}&rdquo;
                     </p>
                   )}
 
+                  <Conversation r={r} />
+
                   {(r.status === "requested" || r.status === "acknowledged") && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {r.status === "requested" && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs"
-                          disabled={busy !== null}
-                          onClick={() =>
-                            run(`ack-${r.id}`, `/agency-requests/${r.id}/acknowledge`)
-                          }
-                        >
-                          Acknowledge
-                        </Button>
-                      )}
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <span className="text-muted-foreground mr-auto text-xs">
+                        {r.replyDueAt
+                          ? `Their answer is due about ${time(r.replyDueAt)}`
+                          : "Waiting for their answer"}
+                      </span>
                       <Button
                         size="sm"
+                        variant="outline"
                         className="h-7 text-xs"
                         disabled={busy !== null}
+                        title="They said yes by phone or radio: stage their units now"
                         onClick={() =>
                           run(`ful-${r.id}`, `/agency-requests/${r.id}/fulfil`)
                         }
                       >
-                        <Check className="size-3" /> Fulfil
+                        <Check className="size-3" /> Record yes
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         className="h-7 text-xs"
                         disabled={busy !== null}
+                        title="They said no: the agent asks the next agency"
                         onClick={() =>
                           run(`dec-${r.id}`, `/agency-requests/${r.id}/decline`)
                         }
                       >
-                        <X className="size-3" /> Decline
+                        <X className="size-3" /> Record no
                       </Button>
                     </div>
                   )}
@@ -400,6 +427,60 @@ export default function AgencyHandoff() {
           </CardContent>
         </Card>
       </div>
+    </div>
+  )
+}
+
+/** The exchange with the other agency, and what the agent did about it. */
+function Conversation({ r }: { r: AgencyRequest }) {
+  const thread = r.replies ?? []
+  if (!thread.length && !r.nextStep && !(r.units?.length)) return null
+  return (
+    <div className="mt-2 space-y-1.5">
+      {thread.map((m, i) => {
+        const tag = m.who === "agency" ? REPLY[m.kind] : undefined
+        return (
+          <div
+            key={i}
+            className={
+              m.who === "agency"
+                ? "bg-muted/60 rounded-md px-2.5 py-1.5 text-xs"
+                : "border-primary/20 bg-primary/5 ml-6 rounded-md border px-2.5 py-1.5 text-xs"
+            }
+          >
+            <div className="text-muted-foreground mb-0.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+              {m.who === "agent" ? <Bot className="size-3" /> : <Building2 className="size-3" />}
+              <span className="text-foreground font-medium">{m.by}</span>
+              <span>{time(m.at)}</span>
+              {tag && (
+                <span className={`ml-auto rounded border px-1.5 py-px ${tag.tone}`}>
+                  {tag.label}
+                </span>
+              )}
+            </div>
+            &ldquo;{m.text}&rdquo;
+          </div>
+        )
+      })}
+      {r.nextStep && (
+        <div className="flex items-start gap-1.5 text-xs">
+          <Bot className="text-primary mt-0.5 size-3.5 shrink-0" />
+          <span>
+            <span className="font-medium">Agent next step: </span>
+            {r.nextStep}
+          </span>
+        </div>
+      )}
+      {!!r.units?.length && (
+        <div className="flex flex-wrap items-center gap-1 text-xs">
+          <Truck className="text-muted-foreground size-3.5" />
+          {r.units.map((u) => (
+            <Badge key={u} variant="outline" className="font-mono text-[10px]">
+              {u}
+            </Badge>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

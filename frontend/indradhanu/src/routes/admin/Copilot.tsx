@@ -185,12 +185,16 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
       className={
         compact
           ? "flex h-full min-h-0 flex-col gap-3"
-          : "grid h-[calc(100svh-3.5rem)] grid-cols-1 gap-3 p-3 lg:grid-cols-[220px_1fr_320px]"
+          // Fills what is left of the screen under the header, and never more:
+          // the conversation scrolls inside its own box and the question box
+          // stays on screen. It grew with the transcript before, so the box
+          // slid down the page and had to be scrolled to.
+          : "grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] gap-4 p-4 md:p-6 lg:grid-cols-[220px_minmax(0,1fr)_320px] lg:grid-rows-[minmax(0,1fr)]"
       }
     >
       {/* The world, so an answer can be checked against it while it is read. */}
       {!compact && (
-      <aside className="hidden space-y-2 lg:block">
+      <aside className="hidden min-h-0 space-y-2 overflow-auto lg:block">
         <Stat label="Open incidents" value={state.incidents.length} />
         <Stat label="Severity 4+" value={situation.critical} tone={situation.critical ? "bad" : undefined} />
         <Stat label="Units committed" value={`${situation.committed}/${state.resources.length}`} />
@@ -222,7 +226,7 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
       )}
 
       {/* The conversation. */}
-      <section className="flex min-h-0 flex-col rounded-lg border">
+      <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border bg-card shadow-card">
         <div ref={feedRef} className="min-h-0 flex-1 space-y-5 overflow-auto p-4">
           {turns.length === 0 && (
             <div className="space-y-3">
@@ -317,7 +321,7 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
           )}
         </div>
 
-        <div className="border-t p-3">
+        <div className="shrink-0 border-t bg-card p-3">
           <div className="relative">
             <Textarea
               value={question}
@@ -343,7 +347,7 @@ export default function Copilot({ compact = false }: { compact?: boolean }) {
 
       {/* Whatever is pending. */}
       {!compact && (
-      <aside className="min-h-0 space-y-2 overflow-auto rounded-lg border p-3">
+      <aside className="max-h-56 min-h-0 space-y-2 overflow-auto rounded-2xl border bg-card p-4 shadow-card lg:max-h-none">
         <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
           Proposed actions
         </div>

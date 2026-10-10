@@ -265,7 +265,8 @@ function useCounts(): Counts {
     // matters: a report a person has already ruled on is not still asking.
     held: state.reports.filter(
       (r) =>
-        (r.status === "quarantined" || r.status === "rejected") && r.verdict === null
+        ((r.status === "quarantined" || r.status === "rejected") ||
+          (r.category === "unknown_report" && !r.incidentId)) && r.verdict === null
     ).length,
     gate: state.decisions.filter((d) => d.status === "awaiting_approval").length,
     handoffs: state.agencyRequests.filter((r) => r.status === "requested").length,
@@ -339,7 +340,10 @@ function LoadStrip() {
   const open = state.incidents.length
   const committed = state.resources.filter((r) => r.status !== "available").length
   const unmet = state.needs.filter((n) => n.met < n.required).length
+  const pr = state.pressure
   const rows: [string, string, boolean][] = [
+    ...(pr && state.running ? [["Front-line fleet in use", `${Math.round(pr.utilisation * 100)}%${pr.target ? ` of ${Math.round(pr.target * 100)}%` : ""}`, pr.utilisation >= 0.75] as [string, string, boolean],
+        ["Demands waiting for a unit", String(pr.backlog), pr.backlog > 0] as [string, string, boolean]] : []),
     ["Open incidents", String(open), open > 0],
     ["Units committed", `${committed}/${state.resources.length}`, committed > 0],
     ["Unmet needs", String(unmet), unmet > 0],
@@ -463,7 +467,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
         </SidebarContent>
       </Sidebar>
 
-      <SidebarInset className="min-w-0">
+      <SidebarInset className="h-svh min-w-0 overflow-hidden">
         <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border/60 bg-background/85 px-5 backdrop-blur md:px-8 xl:px-10">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />
@@ -527,8 +531,8 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 overflow-auto bg-background">
-          <div className="px-5 pt-4 md:px-8 xl:px-10 empty:hidden">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-background">
+          <div className="shrink-0 px-5 pt-4 md:px-8 xl:px-10 empty:hidden">
             <AutonomyControl />
           </div>
           {children}

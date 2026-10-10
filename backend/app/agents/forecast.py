@@ -210,6 +210,8 @@ class Forecast:
     #: so rather than presenting a prior as a prediction.
     incidents_seen: int
     history_hours: float
+    #: How the same method did on this run's own history (see `backtest`).
+    backtest: dict[str, Any] = field(default_factory=dict)
 
     @property
     def confidence_note(self) -> str:
@@ -445,6 +447,11 @@ async def build(
     ]
 
     recurrence.sort(key=lambda r: r.expected, reverse=True)
+    try:
+        bt = await backtest(city_id=city_id)
+    except Exception as exc:  # noqa: BLE001 - a failed check must not take the forecast down
+        log.warning("forecast_backtest_failed", error=str(exc)[:160])
+        bt = {"available": False, "reason": "backtest failed"}
     return Forecast(
         horizon_hours=horizon_hours,
         generated_at=datetime.now(UTC),
@@ -453,7 +460,134 @@ async def build(
         demand=demand,
         incidents_seen=total,
         history_hours=round(history_hours, 1),
+        backtest=bt,
     )
+
+
+# ------------------------------------------------------------ backtest ---
+_HISTORY_SQL = """
+select ward_id, category, created_at
+  from incidents
+ where city_id = $1 and sim_run_id is null
+   and created_at > now() - ($2 || ' days')::interval
+ order by created_at
+"""
+_RISK_HISTORY_SQL = """
+select wr.ward_id, wr.created_at, wr.severity, wr.score
+  from ward_risks wr join wards w on w.id = wr.ward_id
+ where w.city_id = $1 and wr.created_at > now() - ($2 || ' days')::interval
+ order by wr.created_at
+"""
+
+
+def _rates_at(rows: list[tuple[str, str, datetime]], wards: list[str], t: datetime, start: datetime,
+              mult: dict[str, float]) -> dict[str, float]:
+    """Expected incidents per hour per ward at time `t`, from incidents before
+    `t` only: exactly the posterior `build` computes, replayed as of `t`."""
+    hours = max((t - start).total_seconds() / 3600.0, 1.0)
+    past = [r for r in rows if r[2] < t]
+    n_w = max(1, len(wards))
+    by_cat: dict[str, int] = {}
+    by_wc: dict[tuple[str, str], int] = {}
+    for w, c, _ in past:
+        by_cat[c] = by_cat.get(c, 0) + 1
+        by_wc[(w, c)] = by_wc.get((w, c), 0) + 1
+    out: dict[str, float] = {}
+    for w in wards:
+        rate = 0.0
+        for c, n in by_cat.items():
+            prior = n / (hours * n_w)
+            rate += (prior * PRIOR_HOURS + by_wc.get((w, c), 0)) / (PRIOR_HOURS + hours)
+        out[w] = rate * mult.get(w, 1.0)
+    return out
+
+
+async def backtest(*, city_id: str = "pune", horizon_hours: float = 1.0, max_origins: int = 24) -> dict[str, Any]:
+    """How good has this forecast been, on what actually happened here?
+
+    Rolling origin: at each past time T the rates are rebuilt from incidents
+    before T only (and the ward risk known at T), then compared with what
+    arrived in [T, T+h]. Two baselines on the same windows:
+
+      * persistence - each ward repeats its count from the previous h hours;
+      * uniform - the city's rate so far, spread evenly over the wards.
+
+    Scores: mean absolute error of the count per ward-window, Brier score of
+    "at least one incident", and the share of the incidents that landed in the
+    five wards each method ranked highest. Lower MAE/Brier and higher top-5 are
+    better. Nothing here is tuned to the numbers it reports.
+    """
+    rows_db = await db.fetch(_HISTORY_SQL, city_id, str(LOOKBACK_DAYS))
+    wards = [r["id"] for r in await db.fetch("select id from wards where city_id = $1", city_id)]
+    rows = [(r["ward_id"], r["category"], r["created_at"]) for r in rows_db]
+    if len(rows) < 8 or not wards:
+        return {"available": False, "reason": f"Only {len(rows)} incident(s) of history; needs at least 8 to check itself."}
+    start, end = rows[0][2], rows[-1][2]
+    span_h = (end - start).total_seconds() / 3600.0
+    h = horizon_hours if span_h >= 3 * horizon_hours else max(0.25, span_h / 4)
+    if span_h < 2 * h:
+        return {"available": False, "reason": "Not enough time covered yet to compare a forecast with what followed."}
+    risks = await db.fetch(_RISK_HISTORY_SQL, city_id, str(LOOKBACK_DAYS))
+
+    step = max(h / 2, (span_h - h - h) / max_origins)
+    origins: list[datetime] = []
+    t = start + timedelta(hours=h)
+    while t + timedelta(hours=h) <= end and len(origins) < max_origins:
+        origins.append(t)
+        t += timedelta(hours=step)
+
+    def mult_at(t: datetime) -> dict[str, float]:
+        latest: dict[str, tuple[Any, Any]] = {}
+        for r in risks:
+            if r["created_at"] <= t:
+                latest[r["ward_id"]] = (r["severity"], r["score"])
+        return {w: _hazard_multiplier(sv, float(sc) if sc is not None else None) for w, (sv, sc) in latest.items()}
+
+    stats = {k: {"abs": 0.0, "brier": 0.0, "hit": 0, "n": 0} for k in ("model", "persistence", "uniform")}
+    total_actual = 0
+    for t0 in origins:
+        t1 = t0 + timedelta(hours=h)
+        actual = {w: 0 for w in wards}
+        prev = {w: 0 for w in wards}
+        for w, _, ts in rows:
+            if t0 <= ts < t1 and w in actual:
+                actual[w] += 1
+            elif t0 - timedelta(hours=h) <= ts < t0 and w in prev:
+                prev[w] += 1
+        n_actual = sum(actual.values())
+        total_actual += n_actual
+        rates = _rates_at(rows, wards, t0, start, mult_at(t0))
+        so_far = sum(1 for r in rows if r[2] < t0)
+        uni = so_far / max((t0 - start).total_seconds() / 3600.0, 1.0) / len(wards)
+        preds = {
+            "model": {w: rates[w] * h for w in wards},
+            "persistence": {w: float(prev[w]) for w in wards},
+            "uniform": {w: uni * h for w in wards},
+        }
+        for k, pred in preds.items():
+            top5 = sorted(wards, key=lambda w: pred[w], reverse=True)[:5]
+            st = stats[k]
+            for w in wards:
+                st["abs"] += abs(pred[w] - actual[w])
+                p1 = 1.0 - math.exp(-pred[w]) if k != "persistence" else (1.0 if pred[w] > 0 else 0.0)
+                st["brier"] += (p1 - (1.0 if actual[w] > 0 else 0.0)) ** 2
+                st["n"] += 1
+            st["hit"] += sum(actual[w] for w in top5)
+
+    def score(k: str) -> dict[str, float]:
+        st = stats[k]
+        # A uniform forecast ranks every ward equally, so its "top five" is
+        # arbitrary and not reported.
+        return {"mae": round(st["abs"] / max(st["n"], 1), 4), "brier": round(st["brier"] / max(st["n"], 1), 4),
+                "top5": round(st["hit"] / total_actual, 3) if total_actual and k != "uniform" else None}
+
+    out = {"available": True, "horizonHours": round(h, 2), "origins": len(origins),
+           "incidents": total_actual, "wards": len(wards),
+           "model": score("model"), "persistence": score("persistence"), "uniform": score("uniform")}
+    best = min(("model", "persistence", "uniform"), key=lambda k: out[k]["brier"])
+    out["verdict"] = ("The forecast beats both baselines on these windows." if best == "model"
+                      else f"On these windows the {best} baseline did better; the forecast needs more history to learn from.")
+    return out
 
 
 # ------------------------------------------------------- used in guidance ---
@@ -485,6 +619,7 @@ def as_dict(f: Forecast) -> dict[str, Any]:
         "incidentsSeen": f.incidents_seen,
         "historyHours": f.history_hours,
         "confidenceNote": f.confidence_note,
+        "backtest": f.backtest,
         "recurrence": [
             {"wardId": r.ward_id, "wardName": r.ward_name, "category": r.category,
              "ratePerHour": r.rate_per_hour, "expected": r.expected,

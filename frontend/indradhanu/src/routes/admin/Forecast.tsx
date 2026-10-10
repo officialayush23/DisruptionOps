@@ -111,6 +111,8 @@ export default function Forecast() {
         </CardContent>
       </Card>
 
+      <Accuracy bt={f.backtest} />
+
       {saturating.length > 0 && (
         <Card className="border-destructive/50">
           <CardHeader className="pb-3">
@@ -308,5 +310,68 @@ export default function Forecast() {
         </Card>
       )}
     </div>
+  )
+}
+
+
+/** How good the forecast has been on this run's own history, against two
+ *  simple baselines on exactly the same windows. */
+function Accuracy({ bt }: { bt?: NonNullable<ReturnType<typeof useDemo>["state"]["forecast"]>["backtest"] }) {
+  if (!bt) return null
+  if (!bt.available) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">How accurate it has been</CardTitle>
+          <CardDescription>{bt.reason}</CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
+  const rows: [string, string, typeof bt.model][] = [
+    ["Forecast", "Gamma-Poisson, as on this screen", bt.model],
+    ["Persistence", "each ward repeats its last window", bt.persistence],
+    ["Uniform", "the city rate spread evenly", bt.uniform],
+  ]
+  const best = (k: "mae" | "brier") => Math.min(...rows.map((r) => r[2]?.[k] ?? Infinity))
+  const bestTop = Math.max(...rows.map((r) => r[2]?.top5 ?? -1))
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">How accurate it has been</CardTitle>
+        <CardDescription>
+          Replayed {bt.origins} times on this run&rsquo;s own history: rates rebuilt from what was known at each
+          point, then compared with the {bt.incidents} incidents that arrived in the next {bt.horizonHours} h
+          across {bt.wards} wards. {bt.verdict}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-muted-foreground">
+              <th className="py-1.5 font-medium">Method</th>
+              <th className="py-1.5 text-right font-medium" title="Mean absolute error of the count per ward and window">Count error</th>
+              <th className="py-1.5 text-right font-medium" title="Brier score of 'at least one incident' (0 is perfect)">Brier</th>
+              <th className="py-1.5 text-right font-medium" title="Share of incidents that landed in the five wards ranked highest">Top-5 wards caught</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([name, note, sc]) => (
+              <tr key={name} className="border-t">
+                <td className="py-2">
+                  <div className="font-medium">{name}</div>
+                  <div className="text-xs text-muted-foreground">{note}</div>
+                </td>
+                <td className={`py-2 text-right tabular-nums ${sc?.mae === best("mae") ? "font-semibold text-emerald-600" : ""}`}>{sc?.mae.toFixed(3) ?? "—"}</td>
+                <td className={`py-2 text-right tabular-nums ${sc?.brier === best("brier") ? "font-semibold text-emerald-600" : ""}`}>{sc?.brier.toFixed(3) ?? "—"}</td>
+                <td className={`py-2 text-right tabular-nums ${sc?.top5 != null && sc.top5 === bestTop ? "font-semibold text-emerald-600" : ""}`}>
+                  {sc?.top5 != null ? `${Math.round(sc.top5 * 100)}%` : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   )
 }

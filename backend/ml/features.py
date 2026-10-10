@@ -81,6 +81,30 @@ class Evidence:
                    rain_future=rain, start=pd.Timestamp(drv["time"].iloc[0]))
 
 
+def _forecast(true_future: np.ndarray, fc_noise: float) -> np.ndarray:
+    """The rain forecast a decision would have had.
+
+    Live (fc_noise == 1.0) the future is a real forecast already and passes
+    through. In training it is the simulated storm's true future, degraded with
+    the error a real forecast has been measured to have (ml.forecast_error,
+    Open-Meteo historical forecasts against ERA5). The drawn noise is turned
+    into a quantile of that measured error, so the random stream is unchanged
+    and the old invented multiplier remains the fallback when the measurement
+    has not been fitted.
+    """
+    if fc_noise == 1.0:
+        return true_future
+    from ml.forecast_error import model
+
+    m = model()
+    if m is None:
+        return true_future * fc_noise
+    from scipy.special import ndtr
+
+    u = float(ndtr(np.log(fc_noise) / 0.4))
+    return m.perturb(true_future, u)
+
+
 def _window_sum(series: np.ndarray, t_step: int, hours: float) -> float:
     k = int(hours * 60 / STEP_MIN)
     lo = max(0, t_step + 1 - k)
@@ -121,7 +145,7 @@ def build(ev: Evidence, t0_min: int, cand: np.ndarray, horizon_min: np.ndarray, 
     if ev.rain_future is not None:
         fut = np.array([ev.rain_future[t_step + 1: t_step + 1 + int(h // STEP_MIN)].sum() * STEP_MIN / 60
                         for h in horizon_min])
-        F["rain_fc"] = fut * ev.fc_noise
+        F["rain_fc"] = _forecast(fut, ev.fc_noise)
     else:
         F["rain_fc"] = np.nan
 

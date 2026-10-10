@@ -117,10 +117,18 @@ export type RoadBlock = {
   id: string; reason: string; reportedBy: string; radiusM: number
   location: [number, number]
 }
+export type BacktestScore = { mae: number; brier: number; top5: number | null }
 export type ForecastState = {
   horizonHours: number; generatedAt: string
   incidentsSeen: number; historyHours: number; confidenceNote: string
   error?: string
+  /** The same method replayed on this run's history and checked against what
+   *  followed, next to two baselines. */
+  backtest?: {
+    available: boolean; reason?: string; horizonHours?: number; origins?: number
+    incidents?: number; wards?: number; verdict?: string
+    model?: BacktestScore; persistence?: BacktestScore; uniform?: BacktestScore
+  }
   recurrence: {
     wardId: string; wardName: string; category: string
     ratePerHour: number; expected: number; pAtLeastOne: number
@@ -148,6 +156,13 @@ export type AgencyRequest = {
   incidentTitle: string | null; incidentSeverity: number | null
   requestedAt: string | null; respondedAt: string | null
   respondedBy: string | null
+  /** Migration 038: the other agency's answer and what the agent did. */
+  reply?: string | null; replyKind?: string | null; nextStep?: string | null
+  replies?: AgencyReply[]; replyDueAt?: string | null
+  followupOf?: string | null; units?: string[]
+}
+export type AgencyReply = {
+  at: string; who: "agency" | "agent"; by: string; kind: string; text: string
 }
 export type AgencyRef = {
   id: string; name: string; kind: string; capabilities: string[]
@@ -170,6 +185,8 @@ export type Plan = {
 }
 export type DemoState = {
   running: boolean; tick: number; simNow: string | null; error: string | null
+  /** Demand pressure the live run keeps on the front-line fleet. */
+  pressure?: { utilisation: number; backlog: number; target: number | null }
   /** Set only while showing the copy cached on this browser, before the first
    *  live snapshot has arrived. Never set on live data. */
   cachedAt?: string | null

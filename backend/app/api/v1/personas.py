@@ -216,6 +216,7 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
             ),
             city_id=body.city_id,
             clock=clocks.WALL,
+            classification_confidence=parsed.confidence, classification_method=parsed.method,
         )
     except UnknownTaxonomyValue as exc:
         raise NotFound(str(exc)) from exc
@@ -237,7 +238,9 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
     demo_runner.state.beat(
         "you",
         f"{principal.full_name or 'A resident'} reported: “{body.text[:70]}”"
-        + (" (new incident)" if result.created_incident else " (merged into an open incident)"),
+        + (" (new incident)" if result.created_incident
+           else " (merged into an open incident)" if result.linked
+           else " (held: an officer will read it)"),
         incidentId=result.incident_id, reportId=result.report_id,
         wardId=loc.ward.id, trust=result.trust.score,
     )
@@ -248,6 +251,8 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
         "incidentId": result.incident_id,
         "createdIncident": result.created_incident,
         "linked": result.linked,
+        # Not classified: stored and shown to an officer, but no incident yet.
+        "held": not result.created_incident and not result.linked,
         **_filed_to(loc),
         "readAs": parsed.category,
         "readAsLabel": (taxonomy.categories[parsed.category].display_name
@@ -424,6 +429,7 @@ async def citizen_voice_report(
                 else "citizen-anon"
             ),
             city_id=body.city_id, clock=clocks.WALL,
+            classification_confidence=parsed.confidence, classification_method=parsed.method,
         )
     except UnknownTaxonomyValue as exc:
         raise NotFound(str(exc)) from exc
@@ -1101,6 +1107,7 @@ async def field_report(body: FieldHazardIn, principal: CurrentPrincipal) -> dict
             device_id=f"field-{principal.user_id or principal.operator or 'unknown'}",
             city_id=body.city_id,
             clock=clocks.WALL,
+            classification_confidence=parsed.confidence, classification_method=parsed.method,
         )
     except UnknownTaxonomyValue as exc:
         raise NotFound(str(exc)) from exc
@@ -1114,7 +1121,9 @@ async def field_report(body: FieldHazardIn, principal: CurrentPrincipal) -> dict
         "field",
         f"{principal.full_name or 'A crew'} reported {parsed.category.replace('_', ' ')} "
         f"in {loc.ward.name}"
-        + (" (new incident)" if result.created_incident else " (merged into an open incident)"),
+        + (" (new incident)" if result.created_incident
+           else " (merged into an open incident)" if result.linked
+           else " (held: an officer will read it)"),
         incidentId=result.incident_id, reportId=result.report_id,
         wardId=loc.ward.id, trust=result.trust.score,
     )

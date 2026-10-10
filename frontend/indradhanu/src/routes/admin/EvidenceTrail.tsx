@@ -33,7 +33,7 @@ const outcomeOf = (r: RawReport): Outcome =>
   r.verdict === "false" ? "dismissed"
   : r.opened ? "opened"
   : r.incidentId ? "merged"
-  : /quarantin|reject|held/.test(r.status) ? "held"
+  : /quarantin|reject|held|pending/.test(r.status) || r.category === "unknown_report" ? "held"
   : "pending"
 
 const esc = (s: unknown) =>

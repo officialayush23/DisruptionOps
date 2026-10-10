@@ -50,6 +50,18 @@ CONFIDENT = 0.55
 #: it looks like.
 UNKNOWN = "unknown_report"
 
+#: Categories the system creates itself and a report must never be read as:
+#: an evacuation convoy, a priority corridor, a full shelter or a supply
+#: shortfall are operations the control room opens, not things a resident or a
+#: camera reports. Offering them to the classifier or the model let a sentence
+#: like "we need to get out" become a convoy order.
+SYSTEM_ONLY = frozenset({UNKNOWN, "evacuation", "traffic_corridor", "shelter_full", "supply_shortage"})
+
+
+def reportable() -> list[str]:
+    """The categories a report can be classified as."""
+    return sorted(c for c in taxonomy.categories if c not in SYSTEM_ONLY)
+
 
 #: category -> phrases. Deliberately includes misspellings and Devanagari,
 #: because that is what arrives.
@@ -211,7 +223,7 @@ def _keyword_scores(text: str) -> dict[str, tuple[float, list[str]]]:
     low = " " + text.lower() + " "
     out: dict[str, tuple[float, list[str]]] = {}
     for category, phrases in _vocabulary().items():
-        if category not in taxonomy.categories:
+        if category not in taxonomy.categories or category in SYSTEM_ONLY:
             continue
         hits = [p for p in phrases if p.lower() in low]
         if not hits:
@@ -303,7 +315,7 @@ async def parse_with_model(text: str, *, fallback: str = UNKNOWN) -> Parsed:
 
     from app.agents import ml
 
-    options = sorted(taxonomy.categories)
+    options = reportable()
     # The classifier is shown the human-readable names, not the snake_case ids:
     # "person stranded" carries meaning to a model trained on natural language
     # and "person_stranded" carries slightly less of it.
@@ -331,7 +343,7 @@ async def parse_with_model(text: str, *, fallback: str = UNKNOWN) -> Parsed:
 
     from app.agents import llm
 
-    options = ", ".join(sorted(taxonomy.categories))
+    options = ", ".join(reportable())
     from app.agents import guardrails
 
     clean = guardrails.clean_input(text, limit=500)
@@ -346,7 +358,7 @@ async def parse_with_model(text: str, *, fallback: str = UNKNOWN) -> Parsed:
     )
     answer = (completion.text or "").strip().split()[0].strip(".,\"'").lower()
 
-    if answer in taxonomy.categories:
+    if answer in taxonomy.categories and answer not in SYSTEM_ONLY:
         return Parsed(
             category=answer,
             confidence=0.7,

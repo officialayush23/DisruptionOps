@@ -38,6 +38,9 @@ class StartIn(Camel):
     region: str | None = None
     #: Ticks between generated reports. One tick is a second.
     report_every_ticks: int = Field(default=4, ge=1, le=30)
+    #: Share of the front-line fleet the run keeps committed. 0 turns the added
+    #: pressure off (reports only at the base rate).
+    target_utilisation: float = Field(default=0.9, ge=0.0, le=1.0)
 
 
 class MoveIn(Camel):
@@ -57,7 +60,7 @@ class DecisionActionIn(Camel):
 @router.post("/demo/start")
 async def demo_start(body: StartIn, _: StaffPrincipal) -> dict:
     await runner.start(city_id=body.city_id, report_every_ticks=body.report_every_ticks,
-                       region=body.region)
+                       region=body.region, target_utilisation=body.target_utilisation or None)
     return {"running": True, "tick": runner.state.tick}
 
 
@@ -407,6 +410,8 @@ async def demo_state(
     return {
         "running": st.running,
         "tick": st.tick,
+        "pressure": {"utilisation": st.utilisation, "backlog": st.backlog,
+                     "target": st.target_utilisation},
         "simNow": st.sim_now.isoformat() if st.sim_now else None,
         "error": st.error,
         "citizen": st.citizen,
@@ -515,6 +520,12 @@ _AGENCY_SQL = """
 select r.id::text, r.incident_id::text incident_id, r.ward_id,
        r.from_agency, r.to_agency, r.capability_id, r.quantity,
        r.status, r.note, r.requested_at, r.responded_at, r.responded_by,
+       -- Migration 038's columns, read through jsonb so the snapshot still
+       -- works before it is applied.
+       to_jsonb(r) ->> 'reply' reply, to_jsonb(r) ->> 'reply_kind' reply_kind,
+       to_jsonb(r) ->> 'next_step' next_step, to_jsonb(r) -> 'replies' replies,
+       to_jsonb(r) ->> 'reply_due_at' reply_due_at,
+       to_jsonb(r) ->> 'followup_of' followup_of, to_jsonb(r) -> 'units' units,
        i.title incident_title, i.severity incident_severity,
        w.name ward_name,
        f.name from_name, t.name to_name
@@ -973,7 +984,10 @@ async def _snapshot(city_id: str, since_event: int, geometry: bool) -> tuple[Any
          "incidentSeverity": r["incident_severity"],
          "requestedAt": r["requested_at"].isoformat() if r["requested_at"] else None,
          "respondedAt": r["responded_at"].isoformat() if r["responded_at"] else None,
-         "respondedBy": r["responded_by"]}
+         "respondedBy": r["responded_by"],
+         "reply": r["reply"], "replyKind": r["reply_kind"], "nextStep": r["next_step"],
+         "replies": r["replies"] or [], "replyDueAt": r["reply_due_at"],
+         "followupOf": r["followup_of"], "units": r["units"] or []}
         for r in agency_rows
     ]
     return (wards, resources, incidents, needs, decisions, events, facilities,

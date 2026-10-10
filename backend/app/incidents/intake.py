@@ -36,6 +36,10 @@ from app.world.clock import WALL, Clock
 
 log = get_logger(__name__)
 
+#: The holding category (migration 018). A report filed under it is never
+#: turned into an incident automatically; see `receive` and `classify_held`.
+UNCLASSIFIED = "unknown_report"
+
 
 # --------------------------------------------------------- input isolation ---
 #: Phrases that are trying to talk to the agent rather than describe the world.
@@ -369,6 +373,98 @@ async def _write_needs(conn: Any, incident_id: str, category: str, clock: Clock,
     return needs
 
 
+async def _attach(conn: Any, *, decision: Any, report_id: str, category: str, note: str,
+                  ward_id: str, ward_name: str, city_id: str, lng: float, lat: float,
+                  occurred: datetime, now: datetime, clock: Clock, trust_score: float,
+                  caused_by: int) -> tuple[str, bool, float, str, str]:
+    """Link a stored report to the incident it belongs to, or open one.
+
+    Shared by `receive` and `classify_held`, so a report an officer classifies
+    later goes through exactly the clustering, needs and events an automatically
+    classified one does.
+    """
+    cat_ref = taxonomy.categories.get(category)
+    decided_by = "auto"
+    rationale = decision.rationale
+    target: str | None = None
+    link_score = decision.candidate.score if decision.candidate else 0.0
+
+    if decision.action == "adjudicate" and decision.candidate is not None:
+        same, answer = await clustering.adjudicate(note, category, decision.candidate)
+        decided_by = "llm"
+        rationale = f"{decision.rationale} Model: {answer}"
+        target = decision.candidate.incident_id if same else None
+    elif decision.action == "link" and decision.candidate is not None:
+        target = decision.candidate.incident_id
+
+    created = False
+    if target is None:
+        hazard = (cat_ref.hazard_id if cat_ref and cat_ref.hazard_id else "flood")
+        inc = await conn.fetchrow(
+            """
+            insert into incidents
+              (title, category, hazard, ward_id, city_id, location, severity,
+               status, report_count, confidence, trust_score, first_reported_at,
+               sim_run_id, created_at, updated_at)
+            values ($1,$2,$3,$4,$5,
+                    extensions.ST_SetSRID(extensions.ST_MakePoint($6,$7),4326)::extensions.geography,
+                    $8,'reported',1,$9,$9,$10,$11::uuid,$12,$12)
+            returning id::text
+            """,
+            _title(category, ward_name), category, hazard, ward_id, city_id,
+            lng, lat, (cat_ref.base_severity if cat_ref else 3), trust_score,
+            occurred, clock.sim_run_id, now,
+        )
+        target = inc["id"]
+        created = True
+
+    await conn.execute(
+        "update citizen_reports set incident_id = $2::uuid where id = $1::uuid",
+        report_id, target,
+    )
+    await conn.execute(
+        """
+        insert into report_links
+          (report_id, incident_id, link_score, components, decided_by, rationale, created_at)
+        values ($1::uuid,$2::uuid,$3,$4,$5,$6,$7)
+        on conflict (report_id, incident_id) do nothing
+        """,
+        report_id, target, link_score,
+        decision.candidate.components if decision.candidate else {},
+        decided_by, rationale, now,
+    )
+
+    stats = await _recompute_incident(conn, target, clock)
+    needs = await _write_needs(conn, target, category, clock, note)
+
+    if created:
+        await ev.append(
+            clock=clock, kind=ev.Kind.INCIDENT_OPENED, actor=ev.agent("triage"),
+            subject_type="incident", subject_id=target, city_id=city_id, ward_id=ward_id,
+            payload={"category": category, "severity": stats["severity"],
+                     "needs": needs, "rationale": rationale},
+            caused_by=caused_by, conn=conn,
+        )
+    else:
+        await ev.append(
+            clock=clock, kind=ev.Kind.REPORT_LINKED, actor=ev.agent("triage"),
+            subject_type="incident", subject_id=target, city_id=city_id, ward_id=ward_id,
+            payload={
+                "report_id": report_id, "link_score": link_score,
+                "decided_by": decided_by, "rationale": rationale,
+                "report_count": stats["report_count"],
+                "independent_reporters": stats["independent"],
+                "confidence": stats["confidence"],
+                # This is the number the console shows as "merged, not
+                # dispatched twice".
+                "duplicates_absorbed": stats["report_count"] - 1,
+            },
+            caused_by=caused_by, conn=conn,
+        )
+
+    return target, created, link_score, decided_by, rationale
+
+
 # -------------------------------------------------------------- the intake ---
 async def receive(
     *,
@@ -407,6 +503,11 @@ async def receive(
     occurred_at: datetime | None = None,
     city_id: str = "pune",
     clock: Clock = WALL,
+    #: How sure the classifier was of `category` and which tier decided it
+    #: (keyword / classifier / model / chosen / detector). None means the caller
+    #: named the category itself (a staff form, a feed, a mapped detector).
+    classification_confidence: float | None = None,
+    classification_method: str | None = None,
 ) -> IntakeResult:
     """Take one report all the way to an incident, or decline to.
 
@@ -490,6 +591,16 @@ async def receive(
                 "treated as data and flagged, never executed."
             )
 
+        # Nothing could tell what this describes. It is stored, shown in the
+        # inbox as held and counted, but it opens no incident and joins none:
+        # an incident carries a category, the category carries needs, and the
+        # needs move vehicles. "Not yet classified" was opening incidents and
+        # putting them on the wall, which is a guess presented as a fact.
+        unclassified = category == UNCLASSIFIED
+        class_conf = (0.0 if unclassified
+                      else round(float(classification_confidence), 3) if classification_confidence is not None
+                      else 1.0)
+
         report_row = await conn.fetchrow(
             """
             insert into citizen_reports
@@ -506,8 +617,10 @@ async def receive(
             """,
             ward_id, city_id, category, lng, lat, note, photo_url,
             reporter_id, reporter_name, source, device_id, occurred,
-            t.score, {"components": t.components, "reasons": t.reasons},
-            t.status, t.score, clock.sim_run_id, now, reporter_key,
+            t.score, {"components": t.components, "reasons": t.reasons,
+                      "classification": {"method": classification_method or "given",
+                                         "confidence": class_conf}},
+            "pending" if unclassified else t.status, class_conf, clock.sim_run_id, now, reporter_key,
             json.dumps(photo_evidence) if photo_evidence else None, photo_agreement,
             severity_read.severity, severity_read.as_dict(),
         )
@@ -524,6 +637,23 @@ async def receive(
             },
             conn=conn,
         )
+
+        if unclassified:
+            reason = ("Held for a person to classify: no keyword, classifier or "
+                      "model could tell what this describes, so it opens no incident.")
+            await ev.append(
+                clock=clock, kind=ev.Kind.REPORT_HELD, actor=ev.agent("triage"),
+                subject_type="report", subject_id=report_id, city_id=city_id, ward_id=ward_id,
+                payload={"trust": t.score, "reason": reason, "source": source,
+                         "method": classification_method or "given"},
+                caused_by=received.id, conn=conn,
+            )
+            return IntakeResult(
+                report_id=report_id, incident_id=None, created_incident=False, linked=False,
+                trust=t, link_score=0.0, link_rationale=reason,
+                decided_by="auto", injection_suspected=ev_obj.injection_suspected,
+                event_id=received.id,
+            )
 
         # A quarantined report is recorded and visible, but does not get to open
         # an incident or join one. It has not been called false; it has been
@@ -542,83 +672,11 @@ async def receive(
                 event_id=received.id,
             )
 
-        decided_by = "auto"
-        rationale = decision.rationale
-        target: str | None = None
-        link_score = decision.candidate.score if decision.candidate else 0.0
-
-        if decision.action == "adjudicate" and decision.candidate is not None:
-            same, answer = await clustering.adjudicate(note, category, decision.candidate)
-            decided_by = "llm"
-            rationale = f"{decision.rationale} Model: {answer}"
-            target = decision.candidate.incident_id if same else None
-        elif decision.action == "link" and decision.candidate is not None:
-            target = decision.candidate.incident_id
-
-        created = False
-        if target is None:
-            hazard = (cat_ref.hazard_id if cat_ref and cat_ref.hazard_id else "flood")
-            inc = await conn.fetchrow(
-                """
-                insert into incidents
-                  (title, category, hazard, ward_id, city_id, location, severity,
-                   status, report_count, confidence, trust_score, first_reported_at,
-                   sim_run_id, created_at, updated_at)
-                values ($1,$2,$3,$4,$5,
-                        extensions.ST_SetSRID(extensions.ST_MakePoint($6,$7),4326)::extensions.geography,
-                        $8,'reported',1,$9,$9,$10,$11::uuid,$12,$12)
-                returning id::text
-                """,
-                _title(category, ward_name), category, hazard, ward_id, city_id,
-                lng, lat, (cat_ref.base_severity if cat_ref else 3), t.score,
-                occurred, clock.sim_run_id, now,
-            )
-            target = inc["id"]
-            created = True
-
-        await conn.execute(
-            "update citizen_reports set incident_id = $2::uuid where id = $1::uuid",
-            report_id, target,
+        target, created, link_score, decided_by, rationale = await _attach(
+            conn, decision=decision, report_id=report_id, category=category, note=note,
+            ward_id=ward_id, ward_name=ward_name, city_id=city_id, lng=lng, lat=lat,
+            occurred=occurred, now=now, clock=clock, trust_score=t.score, caused_by=received.id,
         )
-        await conn.execute(
-            """
-            insert into report_links
-              (report_id, incident_id, link_score, components, decided_by, rationale, created_at)
-            values ($1::uuid,$2::uuid,$3,$4,$5,$6,$7)
-            on conflict (report_id, incident_id) do nothing
-            """,
-            report_id, target, link_score,
-            decision.candidate.components if decision.candidate else {},
-            decided_by, rationale, now,
-        )
-
-        stats = await _recompute_incident(conn, target, clock)
-        needs = await _write_needs(conn, target, category, clock, note)
-
-        if created:
-            await ev.append(
-                clock=clock, kind=ev.Kind.INCIDENT_OPENED, actor=ev.agent("triage"),
-                subject_type="incident", subject_id=target, city_id=city_id, ward_id=ward_id,
-                payload={"category": category, "severity": stats["severity"],
-                         "needs": needs, "rationale": rationale},
-                caused_by=received.id, conn=conn,
-            )
-        else:
-            await ev.append(
-                clock=clock, kind=ev.Kind.REPORT_LINKED, actor=ev.agent("triage"),
-                subject_type="incident", subject_id=target, city_id=city_id, ward_id=ward_id,
-                payload={
-                    "report_id": report_id, "link_score": link_score,
-                    "decided_by": decided_by, "rationale": rationale,
-                    "report_count": stats["report_count"],
-                    "independent_reporters": stats["independent"],
-                    "confidence": stats["confidence"],
-                    # This is the number the console shows as "merged, not
-                    # dispatched twice".
-                    "duplicates_absorbed": stats["report_count"] - 1,
-                },
-                caused_by=received.id, conn=conn,
-            )
 
         return IntakeResult(
             report_id=report_id, incident_id=target, created_incident=created,
@@ -626,3 +684,82 @@ async def receive(
             decided_by=decided_by, injection_suspected=ev_obj.injection_suspected,
             event_id=received.id,
         )
+
+
+async def classify_held(report_id: str, category: str, *, officer: str, clock: Clock = WALL) -> IntakeResult:
+    """A person reads a held report and says what it is; it then goes through
+    the same clustering, incident and needs path as any classified report.
+
+    Only an unclassified report can be classified this way, and only into a
+    category a report can be (not a system-only one such as an evacuation).
+    """
+    from app.incidents import parse
+
+    if category not in taxonomy.categories or category in parse.SYSTEM_ONLY:
+        from app.taxonomy import UnknownTaxonomyValue
+
+        raise UnknownTaxonomyValue("incident category", category, parse.reportable())
+
+    row = await db.fetchrow(
+        """
+        select id::text, ward_id, city_id, note, category, incident_id::text incident_id,
+               extensions.ST_X(location::extensions.geometry) lng,
+               extensions.ST_Y(location::extensions.geometry) lat,
+               coalesce(occurred_at, created_at) occurred, trust_score, trust_breakdown,
+               reporter_id::text reporter_id
+          from citizen_reports where id = $1::uuid
+        """,
+        report_id,
+    )
+    if row is None:
+        raise LookupError("No such report.")
+    if row["category"] != UNCLASSIFIED or row["incident_id"]:
+        raise ValueError("Only a held, unclassified report can be classified here.")
+
+    now = clock.now()
+    lng, lat, note = float(row["lng"]), float(row["lat"]), row["note"] or ""
+    candidates = await clustering.find_candidates(
+        ward_id=row["ward_id"], category=category, lng=lng, lat=lat, note=note,
+        now=row["occurred"], city_id=row["city_id"], sim_run_id=clock.sim_run_id,
+    )
+    decision = clustering.decide(candidates)
+    score = float(row["trust_score"] or 0.5)
+    # An officer has read it: it may act, but it still needs corroboration
+    # unless the scorer had already trusted it fully.
+    ref = taxonomy.categories.get(category)
+    status = ("auto_confirmed" if score >= trust.AUTO_CONFIRM or (ref and ref.life_safety)
+              else "needs_corroboration")
+
+    async with db.transaction() as conn:
+        ward_name = await conn.fetchval("select name from wards where id = $1", row["ward_id"]) or row["ward_id"]
+        await conn.execute(
+            """
+            update citizen_reports
+               set category = $2, classified_as = $2, classification_confidence = 1.0,
+                   verification_status = $3,
+                   trust_breakdown = coalesce(trust_breakdown, '{}'::jsonb)
+                                     || jsonb_build_object('classification',
+                                          jsonb_build_object('method', 'officer', 'confidence', 1.0, 'by', $4::text))
+             where id = $1::uuid
+            """,
+            report_id, category, status, officer,
+        )
+        classified = await ev.append(
+            clock=clock, kind=ev.Kind.REPORT_CLASSIFIED, actor=ev.officer(officer),
+            subject_type="report", subject_id=report_id, city_id=row["city_id"], ward_id=row["ward_id"],
+            payload={"category": category, "from": UNCLASSIFIED,
+                     "reason": f"Classified by {officer} after reading the report."},
+            conn=conn,
+        )
+        target, created, link_score, decided_by, rationale = await _attach(
+            conn, decision=decision, report_id=report_id, category=category, note=note,
+            ward_id=row["ward_id"], ward_name=ward_name, city_id=row["city_id"], lng=lng, lat=lat,
+            occurred=row["occurred"], now=now, clock=clock, trust_score=score, caused_by=classified.id,
+        )
+
+    t = trust.Trust(score=score, status=status, components={}, reasons=[f"Classified by {officer}."])
+    return IntakeResult(
+        report_id=report_id, incident_id=target, created_incident=created,
+        linked=not created, trust=t, link_score=link_score, link_rationale=rationale,
+        decided_by=decided_by, injection_suspected=False, event_id=classified.id,
+    )

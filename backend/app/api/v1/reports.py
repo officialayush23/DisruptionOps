@@ -318,6 +318,10 @@ async def request_agency(body: AgencyRequestIn, principal: StaffPrincipal) -> Ag
         payload={"from": from_agency, "to": body.to_agency,
                  "capability": body.capability_id, "quantity": body.quantity},
     )
+    # The other agency answers in a few minutes and the coordinator acts on it.
+    from app.ops import agency_replies
+
+    await agency_replies.schedule(row["id"])
     return AgencyRequestOut(**dict(row))
 
 
@@ -339,6 +343,29 @@ async def respond_to_agency_request(
         raise NotFound("No such request.")
     if current["status"] in ("declined", "fulfilled", "cancelled"):
         raise Conflict(f"That request is already {current['status']}.")
+
+    # Recording the other agency's real answer (a phone call, a radio reply)
+    # takes the same next steps as a generated one: units staged on a yes, the
+    # next agency asked on a no.
+    if action in ("fulfil", "decline"):
+        from app.ops import agency_replies
+
+        who = principal.full_name or principal.user_id or "unknown"
+        await agency_replies.record(
+            request_id, "accept_full" if action == "fulfil" else "decline_capacity",
+            f"Recorded by {who}: {'accepted' if action == 'fulfil' else 'declined'} by phone/radio.",
+            by=who,
+        )
+        row = await db.fetchrow(
+            """
+            select id::text, incident_id::text, ward_id, from_agency, to_agency,
+                   capability_id, quantity, status, note, requested_at,
+                   responded_at, responded_by
+              from agency_requests where id = $1::uuid
+            """,
+            request_id,
+        )
+        return AgencyRequestOut(**dict(row))
 
     row = await db.fetchrow(
         """
@@ -659,6 +686,45 @@ async def record_verdict(
             "worth, and nothing about the incidents already open."
         ),
     }
+
+
+class ClassifyIn(Camel):
+    category: str
+
+
+@router.get("/reports/categories")
+async def report_categories(_: StaffPrincipal) -> list[dict]:
+    """The categories a held report can be classified as (system-only ones excluded)."""
+    from app.incidents import parse
+
+    return [{"id": c, "label": taxonomy.categories[c].display_name or c.replace("_", " "),
+             "lifeSafety": bool(taxonomy.categories[c].life_safety)} for c in parse.reportable()]
+
+
+@router.post("/reports/{report_id}/classify")
+async def classify_report(report_id: str, body: ClassifyIn, principal: StaffPrincipal) -> dict:
+    """A person reads a held, unclassified report and says what it is.
+
+    Unclassified reports never open an incident on their own. This is the only
+    way one becomes an incident: an officer names the category, and the report
+    then goes through the same clustering, needs and events as any other.
+    """
+    who = principal.full_name or str(principal.role)
+    try:
+        result = await intake.classify_held(report_id, body.category, officer=who)
+    except UnknownTaxonomyValue as exc:
+        raise BadRequest(str(exc)) from exc
+    except LookupError as exc:
+        raise NotFound(str(exc)) from exc
+    except ValueError as exc:
+        raise Conflict(str(exc)) from exc
+    if result.incident_id:
+        from app.ops.operations import _replan_soon
+
+        _replan_soon("report classified by an officer")
+    return {"reportId": result.report_id, "incidentId": result.incident_id,
+            "createdIncident": result.created_incident, "linked": result.linked,
+            "rationale": result.link_rationale}
 
 
 @router.get("/reporters/reliability")
