@@ -32,6 +32,10 @@ Scenarios
                        once: the shortfall is recorded, not hidden
   ghaziabad_monsoon    a monsoon night around IPEC, Ghaziabad: local units
                        (not Pune's) are tasked
+  pccoe_pawana_night   the PCMC zone round PCCOE (migration 029): Pawana over
+                       its banks at Ravet and Chinchwad, an MIDC fire with gas,
+                       an underpass under water at Akurdi, a wall down in
+                       Nigdi: PCMC units (PC-*) are tasked, not Pune's
 """
 
 from __future__ import annotations
@@ -456,6 +460,41 @@ async def ghaziabad_monsoon(run: Run) -> None:
               f"{tasked or 0} local assignments")
 
 
+async def pccoe_pawana_night(run: Run) -> None:
+    """Several hazards at once round PCCOE, Akurdi–Nigdi. Every report goes
+    through intake like any other; the plan should task PCMC units (PC-*)."""
+    zone = await db.fetchval("select count(*) from wards where id like 'w-pc-%'")
+    if not zone:
+        run.check("PCMC zone present (migration 029)", False, "apply migration 029 first")
+        return
+    for prefer, cat, note, n in [
+        ("Ravet", "person_stranded", "Pawana water entering houses near Ravet bridge, family on terrace", 3),
+        ("Chinchwad Gaon", "person_stranded", "River water at Morya Gosavi ghat lanes, elderly couple inside", 2),
+        ("Akurdi", "flooded_road", "Akurdi station underpass fully under water, two-wheelers stuck", 2),
+        ("Pimpri", "waterlogging", "Pimpri camp market waterlogged, shops flooding", 1),
+        ("Chikhli", "fire", "Fire at a chemical unit in MIDC, strong gas smell spreading", 2),
+        ("Chikhli", "air_quality", "Smoke and gas smell, people coughing near Sane chowk", 1),
+        ("Nigdi", "structural_damage", "Compound wall collapsed on parked cars after rain, someone trapped", 2),
+        ("Akurdi", "power_line", "Live wire fallen in waterlogged lane near PCCOE, sparks", 1),
+        ("Thergaon", "fallen_tree", "Tree across the road near Aditya Birla hospital, ambulances blocked", 1),
+        ("Ravet", "shelter_full", "S B Patil school shelter full, more families arriving", 1),
+        ("Ravet", "supply_shortage", "Ravet relief camp short of drinking water", 1),
+    ]:
+        ward = await _ward(prefer)
+        for k in range(n):
+            await _report(run, ward, cat, note if k == 0 else f"{note} (caller {k + 1})")
+    await _replan(run, "Pawana night round PCCOE")
+    tasked = await db.fetchval(
+        """
+        select count(*) from assignments a
+          join incidents i on i.id = a.incident_id
+         where i.ward_id like 'w-pc-%' and a.resource_id like 'PC-%'
+           and a.status::text not in ('cancelled', 'complete')
+        """
+    )
+    run.check("PCMC units tasked to PCMC incidents", (tasked or 0) > 0, f"{tasked or 0} local assignments")
+
+
 SCENARIOS: dict[str, tuple[str, Callable[[Run], Awaitable[None]]]] = {
     "flood_cascade": ("Many reports of one flooded road become one incident and one dispatch.", flood_cascade),
     "block_on_approach": ("A crew's road is closed ahead of it: re-routed once, job kept.", block_on_approach),
@@ -466,6 +505,7 @@ SCENARIOS: dict[str, tuple[str, Callable[[Run], Awaitable[None]]]] = {
     "mesh_blackout_sos": ("People report over bitchat; duplicates and forgeries are caught.", mesh_blackout_sos),
     "multi_hazard_surge": ("Five hazards at once: shortfalls recorded, not hidden.", multi_hazard_surge),
     "ghaziabad_monsoon": ("Monsoon night around IPEC, Ghaziabad: Hindon flood, underpasses, collapse, fire.", ghaziabad_monsoon),
+    "pccoe_pawana_night": ("Round PCCOE: Pawana flood at Ravet and Chinchwad, MIDC fire and gas, underpass, collapse.", pccoe_pawana_night),
 }
 
 
