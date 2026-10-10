@@ -314,15 +314,47 @@ async def _assess_severity(note: str, *, category: str, source: str, simulated: 
                             life_safety=bool(getattr(ref, "life_safety", False)))
 
 
-async def _write_needs(conn: Any, incident_id: str, category: str, clock: Clock) -> dict[str, int]:
+#: What a report's words add to its category's needs: a fire with people
+#: trapped needs a rescue team and an ambulance as well as a tender, and a
+#: crowd or blocked junction needs police to keep the scene reachable.
+#: English, Hindi and Marathi stems; only capabilities that exist are added.
+EXTRA_NEEDS: tuple[tuple[tuple[str, ...], dict[str, int]], ...] = (
+    (("trapped", "stuck inside", "people inside", "inside the building", "children inside", "फंसे", "फसे",
+      "अडकले", "अडकलेले"), {"search_rescue": 1, "medical_transport": 1}),
+    (("injured", "injury", "burn", "bleeding", "unconscious", "casualt", "घायल", "जखमी"), {"medical_transport": 1}),
+    (("crowd", "traffic", "jam", "gathered", "भीड़", "गर्दी", "वाहतूक"), {"traffic_control": 1}),
+)
+
+
+def needs_from_text(note: str) -> dict[str, int]:
+    t = (note or "").lower()
+    out: dict[str, int] = {}
+    for words, adds in EXTRA_NEEDS:
+        if any(w in t for w in words):
+            for cap, q in adds.items():
+                out[cap] = max(out.get(cap, 0), q)
+    return out
+
+
+async def _write_needs(conn: Any, incident_id: str, category: str, clock: Clock, note: str = "") -> dict[str, int]:
     """What this incident requires, from the category's capability needs.
 
     Requirements are per incident, not per report. Four people reporting one
     flooded road need one pump between them, and that is the entire reason
     clustering has to happen before this does.
+
+    The report's own words can add needs (`EXTRA_NEEDS`): one incident then
+    gets a team of different units, e.g. fire tender + ambulance + police +
+    rescue team for a fire with people trapped. Needs only grow from words;
+    nothing a report says removes a need its category has.
     """
     ref = taxonomy.categories.get(category)
     needs = dict(ref.needs) if ref else {}
+    for cap, q in needs_from_text(note).items():
+        needs[cap] = max(needs.get(cap, 0), q)
+    if needs:
+        known = {r["id"] for r in await conn.fetch("select id from capabilities where id = any($1::text[])", list(needs))}
+        needs = {c: q for c, q in needs.items() if c in known}
     if not needs:
         return {}
     await conn.executemany(
@@ -330,7 +362,7 @@ async def _write_needs(conn: Any, incident_id: str, category: str, clock: Clock)
         insert into incident_needs (incident_id, capability_id, required, updated_at)
         values ($1::uuid, $2, $3, $4)
         on conflict (incident_id, capability_id)
-        do update set required = excluded.required, updated_at = excluded.updated_at
+        do update set required = greatest(incident_needs.required, excluded.required), updated_at = excluded.updated_at
         """,
         [(incident_id, cap, qty, clock.now()) for cap, qty in needs.items()],
     )
@@ -561,7 +593,7 @@ async def receive(
         )
 
         stats = await _recompute_incident(conn, target, clock)
-        needs = await _write_needs(conn, target, category, clock)
+        needs = await _write_needs(conn, target, category, clock, note)
 
         if created:
             await ev.append(

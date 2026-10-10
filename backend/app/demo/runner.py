@@ -795,6 +795,23 @@ async def _move_units() -> None:
         """
     )
 
+    # 4. The trail: every moving unit's new position goes to unit_positions
+    #    (migration 032), so the map can draw where it has been and its log
+    #    shows the drive. Skipped silently until that table exists.
+    try:
+        await db.execute(
+            """
+            insert into unit_positions (city_id, resource_id, location, source, assignment_id, progress)
+            select r.city_id, r.id, r.location, 'sim', a.id, a.progress
+              from resources r
+              join assignments a on a.resource_id = r.id
+             where a.status = 'en_route' and a.sim_run_id is null
+            """
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "unit_positions" not in str(exc):
+            raise
+
 
 async def _work_and_resolve() -> None:
     """A unit on scene works, then closes the incident and becomes free again.

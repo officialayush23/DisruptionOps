@@ -18,6 +18,8 @@ import AllocationPlanner from "@/routes/admin/AllocationPlanner"
 import DecisionGate from "@/routes/admin/DecisionGate"
 import AgentTrace from "@/routes/admin/AgentTrace"
 import ResourcesPage from "@/routes/admin/ResourcesPage"
+import UnitsPage from "@/routes/admin/UnitsPage"
+import SurgePage from "@/routes/admin/SurgePage"
 import AlertsPage from "@/routes/admin/AlertsPage"
 import AfterAction from "@/routes/admin/AfterAction"
 import Replay from "@/routes/admin/Replay"
@@ -87,6 +89,8 @@ export function App() {
                 <Route path="agent" element={<AgentTrace />} />
                 <Route path="graph" element={<AgentGraph />} />
                 <Route path="resources" element={<ResourcesPage />} />
+                <Route path="units" element={<UnitsPage />} />
+                <Route path="surge" element={<SurgePage />} />
                 <Route path="alerts" element={<AlertsPage />} />
                 <Route path="after-action" element={<AfterAction />} />
                 <Route path="replay" element={<Replay />} />

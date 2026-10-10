@@ -1,0 +1,96 @@
+"""Serving the passability model: P(blocked at arrival) per segment, plus the rules
+that sit above it.
+
+    scorer = Scorer.load()                       # champion from models/registry.json
+    p, sd, why = scorer.score(F, confirmed)      # F from ml.features.build
+
+Rules (MISC-04: predictions support, never replace them):
+  * a confirmed closure is binding: p = 1 until a valid update reopens it;
+  * a crew/patrol/drone confirmation that a road is open in the last 30 min
+    caps p at 0.05 for that road (fresh eyes beat the model);
+  * everything the router uses is logged to nav_predictions with its inputs,
+    which is what the re-learning loop learns from (ml.relearn).
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+REPO = Path(__file__).resolve().parents[3]
+MODELS = REPO / "models"
+
+
+@dataclass
+class Confirmation:
+    seg_index: int
+    blocked: bool
+    age_min: float
+
+
+class Scorer:
+    def __init__(self, ensemble, version: str, threshold: float):
+        self.ens, self.version, self.threshold = ensemble, version, threshold
+
+    @classmethod
+    def load(cls, version: str | None = None) -> "Scorer":
+        from ml.train_passability import Ensemble
+        reg = json.loads((MODELS / "registry.json").read_text()) if (MODELS / "registry.json").exists() else {}
+        version = version or (reg.get("passability") or {}).get("champion")
+        if not version:
+            raise RuntimeError("no passability champion registered (python -m ml.relearn register ...)")
+        d = MODELS / "passability" / version
+        meta = json.loads((d / "model.json").read_text())
+        return cls(Ensemble.load(d), version, float(meta["threshold"]))
+
+    def score(self, F: pd.DataFrame, confirmations: list[Confirmation] | None = None,
+              cand: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        p, sd = self.ens.predict(F)
+        why = ["model"] * len(p)
+        closed = F["closure_active"].to_numpy() > 0
+        p = np.where(closed, 1.0, p)
+        for i in np.flatnonzero(closed):
+            why[i] = "confirmed closure (binding)"
+        if confirmations and cand is not None:
+            pos = {int(s): k for k, s in enumerate(cand)}
+            for c in confirmations:
+                k = pos.get(c.seg_index)
+                if k is None:
+                    continue
+                if c.blocked:
+                    p[k], why[k] = 1.0, "crew confirmed blocked"
+                elif c.age_min <= 30 and not closed[k]:
+                    p[k], why[k] = min(p[k], 0.05), "crew confirmed open"
+        return p, sd, why
+
+
+async def log_predictions(conn, rows: list[dict]) -> int:
+    """Insert what the router used into nav_predictions (migration 031).
+    rows: seg_id, lon, lat, profile, horizon_min, p, sd, features (dict), model_version,
+    optional assignment_id, used_for ('route' | 'scan' | 'shadow'), city_id, sim_run_id."""
+    if not rows:
+        return 0
+    await conn.executemany(
+        "insert into nav_predictions (city_id, sim_run_id, model_version, seg_id, location, profile, horizon_min, "
+        "p_blocked, p_sd, features, assignment_id, used_for) values ($1,$2,$3,$4, "
+        "extensions.ST_SetSRID(extensions.ST_MakePoint($5,$6),4326)::extensions.geography, $7,$8,$9,$10,$11::jsonb,$12,$13)",
+        [(r.get("city_id", "pune"), r.get("sim_run_id"), r["model_version"], r["seg_id"], r["lon"], r["lat"],
+          r["profile"], int(r["horizon_min"]), float(r["p"]), r.get("sd"), json.dumps(r.get("features") or {}),
+          r.get("assignment_id"), r.get("used_for", "route")) for r in rows])
+    return len(rows)
+
+
+async def log_driven(conn, segs: list[dict], assignment_id: str | None = None) -> int:
+    """Roads a unit actually drove are outcomes too (open at that moment).
+    segs: seg_id, lon, lat, observed_at (datetime), profile."""
+    if not segs:
+        return 0
+    await conn.executemany(
+        "insert into nav_outcomes (observed_at, location, radius_m, seg_id, profile, blocked, source, confidence, "
+        "ref_table, ref_id) values ($1, extensions.ST_SetSRID(extensions.ST_MakePoint($2,$3),4326)::extensions.geography, "
+        "25, $4, $5, false, 'trip', 0.95, 'assignments', $6)",
+        [(s["observed_at"], s["lon"], s["lat"], s["seg_id"], s.get("profile"), assignment_id) for s in segs])
+    return len(segs)

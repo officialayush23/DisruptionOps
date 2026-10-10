@@ -218,6 +218,10 @@ async def citizen_report(body: CitizenReportIn, principal: CurrentPrincipal) -> 
     except UnknownTaxonomyValue as exc:
         raise NotFound(str(exc)) from exc
 
+    if body.photo_token and result.report_id:
+        from app import media
+        await media.attach_token(body.photo_token, result.report_id)
+
     # The control room hears about it.
     #
     # This was missing, and it was not cosmetic. The spoken path below already
@@ -502,6 +506,11 @@ async def citizen_vision_analyse(
     await cache.photo_evidence.get_or_set(
         token, cache.PHOTO_TOKEN_TTL, lambda: _hold(call.evidence)
     )
+    # Keep the picture (a thumbnail) so the console's live feed can show what
+    # the VLM looked at; it is tied to the report when the token is redeemed.
+    from app import media
+    await media.store(body.image_base64, source="citizen", caption=call.evidence.caption,
+                      report_id=body.report_id, photo_token=token)
     return {
         "accepted": True,
         "latencyMs": call.latency_ms,

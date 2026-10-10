@@ -208,6 +208,19 @@ class PlanDiff:
         return f"{', '.join(bits)}; {len(self.kept)} unchanged{tail}."
 
 
+_CAP_COL: bool | None = None
+
+
+async def _has_capability_column(conn: Any) -> bool:
+    """assignments.capability_id exists once migration 032 is applied."""
+    global _CAP_COL
+    if _CAP_COL is None:
+        _CAP_COL = bool(await conn.fetchval(
+            "select exists (select 1 from information_schema.columns "
+            "where table_schema='public' and table_name='assignments' and column_name='capability_id')"))
+    return _CAP_COL
+
+
 # ------------------------------------------------------------------ inputs ---
 async def _open_demands(conn: Any, city_id: str, sim_run_id: str | None) -> list[Demand]:
     """One demand per unit of unmet capability, per open incident."""
@@ -661,6 +674,24 @@ async def replan(
              where i.id = n.incident_id
                and i.status <> 'resolved'
                and n.met is distinct from coalesce(c.n, 0)
+            """ if not await _has_capability_column(conn) else
+            # per capability once assignments know which need they cover (032):
+            # a fire with a tender and an ambulance shows each need met once,
+            # not both needs met twice.
+            """
+            with counts as (
+              select a.incident_id, a.capability_id, count(*)::int n
+                from assignments a
+               where a.status = any($1::assignment_status[])
+               group by a.incident_id, a.capability_id
+            )
+            update incident_needs n
+               set met = coalesce(c.n, 0), updated_at = $2
+              from incidents i
+              left join counts c on c.incident_id = i.id and c.capability_id = n.capability_id
+             where i.id = n.incident_id
+               and i.status <> 'resolved'
+               and n.met is distinct from coalesce(c.n, 0)
             """,
             list(ACTIVE), now,
         )
@@ -827,6 +858,10 @@ async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str
         line.engine,
         steps,
     )
+    if await _has_capability_column(conn):
+        # which need of the incident this unit covers (migration 032)
+        await conn.execute("update assignments set capability_id = $2 where id = $1::uuid",
+                           row["id"], alloc.demand.capability)
     await conn.execute(
         """
         insert into field_tasks

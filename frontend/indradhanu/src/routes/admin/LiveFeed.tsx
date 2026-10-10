@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { PACKET_LABEL, hhmmss, useMeshStatus, type MeshPacket } from "./meshApi"
+import { FeedDetail } from "./FeedDetail"
 
 /** Everything arriving, as it arrives.
  *
@@ -35,6 +36,8 @@ type Item = {
   tone: "open" | "merge" | "held" | "info" | "bad"
   incidentId: string | null
   meta: string[]
+  packetId?: number | null
+  reportId?: string | null
 }
 
 const channelOf = (source: string): Item["channel"] => {
@@ -71,6 +74,7 @@ function fromReport(r: RawReport): Item {
     tone,
     incidentId: r.incidentId,
     meta,
+    reportId: r.id,
   }
 }
 
@@ -102,6 +106,7 @@ function fromPacket(p: MeshPacket): Item {
     tone,
     incidentId: null,
     meta,
+    packetId: p.id || null,
   }
 }
 
@@ -156,6 +161,7 @@ export default function LiveFeed() {
   const [paused, setPaused] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [snapshot, setSnapshot] = useState<Item[]>([])
+  const [open, setOpen] = useState<string | null>(null)
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -293,11 +299,15 @@ export default function LiveFeed() {
             const Icon = ICON[it.channel]
             const fresh = now - it.at < 5000
             return (
-              <li
-                key={it.key}
+              <li key={it.key} className="space-y-1.5">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => (it.packetId || it.reportId) && setOpen(open === it.key ? null : it.key)}
+                onKeyDown={(e) => { if (e.key === "Enter" && (it.packetId || it.reportId)) setOpen(open === it.key ? null : it.key) }}
                 className={`bg-card flex gap-3 rounded-md border border-l-4 p-2.5 text-sm transition-colors ${TONE[it.tone]} ${
                   fresh ? "bg-primary/10" : ""
-                }`}
+                } ${it.packetId || it.reportId ? "cursor-pointer hover:bg-muted/40" : ""}`}
               >
                 <div className="text-muted-foreground w-16 shrink-0 pt-0.5 text-xs tabular-nums">
                   {hhmmss(new Date(it.at).toISOString())}
@@ -321,13 +331,18 @@ export default function LiveFeed() {
                     {it.incidentId && (
                       <button
                         className="text-primary ml-1 underline-offset-2 hover:underline"
-                        onClick={() => navigate(`/admin/response?incident=${it.incidentId}`)}
+                        onClick={(e) => { e.stopPropagation(); navigate(`/admin/response?incident=${it.incidentId}`) }}
                       >
                         what we are doing →
                       </button>
                     )}
+                    {(it.packetId || it.reportId) && (
+                      <span className="text-primary ml-auto">{open === it.key ? "hide details" : "details"}</span>
+                    )}
                   </div>
                 </div>
+              </div>
+              {open === it.key && <FeedDetail packetId={it.packetId ?? null} reportId={it.packetId ? null : it.reportId ?? null} />}
               </li>
             )
           })}

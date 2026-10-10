@@ -49,6 +49,9 @@ REPLAN_KINDS = {
     "incident.opened", "incident.severity_changed", "incident.resolved",
     "road.blocked", "road.cleared",
     "resource.status_changed",
+    # a free unit moved more than a kilometre (app/units): its distance to every
+    # open need changed, so the plan may no longer be the best one
+    "unit.moved",
 }
 #: Prefixes that do the same (field.on_site, field.route_blocked, ...).
 REPLAN_PREFIXES = ("field.", "override.")

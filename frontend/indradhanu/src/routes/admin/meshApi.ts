@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { request } from "@/api/httpClient"
+import { useRegion, type RegionPick } from "@/lib/region"
 
 /** `GET /mesh/status`: what the mesh gateways have carried in, and who is linked. */
 export type MeshNode = {
@@ -78,7 +79,36 @@ function norm(raw: unknown): MeshStatus {
 }
 
 /** Polls the mesh status. Overlapping polls are skipped, never stacked. */
+/** Pune or NCR (Ghaziabad) for a packet: where it was sensed (body la/lo), else
+ *  its node's position, else its name (V-NCR-*, V-PUN-*). Same 75.5 E line as
+ *  the server. Unknown stays visible. */
+export function regionOfPacket(p: MeshPacket, nodes: MeshNode[]): "pune" | "ncr" | null {
+  const lo = typeof p.body.lo === "number" ? (p.body.lo as number) : null
+  const node = nodes.find((n) => n.id === p.nodeId || n.id === `lora:${p.nodeId}` || n.id === p.gatewayId)
+  const lon = lo ?? node?.lon ?? null
+  if (lon != null) return lon < 75.5 ? "pune" : "ncr"
+  const name = `${p.nodeId ?? ""} ${p.gatewayId ?? ""}`.toUpperCase()
+  if (name.includes("NCR") || name.includes("GZB")) return "ncr"
+  if (name.includes("PUN") || name.includes("PCMC")) return "pune"
+  return null
+}
+
+function scope(s: MeshStatus, region: RegionPick): MeshStatus {
+  if (region === "all") return s
+  const nodes = s.nodes.filter((n) => {
+    const r = n.lon != null ? (n.lon < 75.5 ? "pune" : "ncr")
+      : /NCR|GZB/i.test(n.id) ? "ncr" : /PUN/i.test(n.id) ? "pune" : null
+    return r == null || r === region
+  })
+  const recent = s.recent.filter((p) => {
+    const r = regionOfPacket(p, s.nodes)
+    return r == null || r === region
+  })
+  return { ...s, nodes, recent }
+}
+
 export function useMeshStatus(everyMs = 2000) {
+  const [region] = useRegion()
   const [data, setData] = useState<MeshStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const busy = useRef(false)
@@ -88,9 +118,9 @@ export function useMeshStatus(everyMs = 2000) {
       if (busy.current) return
       busy.current = true
       try {
-        const raw = await request<unknown>("/mesh/status")
+        const raw = await request<unknown>("/mesh/status", { query: { region }, toast: false })
         if (alive) {
-          setData(norm(raw))
+          setData(scope(norm(raw), region))
           setError(null)
         }
       } catch (e) {
@@ -105,7 +135,7 @@ export function useMeshStatus(everyMs = 2000) {
       alive = false
       clearInterval(id)
     }
-  }, [everyMs])
+  }, [everyMs, region])
   return { data, error }
 }
 

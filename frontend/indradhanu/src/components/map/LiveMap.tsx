@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
+import { request } from "@/api/httpClient"
 import type { Feature, FeatureCollection } from "geojson"
 import { badgeName, imageName, provideIcon, registerIcons } from "./icons"
 import {
@@ -555,6 +556,19 @@ export function LiveMap({
 
         // `lineMetrics` lets the travelled part of a route be dimmed and the
         // route be drawn in, rather than appearing all at once.
+        // Predicted road risk (passability model, PCMC): red where the model
+        // expects the road blocked for an ambulance within 30 min, and the router
+        // avoids it; amber where risk is rising. Drawn under the unit routes.
+        m.addSource("nav-risk", { type: "geojson", data: fc([]) })
+        add({
+          id: "nav-risk", type: "line", source: "nav-risk", ...slot("middle"),
+          paint: {
+            "line-color": ["case", [">=", ["get", "p"], 0.6], "#dc2626", "#f59e0b"],
+            "line-width": ["interpolate", ["linear"], ["zoom"], 11, 2, 15, 6],
+            "line-opacity": ["interpolate", ["linear"], ["get", "p"], 0.3, 0.45, 1, 0.95],
+          },
+        })
+
         m.addSource("route", { type: "geojson", data: fc([]), lineMetrics: true })
         add({
           id: "route-casing", type: "line", source: "route", ...slot("middle"),
@@ -1176,6 +1190,23 @@ export function LiveMap({
       )
     ))
   }, [ready, routes, activity])
+
+  // Live road risk from the passability model, every minute (console only:
+  // the endpoint is for staff, and residents get guidance, not raw risk).
+  useEffect(() => {
+    if (!ready || !window.location.pathname.startsWith("/admin")) return
+    let alive = true
+    const load = async () => {
+      try {
+        const r = await request<{ available: boolean; segments?: GeoJSON.FeatureCollection }>("/nav/risk", { toast: false })
+        const src = map.current?.getSource("nav-risk") as mapboxgl.GeoJSONSource | undefined
+        if (alive && r.available && r.segments && src) src.setData(r.segments)
+      } catch { /* risk is an overlay; the map works without it */ }
+    }
+    void load()
+    const id = setInterval(() => void load(), 60_000)
+    return () => { alive = false; clearInterval(id) }
+  }, [ready])
 
   useEffect(() => {
     if (!ready) return

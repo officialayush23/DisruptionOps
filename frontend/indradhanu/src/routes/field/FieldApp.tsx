@@ -350,6 +350,23 @@ export default function FieldApp() {
     })
   }, [unitId, taskLng, taskLat, taskName, fixLng, fixLat])
 
+  /** Live position: while a crew has its unit selected and a usable fix, the
+   *  unit's position goes to the control room every 15 s. The server moves the
+   *  unit on the map, measures it against its road, redraws the road from where
+   *  it is when it leaves it, and replans when a free unit has moved far. */
+  const lastSent = useRef(0)
+  const fixAcc = fix?.accuracy
+  useEffect(() => {
+    if (!unitId || !fixUsable || fixLng === undefined || fixLat === undefined) return
+    const now = Date.now()
+    if (now - lastSent.current < 15_000) return
+    lastSent.current = now
+    request(`/units/${encodeURIComponent(unitId)}/position`, {
+      method: "POST", toast: false,
+      body: { lng: fixLng, lat: fixLat, accuracyM: fixAcc ?? null, source: "gps" },
+    }).catch(() => { /* next fix retries; the mesh path carries status offline */ })
+  }, [unitId, fixUsable, fixLng, fixLat, fixAcc])
+
   /** File a hazard at the crew's own position, through the same intake door
    *  every other report goes through. */
   async function fileHazard() {

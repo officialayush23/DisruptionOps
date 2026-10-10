@@ -128,6 +128,8 @@ const NAV: {
   { group: "Operations", to: "/admin/agent", label: "Agent log", icon: Activity },
   // The LangGraph cycle the router runs, and plans paused for an officer.
   { group: "Operations", to: "/admin/graph", label: "Agent graph", icon: GitBranch },
+  { group: "Operations", to: "/admin/units", label: "Units, live", icon: Truck },
+  { group: "Operations", to: "/admin/surge", label: "Surge operations", icon: Siren },
 
   // Analysis: real work, none of it urgent. Collapsed by default, so the rail
   // reads as four things rather than sixteen and everything is still one click

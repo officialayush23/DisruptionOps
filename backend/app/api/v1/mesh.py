@@ -68,6 +68,9 @@ class SensorIn(Camel):
     caption: str | None = Field(default=None, max_length=300)
     occurred_at: int | None = None
     city_id: str = "pune"
+    #: Optional thumbnail of the frame the detection came from (base64 or data URL,
+    #: <= 400 KB). Only over HTTPS; LoRa never carries images.
+    image_base64: str | None = Field(default=None, max_length=600_000)
 
 
 @router.post("/mesh/inbound")
@@ -160,9 +163,22 @@ async def ingest_sensor(body: SensorIn,
     )
     results = await service.receive([text], gateway_id=f"https:{body.node_id}",
                                     city_id=body.city_id)
+    if body.image_base64:
+        from app import media
+        await media.store(body.image_base64, source="camera", caption=body.caption,
+                          event_ref=body.event_id, city_id=body.city_id)
     return results[0]
 
 
 @router.get("/mesh/status")
-async def mesh_status(_: StaffPrincipal, city_id: str = "pune") -> dict:
-    return await service.status(city_id)
+async def mesh_status(_: StaffPrincipal, city_id: str = "pune", region: str = "all") -> dict:
+    """region: pune | ncr | all (the console's region picker)."""
+    return await service.status(city_id, region if region in ("pune", "ncr", "all") else "all")
+
+
+@router.get("/mesh/detail")
+async def mesh_detail(_: StaffPrincipal, packet: int | None = None, report: str | None = None) -> dict:
+    """What actually came in behind one live-feed line: the packet, the camera/VLM
+    description and sensor channels, the node, the report (photo or the VLM's
+    reading of it) and the incident with the units on it."""
+    return await service.detail(packet, report)

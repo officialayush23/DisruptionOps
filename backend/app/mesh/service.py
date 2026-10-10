@@ -599,21 +599,68 @@ async def gateway_heartbeat(hb: dict[str, Any]) -> dict:
             "outbox_pending": int(pending or 0), "signing": bool(settings.mesh_hmac_key)}
 
 
-async def status(city_id: str = "pune") -> dict:
+#: Pune and Ghaziabad (NCR) share one deployment; the split is by longitude
+#: (Pune 73-75 E, Ghaziabad 77 E), the same line the console's region picker uses.
+REGION_SPLIT_LON = 75.5
+
+
+def region_of(lon: float | None, *names: str | None) -> str | None:
+    if lon is not None:
+        return "pune" if lon < REGION_SPLIT_LON else "ncr"
+    joined = " ".join(n or "" for n in names).upper()
+    if "NCR" in joined or "GZB" in joined:
+        return "ncr"
+    if "PUN" in joined or "PCMC" in joined:
+        return "pune"
+    return None
+
+
+def _body(v: Any) -> dict:
+    b = _json(v)
+    if isinstance(b, str):          # stored double-encoded by older gateways
+        b = _json(b)
+    return b if isinstance(b, dict) else {}
+
+
+async def status(city_id: str = "pune", region: str = "all") -> dict:
+    """Nodes and recent packets, scoped to one region ("pune" | "ncr" | "all").
+
+    A packet's region is where it was sensed (its body's la/lo), else where its
+    node is, else its node's name (V-NCR-*, V-PUN-*). A packet whose place is
+    unknown is shown everywhere rather than hidden.
+    """
     nodes = await db.fetch(
         """
         select id, kind, label, lat, lon, ward_id, last_seen, meta,
                extract(epoch from now() - last_seen)::int age_s
-          from mesh_nodes order by last_seen desc limit 100
+          from mesh_nodes order by last_seen desc limit 200
         """
     )
+    node_lon = {n["id"]: n["lon"] for n in nodes}
     recent = await db.fetch(
         """
         select id, packet_id, type, node_id, gateway_id, verified, outcome, outcome_ref,
                received_at, body
-          from mesh_messages order by id desc limit 60
+          from mesh_messages order by id desc limit 200
         """
     )
+
+    def keep_node(n) -> bool:
+        r = region_of(n["lon"], n["id"], n["label"])
+        return region == "all" or r is None or r == region
+
+    def keep_packet(m) -> bool:
+        if region == "all":
+            return True
+        b = _body(m["body"])
+        lon = b.get("lo")
+        if lon is None:
+            lon = node_lon.get(m["node_id"]) or node_lon.get(f"lora:{m['node_id']}") or node_lon.get(m["gateway_id"])
+        r = region_of(float(lon) if lon is not None else None, m["node_id"], m["gateway_id"])
+        return r is None or r == region
+
+    nodes = [n for n in nodes if keep_node(n)][:100]
+    recent = [m for m in recent if keep_packet(m)][:60]
     box = await db.fetchrow(
         """
         select count(*) filter (where status = 'pending') pending,
@@ -628,8 +675,118 @@ async def status(city_id: str = "pune") -> dict:
         "nodes": [dict(n) | {"last_seen": n["last_seen"].isoformat(),
                              "meta": _json(n["meta"])} for n in nodes],
         "recent": [dict(m) | {"received_at": m["received_at"].isoformat(),
-                              "body": _json(m["body"])} for m in recent],
+                              "body": _body(m["body"])} for m in recent],
+        "region": region,
         "outbox": dict(box) if box else {},
         "signing": bool(settings.mesh_hmac_key),
         "enabled": bool(settings.mesh_gateway_key),
     }
+
+
+# ------------------------------------------------------------------ detail --
+def _iso(v: Any) -> Any:
+    return v.isoformat() if hasattr(v, "isoformat") else v
+
+
+async def _report_detail(report_id: str) -> dict | None:
+    r = await db.fetchrow(
+        """
+        select r.id::text id, r.category, r.classified_as, r.classification_confidence, r.note, r.source,
+               r.trust_score, r.trust_breakdown, r.verification_status, r.photo_path, r.photo_evidence,
+               r.photo_agreement, r.assessed_severity, r.severity_assessment, r.street, r.ward_id,
+               w.name ward_name, r.created_at, r.reporter_name, r.incident_id::text incident_id,
+               extensions.ST_X(r.location::extensions.geometry) lng, extensions.ST_Y(r.location::extensions.geometry) lat
+          from citizen_reports r left join wards w on w.id = r.ward_id
+         where r.id = $1::uuid
+        """, report_id)
+    if r is None:
+        return None
+    d = {k: _iso(v) for k, v in dict(r).items()}
+    for k in ("trust_breakdown", "photo_evidence", "severity_assessment"):
+        d[k] = _json(d[k]) if d[k] is not None else None
+    path = d.get("photo_path") or ""
+    d["photo_url"] = path if path.startswith(("http://", "https://", "data:image")) else None
+    d["photo_kept_on_device"] = path.startswith("device://")
+    return d
+
+
+async def _incident_detail(incident_id: str) -> dict | None:
+    i = await db.fetchrow(
+        """
+        select i.id::text id, i.title, i.category, i.severity, i.status::text status, i.report_count,
+               i.confidence, i.trust_score, i.ward_id, w.name ward_name, i.street, i.created_at,
+               extensions.ST_X(i.location::extensions.geometry) lng, extensions.ST_Y(i.location::extensions.geometry) lat
+          from incidents i left join wards w on w.id = i.ward_id where i.id = $1::uuid
+        """, incident_id)
+    if i is None:
+        return None
+    needs = await db.fetch("select capability_id, required, met from incident_needs where incident_id = $1::uuid",
+                           incident_id)
+    units = await db.fetch(
+        """
+        select a.resource_id, r.label, r.kind, a.status::text status, a.eta_minutes, a.progress
+          from assignments a join resources r on r.id = a.resource_id
+         where a.incident_id = $1::uuid and a.status in ('proposed','approved','en_route','on_site')
+        """, incident_id)
+    return {**{k: _iso(v) for k, v in dict(i).items()},
+            "needs": [dict(n) for n in needs], "units": [dict(u) for u in units]}
+
+
+async def detail(packet_id: int | None = None, report_id: str | None = None) -> dict:
+    """Everything behind one feed line: what arrived (the packet as sent, the
+    camera/VLM description, the sensor channels), which node sent it, the
+    report it became (with the photo or the photo's VLM reading), and the
+    incident it opened or joined, with who is on it."""
+    out: dict[str, Any] = {}
+    if packet_id is not None:
+        m = await db.fetchrow(
+            "select id, packet_id, type, node_id, gateway_id, hops, verified, signed, outcome, outcome_ref, error, "
+            "occurred_at, received_at, body from mesh_messages where id = $1", packet_id)
+        if m is None:
+            return {"error": "no such packet"}
+        b = _body(m["body"])
+        out["packet"] = {k: _iso(v) for k, v in dict(m).items() if k != "body"} | {"body": b}
+        out["sensed"] = {
+            "detector": b.get("k"), "confidence": b.get("c"), "device": b.get("f"),
+            "description": b.get("x"), "vlm_agreed": bool(b.get("v")),
+            "lat": b.get("la"), "lon": b.get("lo"),
+            "channels": _channels(str(b.get("x") or "")),
+        }
+        node = await db.fetchrow(
+            "select id, kind, label, lat, lon, ward_id, last_seen, meta from mesh_nodes "
+            "where id = any($1::text[]) order by last_seen desc limit 1",
+            [x for x in (m["node_id"], f"lora:{m['node_id']}", m["gateway_id"]) if x])
+        if node:
+            out["node"] = {k: _iso(v) for k, v in dict(node).items()} | {"meta": _json(node["meta"])}
+        if m["outcome"] == "report" and m["outcome_ref"]:
+            report_id = m["outcome_ref"]
+        elif m["outcome"] == "linked" and m["outcome_ref"]:
+            inc = await _incident_detail(m["outcome_ref"])
+            if inc is None:          # some gateways put the report id here
+                report_id = m["outcome_ref"]
+            else:
+                out["incident"] = inc
+    if report_id:
+        rep = await _report_detail(report_id)
+        if rep:
+            out["report"] = rep
+            if rep.get("incident_id") and "incident" not in out:
+                out["incident"] = await _incident_detail(rep["incident_id"])
+    from app import media
+    ev_ref = (out.get("packet") or {}).get("body", {}).get("id")
+    out["media"] = await media.for_item(report_id, ev_ref)
+    return out
+
+
+def _channels(text: str) -> list[dict]:
+    """'... (tilt switch 100%, lean 66%)' -> [{name: tilt switch, pct: 100}, ...]"""
+    import re
+    out = []
+    for part in re.findall(r"\(([^)]*)\)", text):
+        for item in part.split(","):
+            mm = re.match(r"\s*([^\d%]+?)\s+(\d+)%", item)
+            if mm:
+                out.append({"name": mm.group(1).strip(), "pct": int(mm.group(2))})
+    for name, pct in re.findall(r"(human|structural|environment)\s+(\d+)%", text):
+        out.append({"name": name, "pct": int(pct), "class": True})
+    return out
