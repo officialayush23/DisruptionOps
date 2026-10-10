@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
-  AlertTriangle, ArrowLeft, ChevronLeft, ChevronRight, ClipboardList, Gauge, HeartPulse, Siren, Truck, Users, Workflow,
+  AlertTriangle, ArrowLeft, ChevronLeft, Footprints, Maximize2, ChevronRight, ClipboardList, Gauge, HeartPulse, Siren, Truck, Users, Workflow,
 } from "lucide-react"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Button } from "@/components/ui/button"
@@ -163,14 +163,21 @@ export default function ZonePage() {
         <Button variant="outline" size="sm" className="h-9 gap-1.5" onClick={() => setWard(zone.id)}>
           <ClipboardList className="size-4" /> Ward numbers & approvals
         </Button>
+        <Button variant="outline" size="sm" className="h-9 gap-1.5" onClick={() => navigate(`/admin/evidence?ward=${encodeURIComponent(zone.id)}`)}>
+          <Footprints className="size-4" /> Evidence trail
+        </Button>
         <Button size="sm" className="h-9 gap-1.5" onClick={() => navigate(`/admin/wall/zone/${encodeURIComponent(zone.id)}/agents`)}>
           <Workflow className="size-4" /> Agent routing & decisions
         </Button>
       </ZoneHeader>
 
       <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
-        <div className="min-h-[420px] overflow-hidden rounded-2xl border shadow-card lg:min-h-[56vh]">
-          <ScreenMap state={state} zone={zone} region={region} big className="h-full min-h-[420px] w-full" onPickWard={setWard} />
+        <div className="relative overflow-hidden rounded-2xl border shadow-card">
+          <ScreenMap state={state} zone={zone} region={region} big className="h-[460px] w-full lg:h-[62vh]" onPickWard={setWard} />
+          <button onClick={() => navigate(`/admin/wall/zone/${encodeURIComponent(zone.id)}/live`)}
+                  className="absolute top-3 left-3 inline-flex h-9 items-center gap-1.5 rounded-lg border bg-card/95 px-3 text-sm font-medium shadow-sm backdrop-blur hover:bg-card">
+            <Maximize2 className="size-4" /> Full screen
+          </button>
         </div>
         <div className="space-y-5">
           <section className="rounded-2xl border bg-card p-5 shadow-card">

@@ -238,6 +238,34 @@
      "outcome": "registered by hand"
     },
     "metrics": {}
+   },
+   {
+    "version": "pass-20261010-1049",
+    "status": "retired",
+    "at": "2026-10-11T00:03:28"
+   },
+   {
+    "version": "pass-20261010-2359",
+    "status": "champion",
+    "at": "2026-10-11T00:03:28",
+    "decision": {
+     "outcome": "registered by hand"
+    },
+    "metrics": {}
+   },
+   {
+    "version": "pass-20261010-2359",
+    "status": "retired",
+    "at": "2026-10-11T00:14:41"
+   },
+   {
+    "version": "pass-20261010-1049",
+    "status": "champion",
+    "at": "2026-10-11T00:14:41",
+    "decision": {
+     "outcome": "registered by hand"
+    },
+    "metrics": {}
    }
   ]
  },

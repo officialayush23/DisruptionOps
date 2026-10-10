@@ -74,6 +74,10 @@ class Risk:
 
 _cache: Risk | None = None
 _lock = asyncio.Lock()
+# The evidence and candidate roads behind the last score, so other unit classes
+# and horizons are scored on exactly the same picture (arrival-time view).
+_basis: tuple | None = None
+_arrival: dict[tuple, dict] = {}
 
 
 def _fetch_json(url: str, params: dict, timeout: float = 8.0) -> dict | None:
@@ -246,9 +250,7 @@ async def _evidence(now: datetime):
     return ev, (steps - 1) * STEP_MIN, notes
 
 
-def _score(ev, t0_min: int):
-    from app.nav.passability import Scorer
-    from ml.features import PROFILE_CODES, build
+def _candidates(ev) -> np.ndarray:
     from ml.sim.static import load_static
     st = load_static()
     # Score the roads that can matter, not all 42k: the ones near anything
@@ -267,17 +269,37 @@ def _score(ev, t0_min: int):
         idx = [i for h in hits for i in h]
         if idx:
             near[np.unique(idx)] = True
-    cand = np.flatnonzero(drv & (risky | near))
+    return np.flatnonzero(drv & (risky | near))
+
+
+_scorer = None
+
+
+def _score_for(ev, t0_min: int, cand: np.ndarray, profile: str = "ambulance", horizon: int = 30):
+    """P(blocked at arrival) on `cand` for one unit class and horizon."""
+    global _scorer
+    from app.nav.passability import Scorer
+    from app.nav.profiles import PROFILES
+    from ml.features import PROFILE_CODES, build
     ev.traffic = np.full((t0_min // STEP_MIN + 1, 0), 255, np.uint8)     # no live traffic feed server-side
     ev.traffic_segs = np.zeros(0, np.int32)
     ev._trafpos = {}
-    F = build(ev, t0_min, cand, np.full(len(cand), 30), np.full(len(cand), PROFILE_CODES["ambulance"]),
-              np.full(len(cand), 0.3))
+    F = build(ev, t0_min, cand, np.full(len(cand), horizon), np.full(len(cand), PROFILE_CODES[profile]),
+              np.full(len(cand), PROFILES[profile].depth_limit_m))
     F["traffic_level"] = np.nan
     F["traffic_nodata"] = 0
-    scorer = Scorer.load()
-    p, sd, why = scorer.score(F)
-    return scorer.version, cand, p, sd, why, F
+    if _scorer is None:
+        _scorer = Scorer.load()
+    p, sd, why = _scorer.score(F)
+    return _scorer.version, p, sd, why, F
+
+
+def _score(ev, t0_min: int):
+    global _scorer
+    _scorer = None                      # pick up a newly registered champion on each refresh
+    cand = _candidates(ev)
+    version, p, sd, why, F = _score_for(ev, t0_min, cand)
+    return version, cand, p, sd, why, F
 
 
 async def current_risk(force: bool = False) -> Risk | None:
@@ -298,7 +320,40 @@ async def current_risk(force: bool = False) -> Risk | None:
         st = load_static()
         _cache = Risk(time.time(), version, cand, p, sd, st["lon"].to_numpy()[cand], st["lat"].to_numpy()[cand],
                       st["seg_id"].to_numpy()[cand], why, F, notes)
+        global _basis
+        _basis = (ev, t0, cand, _cache.at)
+        _arrival.clear()
         return _cache
+
+
+ARRIVAL_PROFILES = ("ambulance", "fire_engine", "resident")
+ARRIVAL_HORIZONS = (30, 60, 90)
+
+
+async def arrival(profile: str = "ambulance", horizon: int = 30) -> dict | None:
+    """The same live picture scored for another unit class and arrival horizon:
+    per road, P(blocked when this unit gets there), the ensemble's spread, and
+    whether the current-status rule calls it blocked right now. Cached until the
+    next refresh of the live evidence."""
+    r = await current_risk()
+    if r is None or _basis is None:
+        return None
+    ev, t0, cand, at = _basis
+    key = (profile, int(horizon), at)
+    hit = _arrival.get(key)
+    if hit is not None:
+        return hit
+    if profile == "ambulance" and int(horizon) == 30:
+        p, sd, why, F = r.p, r.sd, r.why, r.features
+    else:
+        async with _lock:
+            _, p, sd, why, F = await asyncio.to_thread(_score_for, ev, t0, cand, profile, int(horizon))
+    out = {"p": p, "sd": sd, "why": why, "now": F["status_now"].to_numpy().astype(bool), "at": at,
+           "model": r.model, "notes": r.notes, "cand": cand}
+    _arrival[key] = out
+    if len(_arrival) > 12:
+        _arrival.pop(next(iter(_arrival)))
+    return out
 
 
 async def predicted_blocks(min_p: float = AVOID_P, limit: int = MAX_POINTS) -> list[tuple[float, float, float]]:
@@ -343,6 +398,29 @@ async def log_used(points: list[tuple[float, float, float]], used_for: str = "ro
             await log_predictions(conn, rows)
     except Exception as exc:  # noqa: BLE001 - logging never blocks routing
         log.warning("log_predictions_failed", error=str(exc)[:200])
+
+
+def arrival_geojson(a: dict, min_p: float = 0.1) -> dict[str, Any]:
+    """Roads with P(blocked at arrival) >= min_p, or blocked now by the current-status
+    rule: p, its 2-sd band, the reason, and how the router would treat it."""
+    from ml.sim.static import load_static
+    st = load_static()
+    coords = pd.read_parquet(
+        __import__("ml.district", fromlist=["PROCESSED"]).PROCESSED / "graph" / "segments.parquet",
+        columns=["coords"])["coords"].to_numpy()
+    p, sd, now, cand = a["p"], a["sd"], a["now"], a["cand"]
+    upper = np.minimum(1.0, p + 2 * sd)
+    avoid = (p >= AVOID_P) | ((upper >= AVOID_P) & (p >= AVOID_P * 2 / 3))
+    idx = np.flatnonzero((p >= min_p) | now)
+    feats = [{"type": "Feature",
+              "properties": {"seg": str(st["seg_id"].iloc[cand[i]]), "p": round(float(p[i]), 3),
+                             "sd": round(float(sd[i]), 3), "lo": round(max(0.0, float(p[i] - 2 * sd[i])), 3),
+                             "hi": round(float(upper[i]), 3), "why": a["why"][i], "now": bool(now[i]),
+                             "avoid": bool(avoid[i]), "underpass": bool(st["underpass"].iloc[cand[i]]),
+                             "bridge": bool(st["bridge"].iloc[cand[i]])},
+              "geometry": {"type": "LineString", "coordinates": json.loads(coords[cand[i]])}}
+             for i in idx]
+    return {"type": "FeatureCollection", "features": feats}
 
 
 def as_geojson(r: Risk, min_p: float = 0.3) -> dict[str, Any]:

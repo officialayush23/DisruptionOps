@@ -29,6 +29,9 @@ import LiveFeed from "@/routes/admin/LiveFeed"
 import CommandWall from "@/routes/admin/CommandWall"
 import ZonePage from "@/routes/admin/ZonePage"
 import ZoneAgents from "@/routes/admin/ZoneAgents"
+import ZoneLive from "@/routes/admin/ZoneLive"
+import ArrivalAccess from "@/routes/admin/ArrivalAccess"
+import EvidenceTrail from "@/routes/admin/EvidenceTrail"
 import AgentGraph from "@/routes/admin/AgentGraph"
 import IncidentResponse from "@/routes/admin/IncidentResponse"
 import MeshDevices from "@/routes/admin/MeshDevices"
@@ -72,6 +75,9 @@ export function App() {
                 <Route path="wall" element={<CommandWall />} />
                 <Route path="wall/zone/:zoneId" element={<ZonePage />} />
                 <Route path="wall/zone/:zoneId/agents" element={<ZoneAgents />} />
+                <Route path="wall/zone/:zoneId/live" element={<ZoneLive />} />
+                <Route path="arrival" element={<ArrivalAccess />} />
+                <Route path="evidence" element={<EvidenceTrail />} />
                 <Route path="console" element={<DemoConsole />} />
                 <Route path="copilot" element={<Copilot />} />
                 {/* Who is going where. It was only on the map, which answers

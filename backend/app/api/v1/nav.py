@@ -23,6 +23,32 @@ async def risk(_: StaffPrincipal, min_p: float = 0.3, refresh: bool = False) -> 
             "atRisk": len(gj["features"]), "segments": gj}
 
 
+@router.get("/arrival")
+async def arrival(_: StaffPrincipal, profile: str = "ambulance", horizon: int = 30, min_p: float = 0.1,
+                  segments: bool = True) -> dict:
+    """Road access when the unit gets there: the live evidence scored for one unit
+    class (ambulance 0.3 m, fire tender 0.6 m, resident on foot 0.2 m) and one
+    horizon (30/60/90 min). Each road carries p, its 2-sd band (lo/hi), whether
+    the current-status rule calls it blocked now, and whether the router avoids it."""
+    if profile not in live.ARRIVAL_PROFILES or horizon not in live.ARRIVAL_HORIZONS:
+        return {"available": False, "reason": f"profile one of {live.ARRIVAL_PROFILES}, horizon one of {live.ARRIVAL_HORIZONS}"}
+    a = await live.arrival(profile, horizon)
+    if a is None:
+        return {"available": False, "reason": "model or data not available; routing uses reported blocks only"}
+    gj = live.arrival_geojson(a, max(0.0, min(min_p, 1.0)))
+    props = [f["properties"] for f in gj["features"]]
+    return {
+        "available": True, "model": a["model"], "computedAt": a["at"], "notes": a["notes"],
+        "profile": profile, "horizon": horizon, "scored": int(len(a["p"])),
+        "blockedNow": sum(1 for x in props if x["now"]),
+        "predictedBlocked": sum(1 for x in props if x["avoid"]),
+        "closingBeforeArrival": sum(1 for x in props if x["avoid"] and not x["now"]),
+        "uncertain": sum(1 for x in props if x["hi"] >= live.AVOID_P > x["p"]),
+        "avoidAt": live.AVOID_P,
+        **({"segments": gj} if segments else {}),
+    }
+
+
 @router.get("/models")
 async def models(_: StaffPrincipal) -> dict:
     """What the models are, how they did on the frozen test set against the

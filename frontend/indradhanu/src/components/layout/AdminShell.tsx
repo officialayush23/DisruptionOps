@@ -3,6 +3,8 @@ import { useRegion, type RegionPick } from "@/lib/region"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
+  Droplets,
+  Footprints,
   ChevronRight,
   Bluetooth,
   Thermometer,
@@ -133,6 +135,10 @@ const NAV: {
   { group: "Intelligence", to: "/admin/graph", label: "Agent graph", icon: GitBranch },
   { group: "Operations", to: "/admin/units", label: "Units, live", icon: Truck },
   { group: "Operations", to: "/admin/surge", label: "Surge operations", icon: Siren },
+  // Addition 2 made visible: which roads each kind of unit can still use when it arrives.
+  { group: "Intelligence", to: "/admin/arrival", label: "Road access at arrival", icon: Droplets },
+  // Every report joined to the incident it opened and the units sent, with the reasons.
+  { group: "Intelligence", to: "/admin/evidence", label: "Evidence trail", icon: Footprints },
   { group: "Intelligence", to: "/admin/models", label: "Models & results", icon: BrainCircuit },
 
   // Analysis: real work, none of it urgent. Collapsed by default, so the rail

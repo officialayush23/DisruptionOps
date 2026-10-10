@@ -210,8 +210,10 @@ function CityOverlay({ state, region, onClose, onPickWard }: {
           <X className="size-4" />
         </Button>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-card">
-        <ScreenMap state={state} zone={null} region={region} big className="h-full w-full" onPickWard={onPickWard} />
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl border shadow-card">
+        <div className="absolute inset-0">
+          <ScreenMap state={state} zone={null} region={region} big className="h-full w-full" onPickWard={onPickWard} />
+        </div>
       </div>
     </div>
   )

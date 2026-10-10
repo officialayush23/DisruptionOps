@@ -1,42 +1,17 @@
 import { useMemo, useState } from "react"
 import { Link } from "react-router-dom"
-import {
-  AlertTriangle, ArrowLeft, Bell, Brain, ChevronDown, ClipboardCheck, GitBranch, Inbox, Navigation,
-  Route as RouteIcon, ShieldCheck, Workflow,
-} from "lucide-react"
-import type { DemoEvent } from "@/routes/demo/useDemo"
+import { AlertTriangle, ArrowLeft, ChevronDown, GitBranch, Maximize2, ShieldCheck, Workflow } from "lucide-react"
 import { Segmented } from "@/components/common/MacControls"
 import { cn } from "@/lib/utils"
 import { ScreenMap, unitIcon } from "./ZoneMap"
 import { ZoneHeader, ZoneMissing, useZone } from "./ZonePage"
 import { scopeState } from "./zones"
+import { GROUP, GROUP_OF, pretty, time, zoneEvents, type Group, type KindGroup } from "./zoneLog"
 
 /** How the agents are working one zone: the roads each unit was given and
  *  why, every decision the agents took here with the reason they wrote at the
  *  time, the approvals waiting on a person, and what could not be covered. */
 
-type Group = "all" | "plan" | "assign" | "route" | "decide" | "alert" | "gap" | "intake"
-const GROUP_OF = (kind: string): Exclude<Group, "all"> =>
-  kind.startsWith("plan.") ? "plan"
-  : kind === "assignment.rerouted" || kind.startsWith("road.") ? "route"
-  : kind.startsWith("assignment.") ? "assign"
-  : kind.startsWith("decision.") ? "decide"
-  : kind.startsWith("alert.") ? "alert"
-  : kind.startsWith("demand.") || kind.startsWith("agency.") || kind.startsWith("surge.") ? "gap"
-  : "intake"
-const GROUP: Record<Exclude<Group, "all">, { label: string; icon: typeof Brain; tone: string }> = {
-  plan: { label: "Planning", icon: Brain, tone: "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300" },
-  assign: { label: "Assignments", icon: Navigation, tone: "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" },
-  route: { label: "Reroutes", icon: RouteIcon, tone: "bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300" },
-  decide: { label: "Decisions", icon: ClipboardCheck, tone: "bg-amber-50 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300" },
-  alert: { label: "Alerts", icon: Bell, tone: "bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-500/15 dark:text-fuchsia-300" },
-  gap: { label: "Gaps", icon: AlertTriangle, tone: "bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-300" },
-  intake: { label: "Reports", icon: Inbox, tone: "bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300" },
-}
-
-const time = (iso: string) =>
-  new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
-const pretty = (s: string) => s.replace(/[._]/g, " ")
 
 export default function ZoneAgents() {
   const { id, state, region, zones, index, zone } = useZone()
@@ -44,31 +19,15 @@ export default function ZoneAgents() {
   const [openRoute, setOpenRoute] = useState<string | null>(null)
   const scoped = useMemo(() => scopeState(state, zone), [state, zone])
 
-  const events = useMemo(() => {
-    if (!zone) return []
-    const ids = new Set(zone.incidents.map((i) => i.id))
-    const units = new Set([
-      ...state.resources.filter((r) => r.incidentId && ids.has(r.incidentId)).map((r) => r.id),
-      ...state.routes.filter((r) => ids.has(r.incidentId)).map((r) => r.resourceId),
-    ])
-    const hit = (v: unknown) => typeof v === "string" && (ids.has(v) || units.has(v) || v === zone.id)
-    const mine = (e: DemoEvent) => {
-      if (e.wardId === zone.id || hit(e.subjectId)) return true
-      const p = e.payload ?? {}
-      return ["incident_id", "to_incident", "from_incident", "resource_id", "ward_id", "unit_id"].some((k) => hit(p[k]))
-    }
-    return state.events
-      .filter((e) => mine(e) || e.kind.startsWith("plan."))
-      .sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt))
-  }, [state.events, state.resources, state.routes, zone])
+  const events = useMemo(() => (zone ? zoneEvents(state, zone) : []), [state, zone])
 
   if (!zone) return <ZoneMissing id={id} />
 
   const ids = new Set(zone.incidents.map((i) => i.id))
   const title = new Map(zone.incidents.map((i) => [i.id, i.title]))
   const counts = Object.fromEntries(
-    (Object.keys(GROUP) as Exclude<Group, "all">[]).map((g) => [g, events.filter((e) => GROUP_OF(e.kind) === g).length]),
-  ) as Record<Exclude<Group, "all">, number>
+    (Object.keys(GROUP) as KindGroup[]).map((g) => [g, events.filter((e) => GROUP_OF(e.kind) === g).length]),
+  ) as Record<KindGroup, number>
   const shown = group === "all" ? events : events.filter((e) => GROUP_OF(e.kind) === group)
   const uncovered = (state.plan?.uncovered ?? []).filter((u) => u.ward_id === zone.id || (u.incident_id && ids.has(u.incident_id)))
   const pending = scoped.decisions.filter((d) => /awaiting|proposed|pending/.test(d.status))
@@ -85,6 +44,10 @@ export default function ZoneAgents() {
         <Link to="/admin/graph" className="inline-flex h-9 items-center gap-1.5 rounded-lg border bg-card px-3 text-sm font-medium shadow-xs hover:bg-muted">
           <GitBranch className="size-4" /> Agent graph
         </Link>
+        <Link to={`/admin/wall/zone/${encodeURIComponent(zone.id)}/live`}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground shadow-xs hover:bg-primary/90">
+          <Maximize2 className="size-4" /> Full screen
+        </Link>
       </ZoneHeader>
 
       <div>
@@ -98,8 +61,12 @@ export default function ZoneAgents() {
 
       {/* routing */}
       <div className="grid gap-5 xl:grid-cols-[1.25fr_1fr]">
-        <div className="min-h-[420px] overflow-hidden rounded-2xl border shadow-card">
-          <ScreenMap state={state} zone={zone} region={region} big className="h-full min-h-[420px] w-full" />
+        <div className="relative overflow-hidden rounded-2xl border shadow-card">
+          <ScreenMap state={state} zone={zone} region={region} big className="h-[520px] w-full" />
+          <Link to={`/admin/wall/zone/${encodeURIComponent(zone.id)}/live`}
+                className="absolute top-3 left-3 inline-flex h-9 items-center gap-1.5 rounded-lg border bg-card/95 px-3 text-sm font-medium shadow-sm backdrop-blur hover:bg-card">
+            <Maximize2 className="size-4" /> Full screen
+          </Link>
         </div>
         <section className="flex min-h-0 flex-col rounded-2xl border bg-card shadow-card">
           <div className="flex items-center justify-between border-b px-5 py-4">
@@ -175,7 +142,7 @@ export default function ZoneAgents() {
               onChange={setGroup}
               options={[
                 { value: "all", label: "All", count: events.length },
-                ...(Object.keys(GROUP) as Exclude<Group, "all">[])
+                ...(Object.keys(GROUP) as KindGroup[])
                   .filter((g) => counts[g] > 0)
                   .map((g) => ({ value: g, label: GROUP[g].label, count: counts[g] })),
               ]}

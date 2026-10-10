@@ -66,6 +66,12 @@ def run_rows(args: tuple[str, int, str]) -> pd.DataFrame:
     tree = cKDTree(xy)
     out = []
     for t0 in range(int(DECIDE_EVERY_H * 60 / STEP_MIN), T - hmax, int(DECIDE_EVERY_H * 60 / STEP_MIN)):
+        # Labels are only ever asked for t0..t0+hmax, so earlier world states can
+        # go: keeping every step of a long storm was what ran workers out of memory.
+        for t in [t for t in state_cache if t < t0]:
+            del state_cache[t]
+        for key in [key for key in label_cache if key[0] < t0]:
+            del label_cache[key]
         win = slice(t0, min(T, t0 + 6))
         hot = ((tr.depth[win].astype(np.float32) >= 0.05).any(0) | ((tr.flags[win] & hazmask) > 0).any(0)) & drivable
         R = ev.reports[(ev.reports["t_obs_min"] <= t0 * STEP_MIN) & (ev.reports["t_obs_min"] > (t0 - 6) * STEP_MIN)]
