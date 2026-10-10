@@ -140,7 +140,6 @@ These AUCs are lower than on the full test set (0.98), and that is expected. Rou
 
 ## Limitations
 
-- **Reroute reason labels.** In `naive_trust` (conflicting reports) and `predicted` (insufficient capacity), some reroutes caused by roads *reported* closed are labelled "predicted blocked at arrival (p=…)". The label fix landed after those two runs; the decisions and outcomes are unaffected. They are re-run with the ML retraining.
 - **One realization per scenario.** These are demonstrations of behaviour. The aggregate route evaluation over 1,576 test trips is in `TRAINING_AND_RELEARNING.md` §7.
 - **Fixed assumptions.** Service times, people per flooded place, reach radii, and boats and teams travelling by truck are assumptions, fixed before the test storms were run (see the module docstring).
 - **Planning cadence.** Response times include the planning cadence (10 minutes); the live system replans on every event.
