@@ -18,6 +18,12 @@ over the same structured inputs, so the system keeps giving correct answers
 without a model at all. That property is what lets a demo run on venue wifi,
 and it is also the honest answer to "what happens when the LLM is wrong or
 absent?": the numbers come from the solver and the scorer, never from here.
+
+Since 2026-10 `complete` is also the **gateway**: every call, from every caller,
+passes the prompt guardrail (PII redaction, size cap), the cost controls in
+`app/agents/llm_cost.py` (task profile -> model tier and output cap, response
+cache with single-flight, token budget, bulkhead) and the output guardrail.
+A caller names its `task`; it cannot skip a layer.
 """
 
 from __future__ import annotations
@@ -25,8 +31,9 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Hashable, Literal, Protocol
 
+from app.agents import guardrails, llm_cost
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -44,20 +51,38 @@ class Completion:
     engine: Engine
     #: Set when the primary provider failed and we degraded.
     degraded_reason: str | None = None
+    #: hit | shared | coalesced | computed | uncached | skipped
+    cache: str = "skipped"
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tokens_cached: int = 0
+    model: str = ""
+    latency_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class ProviderResult:
+    text: str
+    model: str
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tokens_cached: int = 0
 
 
 class Provider(Protocol):
     engine: Engine
 
-    async def complete(self, system: str, prompt: str) -> str: ...
+    async def complete(self, system: str, prompt: str, *, max_tokens: int = 600,
+                       tier: str = "large") -> ProviderResult: ...
 
 
 class GeminiProvider:
     engine: Engine = "gemini"
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, small_model: str = "") -> None:
         self._api_key = api_key
         self._model = model
+        self._small = small_model or model
         self._client = None
 
     def _ensure(self):
@@ -67,17 +92,31 @@ class GeminiProvider:
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    async def complete(self, system: str, prompt: str) -> str:
+    async def complete(self, system: str, prompt: str, *, max_tokens: int = 600,
+                       tier: str = "large") -> ProviderResult:
+        """The system prompt goes in `system_instruction`, not glued onto the
+        user text: a stable prefix is what the provider's implicit prompt cache
+        can reuse, and the separation is also what tells the model which part
+        is ours. Async client, so a burst does not queue on a thread pool."""
+        from google.genai import types
+
         client = self._ensure()
-
-        def _call() -> str:
-            response = client.models.generate_content(
-                model=self._model,
-                contents=f"{system}\n\n{prompt}",
-            )
-            return (response.text or "").strip()
-
-        return await asyncio.to_thread(_call)
+        model = self._small if tier == "small" else self._model
+        cfg: dict[str, Any] = {"system_instruction": system, "max_output_tokens": max_tokens,
+                               "temperature": 0.2}
+        # 2.5 Flash models think by default and bill for it. Short structured
+        # tasks do not need it; Pro cannot turn it off, so only Flash is told.
+        if "2.5-flash" in model and tier == "small":
+            cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        response = await client.aio.models.generate_content(
+            model=model, contents=prompt, config=types.GenerateContentConfig(**cfg))
+        usage = getattr(response, "usage_metadata", None)
+        return ProviderResult(
+            text=(response.text or "").strip(), model=model,
+            tokens_in=int(getattr(usage, "prompt_token_count", 0) or 0),
+            tokens_out=int(getattr(usage, "candidates_token_count", 0) or 0),
+            tokens_cached=int(getattr(usage, "cached_content_token_count", 0) or 0),
+        )
 
 
 class BedrockProvider:
@@ -91,8 +130,9 @@ class BedrockProvider:
 
     engine: Engine = "bedrock"
 
-    def __init__(self, model_id: str, region: str, api_key: str = "") -> None:
+    def __init__(self, model_id: str, region: str, api_key: str = "", small_model_id: str = "") -> None:
         self._model_id = model_id
+        self._small = small_model_id or model_id
         self._region = region
         self._api_key = api_key
         self._client = None
@@ -109,18 +149,31 @@ class BedrockProvider:
             self._client = boto3.client("bedrock-runtime", region_name=self._region)
         return self._client
 
-    async def complete(self, system: str, prompt: str) -> str:
+    async def complete(self, system: str, prompt: str, *, max_tokens: int = 600,
+                       tier: str = "large") -> ProviderResult:
         client = self._ensure()
+        model = self._small if tier == "small" else self._model_id
+        system_blocks: list[dict] = [{"text": system}]
+        if settings.bedrock_prompt_cache:
+            # Everything before the cache point is reused across calls at a
+            # fraction of the input price, on models that support it.
+            system_blocks.append({"cachePoint": {"type": "default"}})
 
-        def _call() -> str:
+        def _call() -> ProviderResult:
             response = client.converse(
-                modelId=self._model_id,
-                system=[{"text": system}],
+                modelId=model,
+                system=system_blocks,
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
-                inferenceConfig={"maxTokens": 700, "temperature": 0.2},
+                inferenceConfig={"maxTokens": max_tokens, "temperature": 0.2},
             )
             blocks = response["output"]["message"]["content"]
-            return "".join(b.get("text", "") for b in blocks).strip()
+            usage = response.get("usage") or {}
+            return ProviderResult(
+                text="".join(b.get("text", "") for b in blocks).strip(), model=model,
+                tokens_in=int(usage.get("inputTokens") or 0),
+                tokens_out=int(usage.get("outputTokens") or 0),
+                tokens_cached=int(usage.get("cacheReadInputTokens") or 0),
+            )
 
         return await asyncio.to_thread(_call)
 
@@ -151,12 +204,14 @@ def _build_chain() -> list[Provider]:
     """
     built: dict[Engine, Provider] = {}
     if settings.gemini_api_key:
-        built["gemini"] = GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+        built["gemini"] = GeminiProvider(settings.gemini_api_key, settings.gemini_model,
+                                         settings.gemini_model_small)
     if settings.bedrock_model_id:
         built["bedrock"] = BedrockProvider(
             settings.bedrock_model_id,
             settings.aws_region,
             settings.aws_api_key_bedrock_for_xai,
+            settings.bedrock_model_id_small,
         )
 
     order: list[Engine] = ["gemini", "bedrock"]
@@ -239,67 +294,137 @@ async def complete(
     prompt: str,
     *,
     fallback: str,
+    task: str = "general",
+    cache_key: Hashable | None = None,
+    max_tokens: int | None = None,
 ) -> Completion:
-    """Ask each configured provider in turn; hand back `fallback` if none answer.
+    """The gateway. Guard, then cache, then budget, then the provider chain,
+    then guard again; hand back `fallback` whenever any of them says no.
 
     Callers always supply a usable fallback string; there is no code path where
     a missing model produces a missing answer, and none where a model produces
     an operational number — the figures come from the solver and the scorer.
     """
-    chain = _get_chain()
-    if not chain:
+    prof = llm_cost.profile(task)
+    guarded = guardrails.guard_prompt(system, prompt, task=task)
+    if not _get_chain():
+        llm_cost.record(task, how="skipped", fallback_reason="no provider")
         return Completion(fallback, "fallback", "no provider configured")
 
+    ran: dict[str, Completion] = {}  # set by compute() when this call ran the chain
+
+    async def compute() -> tuple[str, bool]:
+        result = await _through_chain(guarded.system, guarded.prompt, prof,
+                                      max_tokens or prof.max_tokens, task)
+        ran["result"] = result
+        return result.text, result.engine != "fallback"
+
+    if settings.llm_cache_enabled and prof.cache_ttl_s > 0:
+        key = llm_cost.ResponseCache.key(
+            ("v1", task, prof.tier, cache_key) if cache_key is not None
+            else ("v1", task, prof.tier, guarded.system, guarded.prompt))
+        text, how = await llm_cost.cache.get_or_compute(key, prof.cache_ttl_s, compute)
+    else:
+        text, _ = await compute()
+        how = "uncached"
+
+    result = ran.get("result")
+    if result is None:
+        # Served from cache or by another caller's in-flight request: no model
+        # call, no spend. A coalesced fallback comes back as an empty string.
+        llm_cost.record(task, how=how)
+        if not text:
+            return Completion(fallback, "fallback", "coalesced onto a call that degraded", cache=how)
+        return Completion(text, _get_chain()[0].engine, None, cache=how)
+    llm_cost.record(task, how=how, tokens_in=result.tokens_in, tokens_out=result.tokens_out,
+                    tokens_cached=result.tokens_cached, model=result.model,
+                    latency_ms=result.latency_ms,
+                    fallback_reason=result.degraded_reason if result.engine == "fallback" else None)
+    if result.engine == "fallback":
+        return Completion(fallback, "fallback", result.degraded_reason, cache=how)
+    result.cache = how
+    return result
+
+
+async def _through_chain(system: str, prompt: str, prof: llm_cost.TaskProfile,
+                         max_tokens: int, task: str) -> Completion:
+    """Budget, bulkhead, then each provider in turn. Returns a Completion whose
+    engine is "fallback" (and text empty) when nothing answered."""
+    ok, why = await llm_cost.budget.admit(
+        prof.priority, llm_cost.estimate_tokens(system, prompt) + max_tokens)
+    if not ok:
+        guardrails.trip("budget.tokens", f"{task}: {why}", blocking=False, persist=False)
+        return Completion("", "fallback", f"budget: {why}")
+    if llm_cost.bulkhead.full_for(prof.priority):
+        llm_cost.bulkhead.shed += 1
+        guardrails.trip("budget.concurrency", f"{task}: {llm_cost.bulkhead.in_flight} calls in flight",
+                        blocking=False, persist=False)
+        return Completion("", "fallback", "bulkhead: model capacity reserved for life-safety work")
+
+    chain = _get_chain()
     tried: list[str] = []
     first_reason: str | None = None
 
-    for provider in chain:
-        engine = provider.engine
-        if not _available(provider):
-            tried.append(f"{engine}:cooling")
-            continue
+    async with llm_cost.bulkhead:
+        for provider in chain:
+            engine = provider.engine
+            if not _available(provider):
+                tried.append(f"{engine}:cooling")
+                continue
 
-        try:
-            text = await asyncio.wait_for(
-                provider.complete(system, prompt), timeout=LLM_TIMEOUT_S
-            )
-            if not text:
-                raise ValueError("empty completion")
-        except Exception as exc:  # noqa: BLE001 - degrade, never fail
-            exhausted = _is_exhausted(exc)
-            n = _failures.get(engine, 0) + 1
-            _failures[engine] = n
-            reason = f"{type(exc).__name__}: {str(exc)[:120]}"
-            first_reason = first_reason or f"{engine} {reason}"
-            tried.append(f"{engine}:{'exhausted' if exhausted else 'error'}")
+            started = time.perf_counter()
+            try:
+                got = await asyncio.wait_for(
+                    provider.complete(system, prompt, max_tokens=max_tokens, tier=prof.tier),
+                    timeout=LLM_TIMEOUT_S,
+                )
+                if isinstance(got, str):          # a provider (or test double) of the old shape
+                    got = ProviderResult(text=got, model=engine)
+                if not got.text:
+                    raise ValueError("empty completion")
+            except Exception as exc:  # noqa: BLE001 - degrade, never fail
+                exhausted = _is_exhausted(exc)
+                n = _failures.get(engine, 0) + 1
+                _failures[engine] = n
+                reason = f"{type(exc).__name__}: {str(exc)[:120]}"
+                first_reason = first_reason or f"{engine} {reason}"
+                tried.append(f"{engine}:{'exhausted' if exhausted else 'error'}")
 
-            # An exhausted quota is not a flaky request and there is no point
-            # spending two more attempts proving it. Rest this provider at once
-            # and move down the chain.
-            if exhausted or n >= _FAILURE_THRESHOLD:
-                rest = _EXHAUSTED_COOLDOWN_S if exhausted else _COOLDOWN_S
-                _cooldown_until[engine] = time.monotonic() + rest
-                log.warning("llm_provider_resting", engine=engine,
-                            seconds=rest, failures=n, error=reason)
-            else:
-                log.warning("llm_unavailable", engine=engine,
-                            failures=n, error=reason)
-            continue
+                # An exhausted quota is not a flaky request and there is no point
+                # spending two more attempts proving it. Rest this provider at once
+                # and move down the chain.
+                if exhausted or n >= _FAILURE_THRESHOLD:
+                    rest = _EXHAUSTED_COOLDOWN_S if exhausted else _COOLDOWN_S
+                    _cooldown_until[engine] = time.monotonic() + rest
+                    log.warning("llm_provider_resting", engine=engine,
+                                seconds=rest, failures=n, error=reason)
+                else:
+                    log.warning("llm_unavailable", engine=engine,
+                                failures=n, error=reason)
+                continue
 
-        # Success. Clear this provider's history, and say plainly when the
-        # answer came from somewhere other than the preferred provider — a
-        # silent failover is how you discover in March that the primary has
-        # been dead since January.
-        _failures[engine] = 0
-        _cooldown_until.pop(engine, None)
-        degraded = None
-        if engine != chain[0].engine or tried:
-            degraded = f"failed over to {engine} after {', '.join(tried)}"
-            log.info("llm_failover", engine=engine, after=tried)
-        return Completion(text, engine, degraded)
+            # Success. Clear this provider's history, and say plainly when the
+            # answer came from somewhere other than the preferred provider — a
+            # silent failover is how you discover in March that the primary has
+            # been dead since January.
+            _failures[engine] = 0
+            _cooldown_until.pop(engine, None)
+            tokens_in = got.tokens_in or llm_cost.estimate_tokens(system, prompt)
+            tokens_out = got.tokens_out or llm_cost.estimate_tokens(got.text)
+            await llm_cost.budget.record(tokens_in + tokens_out)
+            checked = guardrails.guard_output(got.text, task=task)
+            if not checked.ok:
+                return Completion("", "fallback", f"guardrail: {checked.reason}")
+            degraded = None
+            if engine != chain[0].engine or tried:
+                degraded = f"failed over to {engine} after {', '.join(tried)}"
+                log.info("llm_failover", engine=engine, after=tried)
+            return Completion(checked.text, engine, degraded, tokens_in=tokens_in,
+                              tokens_out=tokens_out, tokens_cached=got.tokens_cached,
+                              model=got.model, latency_ms=(time.perf_counter() - started) * 1000)
 
     return Completion(
-        fallback, "fallback",
+        "", "fallback",
         first_reason or f"all providers cooling down ({', '.join(tried)})",
     )
 

@@ -89,6 +89,48 @@ class Settings(BaseSettings):
     aws_api_key_bedrock_for_xai: str = ""
     bedrock_model_id: str = ""
 
+    # ---- llm cost controls (app/agents/llm_cost.py) ----
+    #: A cheaper model for the short structured tasks (routing, category,
+    #: severity, duplicate adjudication). Empty = use the main model for all.
+    gemini_model_small: str = ""
+    bedrock_model_id_small: str = ""
+    #: Bedrock prompt caching (cachePoint after the system prompt). Only some
+    #: Bedrock models support it; leave off unless yours does.
+    bedrock_prompt_cache: bool = False
+    #: Token budget, shared by every model call in this process (or the whole
+    #: fleet when REDIS_URL is set). Over budget, calls get the deterministic
+    #: answer: low priority sheds first, life-safety last.
+    llm_tokens_per_minute: int = 300_000
+    llm_tokens_per_day: int = 20_000_000
+    #: Model calls in flight at once (bulkhead). Low-priority calls degrade
+    #: rather than queue once it is three-quarters full.
+    llm_max_concurrency: int = 32
+    llm_cache_enabled: bool = True
+    llm_cache_max_entries: int = 20_000
+    #: USD per 1M tokens, "model=in/out,model=in/out". Unknown models report
+    #: tokens only, never a guessed cost.
+    llm_prices: str = "gemini-2.5-flash=0.30/2.50,gemini-2.5-flash-lite=0.10/0.40"
+
+    # ---- scale (app/core/shared.py, app/core/ingest.py) ----
+    #: Share of fast, successful requests that get an access-log line. Errors,
+    #: 4xx/5xx and slow requests are always logged. 1.0 in development; at
+    #: thousands of requests a second, logging every one is the bottleneck.
+    access_log_sample: float = 1.0
+    #: Shared state for more than one replica: rate limits, LLM cache and
+    #: budget, ingest streams, the router's leader lease. Empty = in-process,
+    #: which is correct for one replica and wrong for many.
+    redis_url: str = ""
+    #: Ingest queue sizes per lane. A full bulk lane sheds (503 + Retry-After);
+    #: the life-safety lane never sheds, it writes through instead.
+    ingest_critical_max: int = 50_000
+    ingest_standard_max: int = 100_000
+    ingest_bulk_max: int = 200_000
+    ingest_batch_size: int = 500
+    ingest_flush_ms: int = 50
+    ingest_workers: int = 4
+    #: The event router runs on one replica: the one holding this lease.
+    router_lease_s: int = 15
+
     # ---- feeds ----
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
     open_meteo_flood_url: str = "https://flood-api.open-meteo.com/v1/flood"

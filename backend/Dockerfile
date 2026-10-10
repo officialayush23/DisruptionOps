@@ -33,10 +33,15 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4).status==200 else 1)"
 
-# One worker per container; scale with replicas, not with in-process workers,
-# so each has its own connection pool against the Supabase pooler's limit.
+# One worker per container by default; scale with replicas, not with in-process
+# workers, so each has its own connection pool against the Supabase pooler's
+# limit. WEB_CONCURRENCY raises it on a bigger box (one per core).
+#
+# uvloop + httptools explicitly: they are what uvicorn[standard] installs, and
+# naming them means a missing wheel fails the build instead of silently halving
+# throughput. Backlog 4096 so a burst queues in the kernel instead of refusing.
 #
 # --proxy-headers because Render terminates TLS at its edge: without it every
 # request looks like plain http from a private address, and anything deriving a
 # URL or a client IP gets it wrong.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-1} --loop uvloop --http httptools --backlog 4096 --timeout-keep-alive 30 --proxy-headers --forwarded-allow-ips '*' --no-access-log"]

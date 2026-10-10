@@ -31,6 +31,11 @@ effective limit is per-replica rather than global. That is a real limitation and
 the right trade for now: the alternative is a Redis round trip on the hot path
 of a disaster response API, to make a limit that exists to stop scripts slightly
 more precise against scripts.
+
+Update 2026-10: with `REDIS_URL` set the limit is global across replicas (two
+fixed windows weighted into a sliding estimate, one pipelined round trip, only
+on the metered paths); without it, per replica as before. Pure ASGI, and the
+new ingest doors are metered too.
 """
 
 from __future__ import annotations
@@ -40,9 +45,7 @@ import time
 from collections import deque
 from threading import Lock
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
 
 from app.core.errors import _problem as problem_document
 from app.core.logging import get_logger
@@ -61,6 +64,9 @@ LIMITS: dict[str, tuple[int, int]] = {
     # they press — so the legitimate rate for one walking person is already
     # several a minute, and the client's own cooldown is the real limiter here.
     "/citizen/guide": (60, 60),            # Mapbox + the guidance agent
+    "/citizen/ask": (20, 60),              # the model, per call (cached per ward)
+    "/ingest/reports": (10, 60),           # the queued intake door, same allowance
+    "/copilot/ask": (60, 60),              # staff, but each one can reach a model
 }
 
 #: Stop the key space growing without bound when the callers are anonymous and
@@ -152,21 +158,55 @@ def _caller(request: Request) -> str:
     return f"ip:{ip}"
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.method == "OPTIONS":
-            return await call_next(request)
+async def _allow_shared(key: tuple[str, str], limit: int, window: int) -> tuple[bool, int] | None:
+    """Global across replicas, or None when Redis is not in use."""
+    from app.core import shared
 
-        found = _limit_for(request.url.path)
+    r = shared.client()
+    if r is None:
+        return None
+    try:
+        now = time.time()
+        slot = int(now // window)
+        base = "rl:" + hashlib.sha1(f"{key[0]}|{key[1]}".encode()).hexdigest()[:20]
+        pipe = r.pipeline()
+        pipe.incr(f"{base}:{slot}")
+        pipe.expire(f"{base}:{slot}", window * 2)
+        pipe.get(f"{base}:{slot - 1}")
+        cur, _, prev = await pipe.execute()
+        weight = 1 - (now % window) / window
+        estimate = int(cur) + int(prev or 0) * weight
+        if estimate > limit:
+            return False, max(1, int(window - now % window))
+        return True, 0
+    except Exception as exc:  # noqa: BLE001 - fall back to per-replica
+        shared.mark_down(exc)
+        return None
+
+
+class RateLimitMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope.get("method") == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+        found = _limit_for(scope.get("path", ""))
         if found is None:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
+        request = Request(scope)
         suffix, limit, window = found
-        ok, retry = _windows.allow((_caller(request), suffix), limit, window)
+        caller = _caller(request)
+        got = await _allow_shared((caller, suffix), limit, window)
+        ok, retry = got if got is not None else _windows.allow((caller, suffix), limit, window)
         if ok:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        log.warning("rate_limited", path=request.url.path, caller=_caller(request),
+        log.warning("rate_limited", path=scope.get("path"), caller=caller,
                     limit=limit, window=window)
         response = problem_document(
             status_code=429,
@@ -182,4 +222,4 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             retryAfter=retry,
         )
         response.headers["Retry-After"] = str(retry)
-        return response
+        await response(scope, receive, send)

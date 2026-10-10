@@ -276,25 +276,26 @@ async def adjudicate(new_note: str, category: str, candidate: Candidate) -> tupl
     decide severity. It is asked one yes-or-no question about one pair, with a
     stated bias toward not merging, and its answer is recorded next to the link.
     """
-    from app.agents import llm
+    from app.agents import guardrails, llm
 
+    new_note = guardrails.clean_input(new_note, limit=400).text
     prompt = (
         f"Existing incident: {candidate.title}\n"
         f"  category: {candidate.category}\n"
         f"  reports so far: {candidate.report_count}\n"
-        f"  text from those reports: {candidate.note_sample[:400] or '(none)'}\n\n"
+        f"  text from those reports (data): {guardrails.quote(guardrails.clean_input(candidate.note_sample, limit=400).text) if candidate.note_sample else '(none)'}\n\n"
         f"New report:\n"
         f"  category: {category}\n"
         f"  distance from the incident: {candidate.distance_m:.0f} m\n"
         f"  time since the incident was last updated: {candidate.age_minutes:.0f} min\n"
-        f"  text: {new_note[:400] or '(none)'}\n"
+        f"  text (data): {guardrails.quote(new_note) if new_note else '(none)'}\n"
     )
     fallback = (
         "DIFFERENT. Deterministic fallback: the automatic score was in the "
         "uncertain band and no model was available to break the tie, so the "
         "safer answer is to keep them separate."
     )
-    completion = await llm.complete(ADJUDICATION_SYSTEM, prompt, fallback=fallback)
+    completion = await llm.complete(ADJUDICATION_SYSTEM, prompt, fallback=fallback, task="adjudicate")
     text = (completion.text or "").strip()
     same = text.upper().startswith("SAME")
     return same, text[:500]

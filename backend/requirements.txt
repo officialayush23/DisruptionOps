@@ -24,6 +24,12 @@ cryptography>=43.0
 structlog>=24.4
 prometheus-fastapi-instrumentator>=7.0
 
+# --- shared state across replicas (optional: app/core/shared.py) ---
+# Used only when REDIS_URL is set: global rate limits, shared LLM cache and
+# token budget, ingest streams. Imported lazily; absent or unreachable Redis
+# means the in-process path, never a failed request.
+redis>=5.0
+
 # --- rate limiting ---
 slowapi>=0.1.9
 

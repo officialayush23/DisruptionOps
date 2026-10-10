@@ -25,8 +25,10 @@ Events the planner itself writes (plan.generated, assignment.*) are ignored by
 kind and by actor, so a re-plan cannot trigger another re-plan.
 
 This is the in-process form of the production design, where the same routing
-table consumes Kafka topics. One API instance runs it (Render runs one); a
-second instance would re-plan twice, which is safe but wasteful.
+table consumes Kafka topics. Every replica starts it, but only the replica
+holding the `event_router` lease (app/core/lease.py) polls and re-plans; the
+others stand by and take over within one lease period if it dies, resuming
+from the cursor the leader stored in the lease.
 """
 from __future__ import annotations
 
@@ -119,6 +121,7 @@ def route(ev: dict[str, Any]) -> Route:
 @dataclass
 class _State:
     running: bool = False
+    leader: bool = False
     cursor: int = 0
     last_poll_at: float = 0.0
     events_seen: int = 0
@@ -152,6 +155,7 @@ def request_replan(trigger: str, city_id: str = "pune") -> None:
 def status() -> dict:
     return {
         "running": state.running,
+        "leader": state.leader,
         "cursor": state.cursor,
         "secondsSinceLastPoll": round(time.monotonic() - state.last_poll_at, 1) if state.last_poll_at else None,
         "eventsSeen": state.events_seen,
@@ -199,11 +203,28 @@ async def _poll_once() -> None:
 
 
 async def _poll_loop() -> None:
+    from app.core import lease
+
     row = await db.fetchrow("select coalesce(max(id), 0) as m from events")
     state.cursor = int(row["m"]) if row else 0      # react to the future, not the past
     log.info("event_router_started", cursor=state.cursor)
     while state.running:
         try:
+            was = state.leader
+            state.leader, meta = await lease.hold("event_router", settings.router_lease_s,
+                                                  {"cursor": state.cursor} if was else None)
+            if state.leader and not was:
+                # Taking over: resume where the previous leader stopped, so the
+                # events written while nobody led are not lost. A very old cursor
+                # (a lease left from days ago) is not replayed: re-plans
+                # coalesce anyway, and the present is what needs planning.
+                stored = int(meta.get("cursor") or 0)
+                head = int((await db.fetchval("select coalesce(max(id), 0) from events")) or 0)
+                state.cursor = stored if stored and head - stored <= 5000 else max(state.cursor, head)
+                log.info("event_router_leader", cursor=state.cursor, holder=lease.HOLDER)
+            if not state.leader:
+                await asyncio.sleep(settings.router_lease_s / 3)
+                continue
             await _poll_once()
             state.last_error = None
         except asyncio.CancelledError:

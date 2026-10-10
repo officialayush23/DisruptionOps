@@ -11,59 +11,79 @@ for a bug that is in a query.
 
 Catching it here, in the innermost middleware, means the response still travels
 out through CORS and the frontend sees the real status and message.
+
+Pure ASGI since 2026-10, not `BaseHTTPMiddleware`. The base class wraps every
+request in an extra task and two memory streams; on this API's hot paths that
+overhead was larger than the handler. Measured on the same box: ~940 req/s
+per worker through the old pair of middlewares, see docs/PRODUCTION_HARDENING.md for after.
+Access logs are sampled for fast successful requests (`ACCESS_LOG_SAMPLE`);
+errors, 4xx/5xx and slow requests are always logged.
 """
 
 from __future__ import annotations
 
+import random
 import time
 import uuid
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
 
 from app.core.logging import get_logger, request_id_ctx
 
 log = get_logger("http")
 
+_QUIET = ("/health", "/health/live", "/metrics")
+#: Successful requests faster than this are logged at ACCESS_LOG_SAMPLE.
+SLOW_MS = 500.0
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:
-        rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+
+class RequestContextMiddleware:
+    def __init__(self, app, sample: float = 1.0) -> None:
+        self.app = app
+        self.sample = max(0.0, min(1.0, sample))
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        rid = ""
+        for k, v in scope.get("headers") or ():
+            if k == b"x-request-id":
+                rid = v.decode("latin-1")[:64]
+                break
+        rid = rid or uuid.uuid4().hex[:16]
         token = request_id_ctx.set(rid)
         started = time.perf_counter()
+        status_holder = {"status": 500, "started": False}
+        rid_header = (b"x-request-id", rid.encode("latin-1"))
+
+        async def send_with_id(message) -> None:
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+                status_holder["started"] = True
+                message["headers"] = list(message.get("headers") or []) + [rid_header]
+            await send(message)
+
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_id)
         except Exception as exc:  # noqa: BLE001 - deliberate boundary
             elapsed = (time.perf_counter() - started) * 1000
-            log.exception(
-                "request_failed",
-                method=request.method,
-                path=request.url.path,
-                duration_ms=round(elapsed, 1),
-            )
+            log.exception("request_failed", method=scope.get("method"), path=scope.get("path"),
+                          duration_ms=round(elapsed, 1))
+            if status_holder["started"]:
+                raise
             from app.core.errors import problem_response
 
             response = problem_response(exc)
             response.headers["X-Request-ID"] = rid
-            # No reset here: the `finally` below is the single reset. Resetting
-            # a context token twice raises `RuntimeError: Token has already been
-            # used once`, and that exception escapes the boundary this class
-            # exists to be -- so the 500 never travels back out through
-            # CORSMiddleware and the browser blames CORS for a bug in a query.
-            return response
+            await response(scope, receive, send)
+            return
         finally:
             request_id_ctx.reset(token)
 
+        path = scope.get("path", "")
+        if path in _QUIET:
+            return
         elapsed = (time.perf_counter() - started) * 1000
-        response.headers["X-Request-ID"] = rid
-        # Health checks would otherwise dominate the log.
-        if request.url.path not in ("/health", "/health/live", "/metrics"):
-            log.info(
-                "request",
-                method=request.method,
-                path=request.url.path,
-                status=response.status_code,
-                duration_ms=round(elapsed, 1),
-            )
-        return response
+        st = status_holder["status"]
+        if st >= 400 or elapsed >= SLOW_MS or self.sample >= 1.0 or random.random() < self.sample:
+            log.info("request", method=scope.get("method"), path=path, status=st,
+                     duration_ms=round(elapsed, 1))

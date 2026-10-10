@@ -57,9 +57,15 @@ async def lifespan(_: FastAPI):
     from app.drone import swarm as drone_swarm
 
     await drone_swarm.start()
+    # The ingest bus's drainers. Zero here when a separate worker deployment
+    # (python -m app.worker) does the draining.
+    from app.core import ingest
+
+    await ingest.start()
     try:
         yield
     finally:
+        await ingest.stop()
         await drone_swarm.stop()
         await iot_virtual.stop()
         await event_router.stop()
@@ -85,7 +91,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(RequestContextMiddleware)
+app.add_middleware(RequestContextMiddleware, sample=settings.access_log_sample)
 # Outside the request-context middleware, so a refused request is still logged
 # with its correlation id and still leaves through CORS. Starlette applies these
 # in reverse, so the limiter sees the request before the handler and the 429
@@ -127,9 +133,8 @@ app.add_middleware(
 )
 
 register_error_handlers(app)
-app.include_router(api_router, prefix="/api/v1")
-
-
+# Health first: load balancers ask it every few seconds per replica, and route
+# matching is a linear scan.
 @app.get("/health/live", tags=["health"], include_in_schema=False)
 async def live() -> dict[str, str]:
     """Liveness: the process is up. Deliberately does not touch the database."""
@@ -146,3 +151,9 @@ async def health() -> dict[str, object]:
         "database": database,
         "llm_provider": settings.llm_provider,
     }
+
+
+app.include_router(api_router, prefix="/api/v1")
+
+
+

@@ -23,6 +23,7 @@ from app.api.v1 import (
     risk,
     runs,
     system,
+    ingest,
 )
 from app.hazards import registry
 
@@ -31,6 +32,9 @@ from app.hazards import registry
 registry.load_adapters()
 
 api_router = APIRouter()
+# First, on purpose: routing is a linear scan over every route (~250 here),
+# so the doors that take the volume are matched before the console's long tail.
+api_router.include_router(ingest.router)
 api_router.include_router(system.router)
 api_router.include_router(auth.router)
 api_router.include_router(runs.router)

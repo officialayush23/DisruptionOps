@@ -598,3 +598,198 @@ def hazard_lift(hazard_id: str, field_w: dict | None) -> tuple[float, str] | Non
     flags = ", ".join(field_w.get("flags") or []) or "rising readings"
     return weight * v, (f"{field_w['nodes']} live field sensor(s); {metric} {v:.0%} "
                         f"at {field_w.get('top')} ({flags})")
+
+
+# ---------------------------------------------------------------- bulk ingest ---
+def _prepare(obs: dict) -> dict | None:
+    node = str(obs.get("node") or "").strip()[:40]
+    if not node:
+        return None
+    lat, lon = _f(obs.get("lat")), _f(obs.get("lon"))
+    if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        lat = lon = None
+    stamp = obs.get("received_at") or obs.get("receivedAt")
+    return {"node": node, "obs": obs, "lat": lat, "lon": lon,
+            "observed": _when(stamp), "stamped": bool(stamp),
+            "seq": _int(obs.get("seq")), "up": _int(obs.get("up")),
+            "sim_mask": _int(obs.get("sim")),
+            "simulated": bool(obs.get("virtual")) and kinds.is_virtual(node),
+            "label": str(obs["label"])[:80] if obs.get("label") else None}
+
+
+async def ingest_bulk(observations: list[dict], *, gateway_id: str, city_id: str = "pune") -> dict:
+    """The same pipeline as `ingest`, for a batch, in a fixed number of round
+    trips instead of about five per reading.
+
+    Same rules: duplicate (node, seq, uptime) readings are dropped, every
+    reading is scored against its node's running baseline *in order*, the
+    node's state is carried from one reading to the next, and escalations go
+    through the mesh intake exactly as before. What changes is only the shape
+    of the database work:
+
+        1 upsert of every distinct node      (unnest, one statement)
+        1 duplicate lookup for the batch     (unnest join)
+        1 ward lookup per node that moved    (not per reading)
+        1 pipelined insert of all readings   (executemany)
+        1 pipelined update of all nodes      (executemany)
+
+    Results come back in input order, one dict per observation.
+    """
+    from app.mesh import service as mesh
+
+    prepared = [_prepare(o) for o in observations]
+    results: list[dict] = [{"error": "no node"} if p is None else {} for p in prepared]
+    valid = [(i, p) for i, p in enumerate(prepared) if p is not None]
+    if not valid:
+        return {"accepted": 0, "errors": len(results), "duplicates": 0, "results": results}
+
+    # Readings without their own timestamp arrived "now": one instant for the
+    # batch, so the order within it is the node's sequence number, not the
+    # microsecond at which this loop happened to look at each one.
+    batch_now = datetime.now(timezone.utc)
+    for _, p in valid:
+        if not p["stamped"]:
+            p["observed"] = batch_now
+    by_node: dict[str, list[tuple[int, dict]]] = {}
+    for i, p in valid:
+        by_node.setdefault(p["node"], []).append((i, p))
+    for items in by_node.values():
+        items.sort(key=lambda ip: (ip[1]["observed"], ip[1]["seq"] if ip[1]["seq"] is not None else -1))
+
+    nodes = list(by_node)
+    last_loc = {n: next(((p["lat"], p["lon"]) for _, p in reversed(by_node[n]) if p["lat"] is not None),
+                        (None, None)) for n in nodes}
+    labels = {n: next((p["label"] for _, p in by_node[n] if p["label"]), None) for n in nodes}
+    sim = {n: any(p["simulated"] for _, p in by_node[n]) for n in nodes}
+
+    readings: list[tuple] = []
+    node_updates: list[tuple] = []
+    touches: list[tuple] = []
+    escalate: list[tuple[str, dict, float, float, Any]] = []
+    dups = 0
+    async with db.transaction() as conn:
+        rows = await conn.fetch(
+            """
+            insert into sensor_nodes (id, city_id, label, lat, lon, gateway_id, simulated)
+            select k.id, $1, coalesce(k.label, k.id), k.lat, k.lon, $2, k.sim
+              from unnest($3::text[], $4::text[], $5::float8[], $6::float8[], $7::bool[])
+                   as k(id, label, lat, lon, sim)
+            on conflict (id) do update
+               set lat = coalesce(excluded.lat, sensor_nodes.lat),
+                   lon = coalesce(excluded.lon, sensor_nodes.lon),
+                   gateway_id = excluded.gateway_id,
+                   simulated = excluded.simulated,
+                   label = coalesce(nullif(excluded.label, excluded.id), sensor_nodes.label)
+            returning id, lat, lon, ward_id, last_seq, baseline, state, escalated, (xmax = 0) as created
+            """,
+            city_id, gateway_id, nodes, [labels[n] for n in nodes],
+            [last_loc[n][0] for n in nodes], [last_loc[n][1] for n in nodes], [sim[n] for n in nodes],
+        )
+        node_row = {r["id"]: r for r in rows}
+
+        keyed = [(p["node"], p["seq"], p["up"]) for _, p in valid if p["seq"] is not None and p["up"] is not None]
+        seen_db: set[tuple] = set()
+        if keyed:
+            found = await conn.fetch(
+                """
+                select r.node_id, r.seq, r.uptime_s from sensor_readings r
+                  join unnest($1::text[], $2::bigint[], $3::bigint[]) as k(n, s, u)
+                    on r.node_id = k.n and r.seq = k.s and r.uptime_s = k.u
+                 where r.observed_at > now() - interval '1 hour'
+                """,
+                [k[0] for k in keyed], [k[1] for k in keyed], [k[2] for k in keyed],
+            )
+            seen_db = {(f["node_id"], f["seq"], f["uptime_s"]) for f in found}
+
+        for n in nodes:
+            row = node_row.get(n)
+            if row is None:
+                continue
+            lat, lon, ward_id = row["lat"], row["lon"], row["ward_id"]
+            moved = any(p["obs"].get("lat") is not None for _, p in by_node[n])
+            if lat is not None and lon is not None and (ward_id is None or moved):
+                ward_id = await mesh.ward_at(lon, lat, city_id)
+            baseline, state = _json(row["baseline"]), _json(row["state"])
+            last_esc = _json(row["escalated"]) or {}
+            last_seq, lost_total, count, last_obs, newest = row["last_seq"], 0, 0, None, None
+            for i, p in by_node[n]:
+                key = (n, p["seq"], p["up"])
+                if p["seq"] is not None and p["up"] is not None and key in seen_db:
+                    results[i] = {"node": n, "duplicate": True}
+                    dups += 1
+                    continue
+                seen_db.add(key)
+                obs = p["obs"]
+                s = fusion.score(obs, baseline, state)
+                baseline = s.baseline
+                lost = 0
+                try:
+                    if last_seq is not None and p["seq"] is not None and p["seq"] > last_seq + 1:
+                        lost = p["seq"] - last_seq - 1
+                except TypeError:
+                    pass
+                found_esc = fusion.escalations(s, s.state, p["observed"].timestamp(), last_esc)
+                flags = list(s.flags) + (["packet_loss"] if lost else [])
+                flags += [f"escalated:{e['kind']}" for e in found_esc]
+                readings.append((
+                    n, city_id, p["observed"], p["seq"], p["up"], lat, lon,
+                    *[_f(obs.get(c)) if c not in ("knocks", "tilt_sw", "pir") else _int(obs.get(c))
+                      for c in _COLS],
+                    _int(obs.get("rssi")), _f(obs.get("snr")),
+                    s.human, s.structural, s.environmental, s.overall, s.evidence, flags,
+                    (str(obs.get("raw")) if obs.get("raw") else None),
+                    {"sim_mask": p["sim_mask"]} if p["sim_mask"] else {},
+                ))
+                state = s.state | {"latest": s.as_dict() | {"at": p["observed"].isoformat()}}
+                for e in found_esc:
+                    last_esc[e["kind"]] = p["observed"].timestamp()
+                    if lat is not None and lon is not None:
+                        escalate.append((n, e, lat, lon, s))
+                if p["seq"] is not None:
+                    last_seq = max(last_seq or 0, p["seq"])
+                lost_total += lost
+                count += 1
+                last_obs, newest = obs, p["observed"] if newest is None else max(newest, p["observed"])
+                results[i] = {"node": n, **s.as_dict(), "lost": lost,
+                              "escalated": [e["kind"] for e in found_esc] or None}
+            if count:
+                node_updates.append((n, ward_id, newest, last_seq, lost_total, count,
+                                     _int(last_obs.get("rssi")), _f(last_obs.get("snr")),
+                                     baseline, state, last_esc))
+                touches.append((n, lat, lon, ward_id, s, last_obs))
+            if row["created"]:
+                log.info("iot_node_joined", node=n, kind=kinds.kind_of(n), simulated=sim[n])
+
+        if readings:
+            await conn.executemany(
+                """
+                insert into sensor_readings
+                  (node_id, city_id, observed_at, seq, uptime_s, lat, lon,
+                   mq2, mq135, temp_c, tilt_deg, gyro_dps, vib_g, mic, piezo, knocks, tilt_sw, pir,
+                   rssi, snr, human, structural, environmental, overall, evidence, flags, raw, extra)
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+                """,
+                readings,
+            )
+        if node_updates:
+            await conn.executemany(
+                """
+                update sensor_nodes
+                   set ward_id = $2, last_seen = greatest(last_seen, $3), readings = readings + $6,
+                       last_seq = coalesce($4, last_seq), lost = lost + $5,
+                       rssi = coalesce($7, rssi), snr = coalesce($8, snr),
+                       baseline = $9, state = $10, escalated = $11
+                 where id = $1
+                """,
+                node_updates,
+            )
+
+    for n, lat, lon, ward_id, s, obs in touches:
+        await _touch_mesh_node(n, lat, lon, ward_id, s, obs)
+    for n, e, lat, lon, s in escalate:
+        await _escalate(n, e, lat, lon, s, city_id)
+    await _touch_gateway(gateway_id)
+    accepted = sum(1 for r in results if r and "error" not in r and not r.get("duplicate"))
+    return {"accepted": accepted, "errors": sum(1 for r in results if "error" in r),
+            "duplicates": dups, "results": results}

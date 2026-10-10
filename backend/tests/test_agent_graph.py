@@ -339,7 +339,7 @@ class Severity(unittest.TestCase):
 
         saved = (llm_mod.complete, ml.classify)
 
-        async def fake_complete(system, prompt, *, fallback):
+        async def fake_complete(system, prompt, *, fallback, **kw):
             return type("C", (), {"text": llm if llm is not None else fallback})()
 
         async def fake_classify(text, labels):

@@ -24,11 +24,31 @@ async def llm_status() -> dict:
     A silent failover is how a team discovers in March that the primary has been
     dead since January.
     """
+    from app.agents import llm_cost
+
     return {
         "engine": llm.current_engine(),
         "note": llm.engine_note(),
         "providers": llm.provider_status(),
+        "usage": llm_cost.usage(),
     }
+
+
+@router.get("/status/llm/usage")
+async def llm_usage() -> dict:
+    """Where the tokens go: per task, calls vs model calls vs cache, tokens,
+    cost where the price is configured, budget and bulkhead state."""
+    from app.agents import llm_cost
+
+    return llm_cost.usage()
+
+
+@router.get("/status/guardrails")
+async def guardrail_status() -> dict:
+    """Every guardrail rule, how often it has fired, and the latest firings."""
+    from app.agents import guardrails
+
+    return guardrails.summary()
 
 
 @router.get("/status/router")
