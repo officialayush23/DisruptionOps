@@ -49,6 +49,8 @@ type Unit = {
   location: [number, number]; capacity: number
   assignedTo: string | null; incidentId: string | null
   etaMinutes: number | null; incidentLocation: [number, number] | null
+  /** Response-time model for what is left of the trip: P50 to plan, P90 to promise. */
+  etaModel?: { p50: number; p90: number; riskMax: number } | null
   /** The road the crew is meant to drive, not a bearing to the incident. */
   route?: number[][] | null
   routeEngine?: string | null
@@ -218,7 +220,7 @@ export default function FieldApp() {
   // Waiting up to three seconds to find that out is three seconds of a driver
   // sitting still, so the task arrives on the socket and the poll becomes the
   // safety net rather than the mechanism.
-  const { live } = useLiveSync(["field_tasks", "incidents"], () => void load())
+  const { live } = useLiveSync(["field_tasks", "incidents", "assignments"], () => void load())
 
   // One effect, not two: separately, every change of `load` fired an immediate
   // request *and* rebuilt the interval that was about to fire anyway.
@@ -648,7 +650,8 @@ export default function FieldApp() {
       remaining={
         <>
           {remainingM !== null ? `${formatMetres(remainingM)} left` : ""}
-          {unit.etaMinutes ? ` · about ${unit.etaMinutes} min (dispatch estimate)` : ""}
+          {unit.etaModel ? ` · ${Math.round(unit.etaModel.p50)} min, 90% within ${Math.round(unit.etaModel.p90)}`
+            : unit.etaMinutes ? ` · about ${unit.etaMinutes} min (dispatch estimate)` : ""}
           {travelledM === null && myPos ? " · you are not on this route" : ""}
           {!myPos ? " · from the unit's recorded position" : ""}
         </>
@@ -828,7 +831,9 @@ export default function FieldApp() {
           <div className="text-sm font-semibold">{unit.label} to {unit.assignedTo}</div>
           <div className="text-xs text-slate-400">
             {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
-            {unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
+            {unit.etaModel ? ` · ${Math.round(unit.etaModel.p50)} min (90% within ${Math.round(unit.etaModel.p90)})`
+              : unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
+            {unit.etaModel && unit.etaModel.riskMax >= 0.3 ? ` · flood risk on route ${Math.round(unit.etaModel.riskMax * 100)}%` : ""}
             {typeof unit.progress === "number" ? ` · ${Math.round(unit.progress * 100)}% of the way` : ""}
             {roadRoute
               ? " · routed around every hazard the control room knows about"

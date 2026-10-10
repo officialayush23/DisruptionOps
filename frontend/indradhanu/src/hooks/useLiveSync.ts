@@ -39,6 +39,8 @@ export type LiveTable =
   | "decisions"
   | "alerts"
   | "field_tasks"
+  | "citizen_reports"
+  | "assignments"
 
 type Options = {
   /** Collapse a burst into one refresh. A single agent run writes decisions,
@@ -113,5 +115,9 @@ export function useLiveSync(
  *  of persisting until someone reloads.
  */
 export function pollInterval(live: boolean, base: number): number {
-  return live ? Math.max(base * 6, 20000) : base
+  // Was max(base x 6, 20 s): with the socket up, everything realtime does not
+  // carry (unit positions, the event log, reports joining an incident) reached
+  // the console up to 20 s late. Push makes the common case instant; the poll
+  // keeps the rest within a few seconds.
+  return live ? Math.min(Math.max(base * 3, 3000), 8000) : base
 }

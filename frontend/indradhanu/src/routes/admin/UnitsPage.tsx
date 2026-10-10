@@ -33,6 +33,7 @@ type Unit = {
   status_note: string | null; unavailable_reason: string | null; last_reported_at: string | null
   lng: number | null; lat: number | null; assignment_id: string | null; incident_id: string | null
   capability_id: string | null; eta_minutes: number | null; progress: number | null
+  eta_model?: { p50: number; p90: number; riskMax: number } | null
   assignment_status: string | null; incident_title: string | null; category: string | null
   positions: number; reroutes: number
 }
@@ -152,6 +153,7 @@ export default function UnitsPage() {
         <TabsList>
           <TabsTrigger value="units">Units</TabsTrigger>
           <TabsTrigger value="teams">Teams on incidents</TabsTrigger>
+          <TabsTrigger value="sites">Sites & stock</TabsTrigger>
         </TabsList>
 
         <TabsContent value="units" className="mt-3">
@@ -209,7 +211,7 @@ export default function UnitsPage() {
                               {u.progress != null ? (
                                 <div className="flex items-center gap-2">
                                   <Progress value={Math.round(u.progress * 100)} className="h-1.5" />
-                                  <span className="text-xs tabular-nums">{u.eta_minutes ?? "?"}′</span>
+                                  <span className="text-xs tabular-nums" title={u.eta_model ? `model: ${u.eta_model.p50} min, 90% within ${u.eta_model.p90}; router said ${u.eta_minutes ?? "?"}` : "router estimate"}>{u.eta_model ? `${Math.round(u.eta_model.p50)}′ (≤${Math.round(u.eta_model.p90)}′)` : `${u.eta_minutes ?? "?"}′`}</span>
                                 </div>
                               ) : <span className="text-xs text-muted-foreground">—</span>}
                             </TableCell>
@@ -224,6 +226,10 @@ export default function UnitsPage() {
             </Card>
             {sel ? <UnitDetail unit={sel} /> : <Card><CardContent className="p-6 text-sm text-muted-foreground">Pick a unit.</CardContent></Card>}
           </div>
+        </TabsContent>
+
+        <TabsContent value="sites" className="mt-3">
+          <SitesBoard region={region === "ncr" ? "ncr" : "pune"} />
         </TabsContent>
 
         <TabsContent value="teams" className="mt-3">
@@ -436,6 +442,87 @@ function TeamsBoard({ teams, onPick }: { teams: Team[]; onPick: (unit: string) =
           </CardContent>
         </Card>
       ))}
+    </div>
+  )
+}
+
+type Site = { id: string; name: string; kind: string; status: string; capacity: number | null; occupancy: number
+  supplies: Record<string, number>; supplies_baseline: Record<string, number>; ward_id: string; changes: number }
+type SiteRow = { site: string; at: string; summary: string }
+
+/** Resource sites: every change to occupancy, stock, status and capacity, as
+ *  logged by the database itself (migration 036), viewable and exportable. */
+function SitesBoard({ region }: { region: "pune" | "ncr" }) {
+  const [pick, setPick] = useState<string | null>(null)
+  const sites = useQuery({
+    queryKey: ["sites", region], refetchInterval: 8000,
+    queryFn: () => request<Site[]>("/units/sites", { toast: false, query: { region } }),
+  })
+  const log = useQuery({
+    queryKey: ["site-log", pick], enabled: !!pick, refetchInterval: 6000,
+    queryFn: () => request<{ rows: SiteRow[] }>(`/units/sites/${encodeURIComponent(pick!)}/log`, { toast: false }),
+  })
+  const sel = sites.data?.find((s) => s.id === pick)
+  return (
+    <div className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
+      <Card>
+        <CardHeader className="flex-row items-center justify-between pb-2">
+          <div><CardTitle className="text-base">Sites</CardTitle>
+            <CardDescription>Shelters, relief centres, kitchens, water points, camps, hospitals</CardDescription></div>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => download(`/units/sites/log/export?format=csv&region=${region}`, "sites-log.csv")}><Download className="size-3.5" /> CSV</Button>
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => download(`/units/sites/log/export?format=json&region=${region}`, "sites-log.json")}><FileJson className="size-3.5" /> JSON</Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          <ScrollArea className="h-[560px]">
+            <Table>
+              <TableHeader><TableRow><TableHead>Site</TableHead><TableHead>Status</TableHead><TableHead>People</TableHead><TableHead>Lowest stock</TableHead><TableHead>Changes</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {(sites.data ?? []).map((s) => {
+                  const low = Object.entries(s.supplies ?? {}).map(([k, v]) => [k, v / Math.max(1, s.supplies_baseline?.[k] ?? v ?? 1)] as const)
+                    .sort((a, b) => a[1] - b[1])[0]
+                  return (
+                    <TableRow key={s.id} className={`cursor-pointer ${pick === s.id ? "bg-muted" : ""}`} onClick={() => setPick(s.id)}>
+                      <TableCell><div className="font-medium">{s.name}</div><div className="text-xs text-muted-foreground">{s.kind.replace(/_/g, " ")}</div></TableCell>
+                      <TableCell><Badge variant={s.status === "full" ? "destructive" : s.status === "closed" ? "outline" : "secondary"}>{s.status}</Badge></TableCell>
+                      <TableCell className="tabular-nums">{s.capacity ? `${s.occupancy}/${s.capacity}` : "—"}</TableCell>
+                      <TableCell className="text-xs">{low ? `${low[0].replace(/_/g, " ")} ${Math.round(low[1] * 100)}%` : "—"}</TableCell>
+                      <TableCell className="tabular-nums">{s.changes}</TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="flex-row items-center justify-between pb-2">
+          <div><CardTitle className="text-base">{sel ? sel.name : "Pick a site"}</CardTitle>
+            <CardDescription>Every change, newest first</CardDescription></div>
+          {sel && (
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => download(`/units/sites/${encodeURIComponent(sel.id)}/log?format=csv&limit=20000`, `${sel.id}-log.csv`)}><Download className="size-3.5" /></Button>
+              <Button size="sm" variant="outline" onClick={() => download(`/units/sites/${encodeURIComponent(sel.id)}/log?format=json&limit=20000`, `${sel.id}-log.json`)}><FileJson className="size-3.5" /></Button>
+            </div>
+          )}
+        </CardHeader>
+        <CardContent>
+          <ScrollArea className="h-[520px] pr-2">
+            <ol className="relative ml-2 border-l pl-4">
+              {(log.data?.rows ?? []).map((r, i) => (
+                <li key={i} className="mb-2.5">
+                  <span className="absolute -left-[5px] mt-1.5 size-2.5 rounded-full bg-primary/70" />
+                  <div className="text-xs text-muted-foreground">{new Date(r.at).toLocaleString()}</div>
+                  <div className="text-sm">{r.summary}</div>
+                </li>
+              ))}
+              {pick && !(log.data?.rows ?? []).length && <li className="text-sm text-muted-foreground">No changes logged yet (needs migration 036).</li>}
+            </ol>
+          </ScrollArea>
+        </CardContent>
+      </Card>
     </div>
   )
 }

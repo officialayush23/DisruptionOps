@@ -17,6 +17,8 @@ convenient layer rather than the one holding the line.
 
 from __future__ import annotations
 
+import json
+
 import secrets
 from dataclasses import asdict
 from typing import Literal
@@ -615,6 +617,11 @@ async def citizen_vision(body: VisionIn, _: CurrentPrincipal) -> dict:
     }
 
 
+def _eta_remaining(path, kind, router_min, progress, uid):
+    from app.nav import eta
+    return eta.remaining(path, kind, router_min, progress, uid)
+
+
 @router.get("/citizen/state")
 async def citizen_state(
     _: CurrentPrincipal,
@@ -1166,7 +1173,11 @@ async def field_state(
          "routeEngine": r["route_engine"],
          "steps": r["steps"] or [],
          "distanceKm": float(r["distance_km"]) if r["distance_km"] is not None else None,
-         "progress": float(r["progress"] or 0)}
+         "progress": float(r["progress"] or 0),
+         # The response-time model's view of this trip (P50 to plan with, P90 to
+         # promise), from the route and the flood risk along it; None when the
+         # model has nothing to say (no road route, not a road unit).
+         "etaModel": _eta_remaining(r["path"], r["kind"], r["eta_minutes"], r["progress"], r["id"])}
         for r in await db.fetch(
             f"""
             select r.id, r.kind, r.label, r.operator, r.status::text status,

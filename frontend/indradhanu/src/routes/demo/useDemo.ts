@@ -274,7 +274,7 @@ export function useDemoPoll(pollMs = 1000) {
   // `field_tasks` are the two that change because a *person* did something
   // elsewhere, and those are exactly the ones worth not waiting for.
   const { live } = useLiveSync(
-    ["ward_risks", "incidents", "decisions", "alerts", "field_tasks"],
+    ["ward_risks", "incidents", "decisions", "alerts", "field_tasks", "citizen_reports", "assignments"],
     () => void refresh()
   )
 

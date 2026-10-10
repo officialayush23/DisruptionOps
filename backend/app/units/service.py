@@ -215,6 +215,7 @@ async def units_overview(city_id: str = "pune", prefix: str | None = None) -> li
                extensions.ST_Y(r.location::extensions.geometry) lat,
                a.id::text assignment_id, a.incident_id::text incident_id, a.capability_id, a.eta_minutes,
                a.progress, a.status::text assignment_status, i.title incident_title, i.category,
+               extensions.ST_AsGeoJSON(a.route)::json -> 'coordinates' route_coords,
                (select count(*) from unit_positions p where p.resource_id = r.id) positions,
                (select count(*) from events e where e.subject_type='resource' and e.subject_id=r.id
                  and e.kind = 'assignment.rerouted') reroutes
@@ -225,7 +226,15 @@ async def units_overview(city_id: str = "pune", prefix: str | None = None) -> li
          where r.city_id = $1 and ($3::text is null or r.id like $3 || '%')
          order by r.kind, r.id
         """, city_id, list(ACTIVE), prefix)
-    return [{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()} for r in rows]
+    from app.nav.eta import remaining as _eta_remaining
+    out = []
+    for r in rows:
+        d = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in dict(r).items()}
+        coords = d.pop("route_coords", None)
+        d["eta_model"] = (_eta_remaining(coords, d["kind"], d["eta_minutes"], d["progress"], d["id"])
+                          if coords and d.get("assignment_status") in ("proposed", "approved", "en_route") else None)
+        out.append(d)
+    return out
 
 
 async def track(unit_id: str, since: datetime | None = None, limit: int = 1000) -> dict:
@@ -275,3 +284,126 @@ async def teams(city_id: str = "pune") -> list[dict]:
                     "severity": r["severity"], "wardId": r["ward_id"], "needs": needs, "units": units,
                     "complete": all(n["met"] >= n["required"] for n in needs) if needs else bool(units)})
     return out
+
+
+async def trails(minutes: int = 30, region: str = "pune") -> dict:
+    """Every unit's path over the last `minutes` and its recent reroutes, as one
+    GeoJSON FeatureCollection for the wall map: LineStrings (one per unit, from
+    unit_positions) and Points where a unit was rerouted, with the reason."""
+    cmp = "<" if region == "pune" else ">="
+    rows = await db.fetch(
+        f"""
+        select p.resource_id, r.kind, r.label, r.status::text status,
+               json_agg(json_build_array(round(extensions.ST_X(p.location::extensions.geometry)::numeric, 6),
+                                         round(extensions.ST_Y(p.location::extensions.geometry)::numeric, 6))
+                        order by p.recorded_at) coords
+          from unit_positions p join resources r on r.id = p.resource_id
+         where p.recorded_at > now() - make_interval(mins => $1)
+           and extensions.ST_X(p.location::extensions.geometry) {cmp} 75.5
+         group by p.resource_id, r.kind, r.label, r.status
+        """, minutes)
+    feats = []
+    for r in rows:
+        c = r["coords"] if isinstance(r["coords"], list) else json.loads(r["coords"])
+        if len(c) >= 2:
+            feats.append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": c},
+                          "properties": {"kind": "trail", "unit": r["resource_id"], "unitKind": r["kind"],
+                                         "label": r["label"], "status": r["status"]}})
+    rer = await db.fetch(
+        f"""
+        select e.subject_id unit, e.occurred_at, e.payload,
+               extensions.ST_X(r.location::extensions.geometry) lng, extensions.ST_Y(r.location::extensions.geometry) lat
+          from events e join resources r on r.id = e.subject_id
+         where e.kind = 'assignment.rerouted' and e.subject_type = 'resource'
+           and e.occurred_at > now() - make_interval(mins => $1)
+           and extensions.ST_X(r.location::extensions.geometry) {cmp} 75.5
+         order by e.id desc limit 60
+        """, minutes)
+    for e in rer:
+        p = e["payload"] if isinstance(e["payload"], dict) else json.loads(e["payload"] or "{}")
+        lng, lat = p.get("lng") or e["lng"], p.get("lat") or e["lat"]
+        feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lng, lat]},
+                      "properties": {"kind": "reroute", "unit": e["unit"], "at": e["occurred_at"].isoformat(),
+                                     "reason": str(p.get("reason") or p.get("why") or "rerouted")[:160]}})
+    return {"type": "FeatureCollection", "features": feats}
+
+
+async def sites(region: str = "pune") -> list[dict]:
+    """Resource sites (shelters, relief centres, kitchens, water points, medical
+    camps, hospitals) with their current state and how many changes are logged."""
+    cmp = "<" if region == "pune" else ">="
+    has_log = await db.fetchval("select to_regclass('public.lifeline_log') is not null")
+    n = "(select count(*) from lifeline_log g where g.lifeline_id = l.id)" if has_log else "0"
+    rows = await db.fetch(
+        f"""
+        select l.id, l.name, l.kind, l.status, l.capacity, coalesce(l.occupancy, 0) occupancy, l.supplies,
+               l.supplies_baseline, l.ward_id, l.last_reported_at, {n} changes
+          from lifelines l
+         where l.kind in ('shelter','relief_centre','food_kitchen','water_point','medical_camp','hospital',
+                          'school','hotel','host_family')
+           and extensions.ST_X(l.location::extensions.geometry) {cmp} 75.5
+         order by l.kind, l.name
+        """)
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("supplies", "supplies_baseline"):
+            d[k] = d[k] if isinstance(d[k], dict) else json.loads(d[k] or "{}")
+        d["last_reported_at"] = d["last_reported_at"].isoformat() if d["last_reported_at"] else None
+        out.append(d)
+    return out
+
+
+async def site_log(site_id: str | None, since: datetime | None = None, until: datetime | None = None,
+                   limit: int = 5000, region: str = "pune") -> list[dict]:
+    """Every logged change to a site (or to all sites of a region): status,
+    capacity, occupancy and stock before -> after (migration 036)."""
+    if not await db.fetchval("select to_regclass('public.lifeline_log') is not null"):
+        return []
+    cmp = "<" if region == "pune" else ">="
+    rows = await db.fetch(
+        f"""
+        select g.id, g.lifeline_id, l.name, l.kind, g.changed_at, g.status_from, g.status_to,
+               g.capacity_from, g.capacity_to, g.occupancy_from, g.occupancy_to, g.supplies_from, g.supplies_to
+          from lifeline_log g join lifelines l on l.id = g.lifeline_id
+         where ($1::text is null or g.lifeline_id = $1)
+           and ($2::timestamptz is null or g.changed_at >= $2) and ($3::timestamptz is null or g.changed_at <= $3)
+           and ($1::text is not null or extensions.ST_X(l.location::extensions.geometry) {cmp} 75.5)
+         order by g.changed_at desc limit $4
+        """, site_id, since, until, limit)
+    out = []
+    for r in rows:
+        sf = r["supplies_from"] if isinstance(r["supplies_from"], (dict, type(None))) else json.loads(r["supplies_from"])
+        st = r["supplies_to"] if isinstance(r["supplies_to"], (dict, type(None))) else json.loads(r["supplies_to"])
+        parts = []
+        if r["status_from"] != r["status_to"]:
+            parts.append(f"status {r['status_from']} -> {r['status_to']}")
+        if r["capacity_from"] != r["capacity_to"]:
+            parts.append(f"capacity {r['capacity_from']} -> {r['capacity_to']}")
+        if r["occupancy_from"] != r["occupancy_to"]:
+            d = (r["occupancy_to"] or 0) - (r["occupancy_from"] or 0)
+            parts.append(f"occupancy {r['occupancy_from']} -> {r['occupancy_to']} ({'+' if d >= 0 else ''}{d})")
+        if sf is not None or st is not None:
+            for k in sorted(set(sf or {}) | set(st or {})):
+                a, b = (sf or {}).get(k), (st or {}).get(k)
+                if a != b:
+                    parts.append(f"{k.replace('_', ' ')} {a} -> {b}")
+        out.append({"site": r["lifeline_id"], "name": r["name"], "kind": r["kind"],
+                    "at": r["changed_at"].isoformat(), "summary": "; ".join(parts) or "updated",
+                    "statusFrom": r["status_from"], "statusTo": r["status_to"],
+                    "occupancyFrom": r["occupancy_from"], "occupancyTo": r["occupancy_to"],
+                    "capacityFrom": r["capacity_from"], "capacityTo": r["capacity_to"],
+                    "suppliesFrom": sf, "suppliesTo": st, "id": r["id"]})
+    return out
+
+
+def site_csv(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    cols = ["site", "name", "kind", "at", "summary", "statusFrom", "statusTo", "capacityFrom", "capacityTo",
+            "occupancyFrom", "occupancyTo", "suppliesFrom", "suppliesTo"]
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow({**r, "suppliesFrom": json.dumps(r["suppliesFrom"]) if r["suppliesFrom"] is not None else "",
+                    "suppliesTo": json.dumps(r["suppliesTo"]) if r["suppliesTo"] is not None else ""})
+    return buf.getvalue()

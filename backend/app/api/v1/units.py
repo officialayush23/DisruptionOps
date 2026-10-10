@@ -44,6 +44,41 @@ async def list_units(_: StaffPrincipal, city_id: str = "pune", prefix: str | Non
     return await service.units_overview(city_id, prefix)
 
 
+@router.get("/trails")
+async def get_trails(_: StaffPrincipal, minutes: int = 30, region: str = "pune") -> dict:
+    """All units' trails and reroute points for the wall map (GeoJSON)."""
+    return await service.trails(max(5, min(minutes, 240)), "ncr" if region == "ncr" else "pune")
+
+
+@router.get("/sites")
+async def list_sites(_: StaffPrincipal, region: str = "pune") -> list[dict]:
+    """Shelters, relief centres, kitchens, water points, camps, hospitals: state now
+    and how many changes are logged."""
+    return await service.sites("ncr" if region == "ncr" else "pune")
+
+
+@router.get("/sites/log/export")
+async def export_sites(_: StaffPrincipal, since: datetime | None = None, until: datetime | None = None,
+                       region: str = "pune", format: str = Query(default="csv", pattern="^(json|csv)$")):
+    """Every site's change log in one file."""
+    rows = await service.site_log(None, since, until, 50000, "ncr" if region == "ncr" else "pune")
+    if format == "csv":
+        return PlainTextResponse(service.site_csv(rows), media_type="text/csv",
+                                 headers={"Content-Disposition": 'attachment; filename="sites-log.csv"'})
+    return {"rows": rows, "count": len(rows)}
+
+
+@router.get("/sites/{site_id}/log")
+async def get_site_log(site_id: str, _: StaffPrincipal, since: datetime | None = None, until: datetime | None = None,
+                       format: str = Query(default="json", pattern="^(json|csv)$"),
+                       limit: int = Query(default=2000, le=20000)):
+    rows = await service.site_log(site_id, since, until, limit)
+    if format == "csv":
+        return PlainTextResponse(service.site_csv(rows), media_type="text/csv",
+                                 headers={"Content-Disposition": f'attachment; filename="{site_id}-log.csv"'})
+    return {"site": site_id, "rows": rows, "count": len(rows)}
+
+
 @router.get("/teams")
 async def list_teams(_: StaffPrincipal, city_id: str = "pune") -> list[dict]:
     """Open incidents with their needs per capability and the units on each."""

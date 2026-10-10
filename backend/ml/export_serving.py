@@ -11,6 +11,7 @@ backend/serving/
     data/processed/graph/static.parquet  per-segment features
     data/processed/graph/segments.parquet  geometry for the risk map layer
     data/sim/river_stats.json            rating curve inputs for live river stage
+    results/*.json                       test metrics, route evaluation, scenarios (Models page)
 
 About 25 MB. The image sets DISRUPTIONOPS_DATA and DISRUPTIONOPS_MODELS to it.
 """
@@ -43,6 +44,19 @@ def main() -> None:
         shutil.copy2(PROCESSED / "graph" / f, g / f)
     (OUT / "data" / "sim").mkdir(parents=True)
     shutil.copy2(SIM / "river_stats.json", OUT / "data" / "sim" / "river_stats.json")
+    # Results the website's Models page shows (frozen test metrics, route
+    # evaluation, ETA metrics, scenario outcomes).
+    r = OUT / "results"
+    r.mkdir(parents=True)
+    ev = PROCESSED.parent / "eval"
+    for f in ("passability_metrics.json", "routes_test.json", "eta_metrics.json"):
+        if (ev / f).exists():
+            shutil.copy2(ev / f, r / f)
+    sc = {}
+    for f in sorted((PROCESSED.parent / "scenarios").glob("*/summary.json")):
+        s = json.loads(f.read_text())
+        sc[s["scenario"]] = s
+    (r / "scenarios.json").write_text(json.dumps(sc, indent=1))
     size = sum(p.stat().st_size for p in OUT.rglob("*") if p.is_file())
     print(f"serving bundle: {OUT} ({size / 1e6:.1f} MB) champions {slim['passability']['champion']}, {slim['eta']['champion']}")
 

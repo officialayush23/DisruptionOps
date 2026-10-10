@@ -348,6 +348,27 @@ async def _fleet(
     return units, current, progress, context
 
 
+#: What the last set of avoided points was made of, for the decision log.
+_BLOCK_MIX: dict[str, Any] = {"reported": 0, "predicted": 0, "model": None}
+
+
+def _why_unit(alloc: Any, units: Sequence[Any], demands: Sequence[Any], matrix: Any) -> dict:
+    """Why this unit and not another: the other units that could do the job and
+    how far they were, from the same matrix the solver used."""
+    from app import taxonomy
+    try:
+        dj = next(j for j, d in enumerate(demands) if d.id == alloc.demand.id)
+    except StopIteration:
+        return {}
+    alts = sorted(
+        (matrix.durations[i][dj], u.label) for i, u in enumerate(units)
+        if u.id != alloc.unit.id and taxonomy.cache.kind_can(u.kind, alloc.demand.capability)
+    )
+    reach = [a for a in alts if a[0] <= MAX_ETA_MINUTES]
+    return {"alternatives": len(reach),
+            "next_best": ({"unit": reach[0][1], "eta_minutes": round(reach[0][0], 1)} if reach else None)}
+
+
 async def _blocked_points(
     conn: Any, city_id: str, sim_run_id: str | None
 ) -> list[tuple[float, float]]:
@@ -375,6 +396,7 @@ async def _blocked_points(
         city_id, sim_run_id,
     )
     points = [(float(r["lng"]), float(r["lat"])) for r in rows]
+    _BLOCK_MIX.update({"reported": len(points), "predicted": 0, "model": None})
     # Roads the passability model expects to be blocked by the time a unit gets
     # there (app/nav/live.py, PCMC district): avoided like reported blocks, so a
     # crew is not sent into an underpass that is about to fill. Confirmed blocks
@@ -388,6 +410,8 @@ async def _blocked_points(
             if pred:
                 points += [(lo, la) for lo, la, _ in pred]
                 await live.log_used(pred, "route")
+                _BLOCK_MIX.update({"predicted": len(pred),
+                                   "model": getattr(live._cache, "model", None)})
         except Exception as exc:  # noqa: BLE001 - prediction is advice; routing must not fail on it
             log.warning("predicted_blocks_failed", error=str(exc)[:200])
     return points
@@ -535,7 +559,12 @@ async def replan(
             subject_type="plan", subject_id=plan_id, city_id=city_id,
             payload={"trigger": trigger, "engine": result.engine,
                      "demands": len(demands), "units": len(units),
-                     "coverage": diff.coverage},
+                     "coverage": diff.coverage, "avoided": dict(_BLOCK_MIX),
+                     "reason": (f"Re-planned after {trigger}: {len(demands)} need(s), {len(units)} unit(s) "
+                                f"free or re-taskable; routes avoid {_BLOCK_MIX['reported']} reported closure(s)"
+                                + (f" and {_BLOCK_MIX['predicted']} the passability model expects blocked by arrival"
+                                   f" ({_BLOCK_MIX['model']})" if _BLOCK_MIX["predicted"] else "")
+                                + f"; {int(diff.coverage * 100)}% of needs covered ({result.engine}).")},
             caused_by=caused_by, conn=conn,
         )
 
@@ -613,36 +642,60 @@ async def replan(
                 )
                 await close_tasks(conn, ctx["assignment_id"],
                                   f"Re-tasked by the planner: {change.reason}")
-                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked)
+                route_out = {}
+                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked, route_out)
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CHANGED, actor=actor,
                     subject_type="resource", subject_id=unit_id, city_id=city_id,
                     ward_id=now_alloc.demand.ward_id,
                     payload={"from_incident": was, "to_incident": to,
-                             "progress_pct": pct, "reason": change.reason},
+                             "progress_pct": pct, "reason": change.reason,
+                             "capability": now_alloc.demand.capability,
+                             "eta_model": _model_eta(route_out, now_alloc),
+                             **_why_unit(now_alloc, units, demands, matrix)},
                     caused_by=plan_event.id, conn=conn,
                 )
                 continue
 
             if not was and to and now_alloc:
+                why = _why_unit(now_alloc, units, demands, matrix)
+                nb = why.get("next_best")
+                d = now_alloc.demand
                 change = Change(
                     kind="assigned", resource_id=unit_id, resource_label=ctx["label"],
-                    incident_id=to, incident_title=now_alloc.demand.purpose,
-                    ward_id=now_alloc.demand.ward_id, eta_minutes=now_alloc.eta_minutes,
-                    reason=f"Nearest available unit able to provide {now_alloc.demand.capability}.",
+                    incident_id=to, incident_title=d.purpose,
+                    ward_id=d.ward_id, eta_minutes=now_alloc.eta_minutes,
+                    reason=(f"Sent for {d.capability.replace('_', ' ')} (severity {d.severity}, "
+                            f"{d.population_at_risk:,} exposed{', triage x%.1f' % d.priority if d.priority != 1 else ''}): "
+                            f"{now_alloc.eta_minutes} min away"
+                            + (f"; next best {nb['unit']} at {nb['eta_minutes']:.0f} min" if nb
+                               else "; no other unit able to do this could reach it in time")
+                            + "."),
                 )
                 diff.assigned.append(change)
                 await conn.execute(
                     "update resources set status = 'assigned', updated_at = $2 where id = $1",
                     unit_id, now,
                 )
-                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked)
+                route_out: dict = {}
+                await _write_assignment(conn, plan_id, now_alloc, sim_run_id, now, blocked, route_out)
+                model_eta = _model_eta(route_out, now_alloc)
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CREATED, actor=actor,
                     subject_type="assignment", subject_id=to, city_id=city_id,
                     ward_id=now_alloc.demand.ward_id,
                     payload={"resource_id": unit_id, "eta_minutes": now_alloc.eta_minutes,
-                             "capability": now_alloc.demand.capability},
+                             "capability": now_alloc.demand.capability,
+                             "severity": now_alloc.demand.severity,
+                             "population_at_risk": now_alloc.demand.population_at_risk,
+                             "triage_priority": now_alloc.demand.priority,
+                             "route_engine": route_out.get("engine"),
+                             "eta_model": model_eta, **why,
+                             "reason": change.reason + (
+                                 f" Response-time model: {model_eta['p50']:.0f} min, 90% within "
+                                 f"{model_eta['p90']:.0f}" + (f"; flood risk on route up to {model_eta['riskMax']:.0%}"
+                                                               if model_eta.get('riskMax', 0) >= 0.3 else "") + "."
+                                 if model_eta else "")},
                     caused_by=plan_event.id, conn=conn,
                 )
                 continue
@@ -667,7 +720,9 @@ async def replan(
                 await ev.append(
                     clock=clock, kind=ev.Kind.ASSIGNMENT_CANCELLED, actor=actor,
                     subject_type="resource", subject_id=unit_id, city_id=city_id,
-                    payload={"from_incident": was},
+                    payload={"from_incident": was,
+                             "reason": "Stood down: the need it was going to is covered or gone, and nothing "
+                                       "else is closer to it."},
                     caused_by=plan_event.id, conn=conn,
                 )
 
@@ -885,8 +940,17 @@ def _air_matrix(units: Sequence[Any], demands: Sequence[Any], matrix: Any) -> No
             matrix.distances[i][j] = km
 
 
+def _model_eta(route_out: dict, alloc: Any) -> dict | None:
+    try:
+        from app.nav import eta
+        return eta.for_route(route_out.get("coordinates"), alloc.unit.kind, alloc.eta_minutes)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str | None,
-                            now: datetime, blocked: Sequence[tuple[float, float]] = ()) -> str:
+                            now: datetime, blocked: Sequence[tuple[float, float]] = (),
+                            route_out: dict | None = None) -> str:
     # The road, not the line. A crew given a straight bearing to a flooded
     # junction is being given nothing, and a unit that moves across blocks on
     # the console looks like a simulation rather than a dispatch. The geometry
@@ -905,6 +969,8 @@ async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str
         if len(line.coordinates) > 1
         else None
     )
+    if route_out is not None:
+        route_out.update({"coordinates": line.coordinates, "engine": line.engine})
     steps = [
         {"instruction": s.instruction, "street": s.street, "distanceM": s.distance_m}
         for s in line.steps

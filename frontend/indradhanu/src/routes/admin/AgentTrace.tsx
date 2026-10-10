@@ -238,6 +238,7 @@ export default function AgentTrace() {
             verb: "covered",
             right: `${num("demands") ?? "?"} demands with ${num("units") ?? "?"} units`,
             detail:
+              str("reason") ||
               `${Math.round((num("coverage") ?? 0) * 100)}% covered` +
               (str("trigger") ? ` · triggered by ${str("trigger")}` : ""),
           }
@@ -248,7 +249,7 @@ export default function AgentTrace() {
             verb: "committed for",
             right: pretty(str("capability")) || ward || "a demand",
             detail:
-              num("eta_minutes") != null ? `${num("eta_minutes")} min out` : "",
+              str("reason") || (num("eta_minutes") != null ? `${num("eta_minutes")} min out` : ""),
           }
           break
         case "assignment.changed":
@@ -278,7 +279,7 @@ export default function AgentTrace() {
             left: name(e.subjectId) ?? "A unit",
             verb: "released from",
             right: name(p.from_incident) ?? "its task",
-            detail: "Back in the pool; the demand returns to unmet need.",
+            detail: str("reason") || "Back in the pool; the demand returns to unmet need.",
           }
           break
         case "demand.uncovered":
@@ -397,7 +398,16 @@ export default function AgentTrace() {
           }
           break
         default:
-          row = null
+          // Every other agent step that states its reason (surge ladder, units,
+          // aid, convoys, crew rest) is shown with it rather than dropped.
+          row = str("reason") || str("title")
+            ? {
+                left: e.kind.split(".")[0].replace(/_/g, " "),
+                verb: e.kind.split(".").slice(1).join(" ").replace(/_/g, " ") || "logged",
+                right: name(e.subjectId) ?? e.subjectId ?? "",
+                detail: str("reason") || str("title"),
+              }
+            : null
       }
 
       if (row) {

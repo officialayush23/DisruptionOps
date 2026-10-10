@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { getRegion } from "@/lib/region"
 import mapboxgl from "mapbox-gl"
 import { request } from "@/api/httpClient"
 import type { Feature, FeatureCollection } from "geojson"
@@ -569,6 +570,22 @@ export function LiveMap({
           },
         })
 
+        // Where each unit has actually been (last 30 min of GPS / simulated
+        // positions) and where it was rerouted, with the reason on hover.
+        m.addSource("unit-trails", { type: "geojson", data: fc([]) })
+        add({
+          id: "trail-line", type: "line", source: "unit-trails", ...slot("middle"),
+          filter: ["==", ["get", "kind"], "trail"],
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": "#38bdf8", "line-width": ["interpolate", ["linear"], ["zoom"], 11, 1.2, 15, 3],
+                   "line-opacity": 0.55, "line-dasharray": [1, 1.5] },
+        })
+        add({
+          id: "reroute-dot", type: "circle", source: "unit-trails", ...slot("middle"),
+          filter: ["==", ["get", "kind"], "reroute"],
+          paint: { "circle-radius": 5, "circle-color": "#a855f7", "circle-stroke-color": "#fff", "circle-stroke-width": 1.2 },
+        })
+
         m.addSource("route", { type: "geojson", data: fc([]), lineMetrics: true })
         add({
           id: "route-casing", type: "line", source: "route", ...slot("middle"),
@@ -853,7 +870,7 @@ export function LiveMap({
         // order somebody's attention moves in.
         const HOVER_ORDER = [
           "me-dot", "critical-dot", "incident-dot", "resource-dot", "facility-dot",
-          "block-dot", "endpoint-ring", "route-line", "link-line", "ward-fill",
+          "block-dot", "reroute-dot", "endpoint-ring", "route-line", "trail-line", "link-line", "ward-fill",
         ]
         const present = () => HOVER_ORDER.filter((id) => m.getLayer(id))
 
@@ -1205,6 +1222,30 @@ export function LiveMap({
     }
     void load()
     const id = setInterval(() => void load(), 60_000)
+    return () => { alive = false; clearInterval(id) }
+  }, [ready])
+
+  // Unit trails and reroutes, every 10 s (console only).
+  useEffect(() => {
+    if (!ready || !window.location.pathname.startsWith("/admin")) return
+    let alive = true
+    const load = async () => {
+      try {
+        const region = getRegion() === "ncr" ? "ncr" : "pune"
+        const r = await request<GeoJSON.FeatureCollection>("/units/trails", { toast: false, query: { minutes: 30, region } })
+        for (const f of r.features) {
+          const p = (f.properties ?? {}) as Record<string, string>
+          p.tip = p.kind === "reroute"
+            ? `<div class="ip-title">Rerouted · ${esc(p.unit)}</div><div class="ip-sub">${esc(new Date(p.at).toLocaleTimeString())}</div><div>${esc(p.reason)}</div>`
+            : `<div class="ip-title">${esc(p.label)}</div><div class="ip-sub">trail, last 30 min · ${esc(String(p.status).replace(/_/g, " "))}</div>`
+          f.properties = p
+        }
+        const src = map.current?.getSource("unit-trails") as mapboxgl.GeoJSONSource | undefined
+        if (alive && src) src.setData(r)
+      } catch { /* trails are an overlay */ }
+    }
+    void load()
+    const id = setInterval(() => void load(), 10_000)
     return () => { alive = false; clearInterval(id) }
   }, [ready])
 

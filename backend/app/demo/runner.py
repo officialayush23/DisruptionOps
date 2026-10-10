@@ -1715,6 +1715,8 @@ _RESET_ORDER = (
     # as a miss and drag the learned hit-rate down for something that never
     # actually happened.
     "preposition_outcomes",
+    # A site's change log belongs to the run that changed it (036).
+    "lifeline_log",
     # `events` is deliberately absent. It is the audit log, and the database
     # enforces that with an `events_no_delete` trigger that raises on DELETE.
     # Listing it here meant reset opened a transaction, deleted fifteen tables,

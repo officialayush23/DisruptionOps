@@ -681,8 +681,13 @@ class Replay:
             bad = [s for s in remaining if not np.isfinite(cost[s])]
             if not bad:
                 continue
-            why = self.known_closed.get(bad[0]) or (
-                f"predicted blocked at arrival (p={p[bad[0]]:.2f})" if p is not None else "now reported closed")
+            s0 = bad[0]
+            if s0 in self.known_closed:
+                why = self.known_closed[s0]
+            elif p is not None and p[s0] >= UNCERTAIN_P:
+                why = f"predicted blocked at arrival (p={p[s0]:.2f})"
+            else:
+                why = "reported closed now (report, patrol or sensor evidence)"
             self._reroute(u, node, t_free, t, why)
 
     def _reroute(self, u: UnitState, node: int, t_free: float, t: float, why: str) -> None:
@@ -1299,10 +1304,11 @@ class Shared:
 
 
 # --------------------------------------------------------------------- main --
-def run_scenario(name: str, model_dir: Path | None) -> dict:
+def run_scenario(name: str, model_dir: Path | None, only_policies: list[str] | None = None) -> dict:
     cfg = SCENARIOS[name]
     sh = Shared(name, cfg, model_dir)
     d = OUT / name
+    prev = json.load(open(d / "summary.json")) if (d / "summary.json").exists() else {}
     out = {"scenario": name, "title": cfg["title"], "story": cfg["story"],
            "data": {"storm_id": cfg["storm"], "realization": cfg["k"], "split": "test",
                     "inputs": "REPLAY: historical ERA5 rain and GloFAS river discharge for this window; roads, "
@@ -1315,8 +1321,10 @@ def run_scenario(name: str, model_dir: Path | None) -> dict:
            "injected": ({"bridge_closure": {**sh.injection,
                                              "t_replay": (sh.start + pd.Timedelta(seconds=sh.injection["t_s"])).isoformat() + "Z",
                                              "notice_after_min": 10}} if sh.injection else None),
-           "policies": {}}
+           "policies": dict(prev.get("policies", {}))}
     for pol in cfg["policies"]:
+        if only_policies and pol not in only_policies:
+            continue
         if pol in ("predicted", "naive_trust") and sh.ens is None:
             continue
         rp = Replay(name, cfg, pol, sh)
@@ -1343,6 +1351,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--model", default=None)
+    ap.add_argument("--policies", nargs="*", default=None, help="run only these policies (results merge)")
     a = ap.parse_args()
     reg = json.load(open(PROCESSED.parent.parent / "models" / "registry.json"))
     champ = reg.get("passability", {}).get("champion")
@@ -1351,7 +1360,7 @@ def main() -> None:
     names = a.only or list(SCENARIOS)
     res = {}
     for n in names:
-        res[n] = run_scenario(n, md)
+        res[n] = run_scenario(n, md, a.policies)
     allp = OUT / "summary.json"
     old = json.load(open(allp)) if allp.exists() else {}
     old.update(res)
