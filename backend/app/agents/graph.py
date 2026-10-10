@@ -803,6 +803,51 @@ def _remember(run: Run) -> None:
     del _ORDER[30:]
 
 
+async def _sector_events(run: Run, values: dict[str, Any]) -> None:
+    """One `agent.graph_sector` event per sector the cycle's plan touched.
+
+    The cycle itself is city-wide; the officer reading the board thinks in
+    sectors and hazards. Each change in the plan names its ward, the ward names
+    its sector (app/nav/sectors.py, mirrored in the `ward_sectors` table that
+    tags the event), and its incident's category names the hazard.
+    """
+    from app.nav.hazards import CATEGORY_HAZARD
+    from app.nav.sectors import sector_of
+
+    plan = values.get("dispatched") or values.get("proposal") or {}
+    changes = [(k, c) for k in ("assigned", "reassigned", "released") for c in plan.get(k, [])]
+    if not changes:
+        return
+    try:
+        from app.db import session as db
+        from app.world import clock as clocks
+        from app.world import events as ev
+
+        ids = sorted({c.get("incident_id") for _, c in changes if c.get("incident_id")})
+        cats = {r["id"]: r["category"] for r in await db.fetch(
+            "select id::text, category from incidents where id::text = any($1::text[])", ids)} if ids else {}
+        by: dict[str, dict[str, Any]] = {}
+        for kind, c in changes:
+            ward = c.get("ward_id") or ""
+            sid = sector_of(ward) or "city"
+            hz = CATEGORY_HAZARD.get(cats.get(c.get("incident_id") or "", ""), "unknown")
+            b = by.setdefault(f"{sid}|{hz}", {"ward": ward, "sector": sid, "hazard": hz,
+                                              "assigned": 0, "reassigned": 0, "released": 0, "units": []})
+            b[kind] += 1
+            b["units"].append(c.get("resource_label") or c.get("resource_id"))
+        rows = [{"kind": "agent.graph_sector", "actor": ACTOR, "subject_type": "agent",
+                 "subject_id": run.run_id, "ward_id": b["ward"] or None, "caused_by": None,
+                 "payload": {"runId": run.run_id, "outcome": run.outcome or run.status,
+                             "trigger": run.trigger, "hazardTag": b["hazard"], "sectorId": b["sector"],
+                             "assigned": b["assigned"], "reassigned": b["reassigned"],
+                             "released": b["released"], "units": b["units"][:10],
+                             "guardrails": [t["rule"] for t in run.guardrails][:10]}}
+                for b in by.values()]
+        await ev.append_many(clock=clocks.WALL, rows=rows, city_id=run.city_id)
+    except Exception as exc:  # noqa: BLE001 - the board is best-effort, the plan stands
+        log.info("graph_sector_events_failed", error=type(exc).__name__)
+
+
 async def _event(run: Run, kind: str) -> None:
     try:
         from app.world import clock as clocks
@@ -847,6 +892,13 @@ async def _drive(run: Run, payload: Any) -> Run:
         run.finished_at = time.time()
         log.warning("graph_run_failed", run=run.run_id, error=run.error)
     await _event(run, "agent.graph_waiting" if run.status == "waiting" else "agent.graph_run")
+    if run.status in ("done", "waiting"):
+        try:
+            snap_values = dict((await (await _compiled()).aget_state(
+                {"configurable": {"thread_id": run.run_id}})).values or {})
+        except Exception:  # noqa: BLE001
+            snap_values = {}
+        await _sector_events(run, snap_values)
     if run.status == "waiting":
         asyncio.get_running_loop().create_task(_timeout(run.run_id))
     return run

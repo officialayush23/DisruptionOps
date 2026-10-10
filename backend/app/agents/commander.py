@@ -159,12 +159,23 @@ def _shrink(value: Any, limit: int = 1800) -> str:
     return text if len(text) <= limit else text[:limit] + "…(truncated)"
 
 
+#: The episode's trigger, for tagging its events by hazard and sector.
+_TAGS: dict[str, Any] = {}
+
+
 async def _event(kind: str, payload: dict, caused_by: int | None,
                  subject_id: str = "commander") -> int | None:
     try:
+        from app.nav.hazards import CATEGORY_HAZARD
+
+        tagged = dict(payload)
+        if _TAGS.get("category") and "hazardTag" not in tagged:
+            tagged["hazardTag"] = CATEGORY_HAZARD.get(_TAGS["category"], "unknown")
+        if _TAGS.get("category") and "category" not in tagged:
+            tagged["category"] = _TAGS["category"]
         e = await ev.append(clock=clocks.WALL, kind=kind, actor=ACTOR,
                             subject_type="agent", subject_id=subject_id,
-                            payload=payload, caused_by=caused_by)
+                            ward_id=_TAGS.get("ward_id"), payload=tagged, caused_by=caused_by)
         return e.id
     except Exception as exc:  # noqa: BLE001 - the trace is best-effort
         log.info("commander_event_failed", error=type(exc).__name__)
@@ -177,6 +188,8 @@ async def run(trigger: dict, *, city_id: str = "pune",
     from app.copilot import agent, memory, tools
 
     ep = Episode(trigger=trigger)
+    _TAGS.clear()
+    _TAGS.update({k: trigger.get(k) for k in ("ward_id", "category") if trigger.get(k)})
     RECENT.insert(0, ep)
     del RECENT[10:]
 

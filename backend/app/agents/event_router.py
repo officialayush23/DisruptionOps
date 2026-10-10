@@ -107,6 +107,8 @@ def route(ev: dict[str, Any]) -> Route:
             "summary": f"Severity {severity} {p.get('category') or 'incident'}"
                        f"{' in ' + ward if ward else ''}",
             "key": f"incident:{ev.get('subject_id')}",
+            # Tags for the hazard x sector agent board.
+            "ward_id": ward or None, "category": p.get("category"),
         }
     elif kind in ("road.blocked", "field.route_blocked"):
         out.nudge = {
@@ -114,6 +116,7 @@ def route(ev: dict[str, Any]) -> Route:
             "summary": f"Road blocked{' in ' + ward if ward else ''}: "
                        f"{str(p.get('reason') or p.get('note') or '')[:120]}",
             "key": f"block:{ward or ev.get('subject_id')}",
+            "ward_id": ward or None,
         }
     return out
 
@@ -197,8 +200,9 @@ async def _poll_once() -> None:
             request_replan(decision.replan, ev.get("city_id") or "pune")
         if decision.nudge:
             nk = decision.nudge
+            extra = {k: nk[k] for k in ("ward_id", "category") if nk.get(k)}
             if commander.nudge(nk["kind"], nk["summary"], key=nk["key"],
-                               city_id=ev.get("city_id") or "pune", caused_by=int(ev["id"])):
+                               city_id=ev.get("city_id") or "pune", caused_by=int(ev["id"]), **extra):
                 state.nudges += 1
 
 
