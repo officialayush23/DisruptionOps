@@ -78,10 +78,10 @@ export default function SurgePage() {
   const occ = m.shelters?.occupancy_ratio ?? 0
 
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Surge operations · {region === "pune" ? "Pune" : "Ghaziabad (NCR)"}</h1>
+          <p className="text-sm font-medium">{region === "pune" ? "Pune" : "Ghaziabad (NCR)"}</p>
           <p className="text-sm text-muted-foreground">When units and shelters run out: triage, mutual aid, surge shelters, declaration. Each step only after the one before it.</p>
         </div>
         <div className="flex flex-wrap gap-2">

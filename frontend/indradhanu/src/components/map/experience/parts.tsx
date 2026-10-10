@@ -49,9 +49,9 @@ export function RoundButton({
       disabled={disabled}
       onClick={onClick}
       className={
-        `${SURFACE} grid place-items-center rounded-full transition-colors hover:bg-[rgb(28_33_42/0.95)] ` +
+        `${SURFACE} grid place-items-center rounded-full transition-colors hover:bg-muted ` +
         `disabled:opacity-50 ${size === "lg" ? "size-12" : "size-11"} ` +
-        `${active ? "ring-1 ring-white/30" : ""} ${className}`
+        `${active ? "ring-2 ring-primary/30" : ""} ${className}`
       }
     >
       {children}
@@ -91,12 +91,12 @@ export function MapControls({
       {showZoom && (
         <div className={`${SURFACE} flex w-11 flex-col overflow-hidden rounded-full`}>
           <button type="button" aria-label="Zoom in" title="Zoom in" onClick={onZoomIn}
-                  className="grid h-11 place-items-center hover:bg-white/5">
+                  className="grid h-11 place-items-center hover:bg-muted">
             <Plus className="size-[18px]" />
           </button>
-          <div className="h-px bg-white/10" />
+          <div className="h-px bg-muted" />
           <button type="button" aria-label="Zoom out" title="Zoom out" onClick={onZoomOut}
-                  className="grid h-11 place-items-center hover:bg-white/5">
+                  className="grid h-11 place-items-center hover:bg-muted">
             <Minus className="size-[18px]" />
           </button>
         </div>
@@ -108,7 +108,7 @@ export function MapControls({
       >
         {following
           ? <LocateFixed className="size-5" style={{ color: MAP.you }} />
-          : <Crosshair className={`size-5 ${hasFix ? "" : "text-slate-500"}`} />}
+          : <Crosshair className={`size-5 ${hasFix ? "" : "text-muted-foreground/80"}`} />}
       </RoundButton>
     </div>
   )
@@ -150,13 +150,13 @@ export function FilterControl({
                 onClick={() => { onChange(o.id); setOpen(false) }}
                 className={
                   "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors " +
-                  (active ? "border-white/40 bg-white/15" : "border-white/10 hover:bg-white/5") +
-                  (o.count === 0 && !active ? " text-slate-500" : "")
+                  (active ? "border-primary/40 bg-accent text-accent-foreground" : "border-border hover:bg-muted") +
+                  (o.count === 0 && !active ? " text-muted-foreground/80" : "")
                 }
               >
                 {o.colour && <span className="size-2 rounded-full" style={{ background: o.colour }} />}
                 {o.label}
-                <span className="tabular-nums text-slate-400">{o.count}</span>
+                <span className="tabular-nums text-muted-foreground">{o.count}</span>
               </button>
             )
           })}
@@ -168,10 +168,10 @@ export function FilterControl({
 
 export function LegendRow({ colour, label, ring }: { colour: string; label: string; ring?: boolean }) {
   return (
-    <div className="flex items-center gap-2 text-[11px] text-slate-300">
+    <div className="flex items-center gap-2 text-[11px] text-foreground/80">
       <span
         className="size-3 shrink-0 rounded-full"
-        style={ring ? { border: `2px solid ${colour}` } : { background: colour, boxShadow: "0 0 0 1.5px #0b0f17" }}
+        style={ring ? { border: `2px solid ${colour}` } : { background: colour, boxShadow: "0 0 0 1.5px #ffffff" }}
       />
       <span className="truncate">{label}</span>
     </div>
@@ -180,7 +180,7 @@ export function LegendRow({ colour, label, ring }: { colour: string; label: stri
 
 export function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-slate-500">{children}</div>
+    <div className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-muted-foreground/80">{children}</div>
   )
 }
 
@@ -200,7 +200,7 @@ export function ChoicePills<T extends string>({
           onClick={() => onChange(o.id)}
           className={
             "rounded-full border px-3 py-1 text-xs " +
-            (o.id === value ? "border-white/40 bg-white/15" : "border-white/10 hover:bg-white/5")
+            (o.id === value ? "border-primary/40 bg-accent text-accent-foreground" : "border-border hover:bg-muted")
           }
         >
           {o.label}
@@ -243,7 +243,7 @@ export function ConnectivityPill({
   if (queued > 0) text += ` · ${queued} waiting`
   const dot = tone === "live" ? "#32d74b" : "#f59e0b"
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-400" role="status">
+    <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground" role="status">
       <span className="inline-flex size-2 shrink-0 rounded-full" style={{ background: dot }} />
       <span className="truncate">{text}</span>
       {inBiChat() && (
@@ -301,7 +301,7 @@ const TONE: Record<Tone, string> = {
 
 export function StatusLine({ tone, children }: { tone: Tone; children: ReactNode }) {
   return (
-    <div className="flex items-start gap-2 text-[11.5px] leading-snug text-slate-300">
+    <div className="flex items-start gap-2 text-[11.5px] leading-snug text-foreground/80">
       <span className="mt-[5px] size-1.5 shrink-0 rounded-full" style={{ background: TONE[tone] }} />
       <span className="min-w-0">{children}</span>
     </div>
@@ -331,12 +331,12 @@ export function NavPanel({
     <div className={`${SURFACE} rounded-[22px] px-4 pb-3.5 pt-3`} role="region" aria-label="Navigation">
       <div className="flex items-center gap-2">
         <Navigation2 className="size-3.5 shrink-0" style={{ color: MAP.you }} />
-        <div className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-slate-400">{context}</div>
+        <div className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-muted-foreground">{context}</div>
         <button
           type="button"
           onClick={onExit}
           aria-label="End navigation"
-          className="-mr-1.5 grid size-8 place-items-center rounded-full hover:bg-white/10"
+          className="-mr-1.5 grid size-8 place-items-center rounded-full hover:bg-muted"
         >
           <X className="size-4" />
         </button>
@@ -349,8 +349,8 @@ export function NavPanel({
             {distance && <div className="text-[26px] font-semibold tabular-nums leading-none">{distance}</div>}
             {instruction && <div className="min-w-0 text-[15px] leading-snug">{instruction}</div>}
           </div>
-          {then && <div className="mt-1 text-xs text-slate-400">{then}</div>}
-          {remaining && <div className="mt-1 text-xs tabular-nums text-slate-400">{remaining}</div>}
+          {then && <div className="mt-1 text-xs text-muted-foreground">{then}</div>}
+          {remaining && <div className="mt-1 text-xs tabular-nums text-muted-foreground">{remaining}</div>}
         </>
       )}
       <div className="mt-2 space-y-1">
@@ -378,23 +378,23 @@ export function AlertBanner({
     <div
       role="alert"
       className="flex items-center gap-3 rounded-2xl border px-3 py-2.5 shadow-[0_6px_24px_rgb(0_0_0/0.35)] backdrop-blur-md"
-      style={{ background: tone === "danger" ? "rgb(51 16 19 / 0.94)" : "rgb(51 38 12 / 0.94)", borderColor: `${colour}99` }}
+      style={{ background: tone === "danger" ? "rgb(254 242 242 / 0.97)" : "rgb(255 251 235 / 0.97)", borderColor: `${colour}99` }}
     >
       <AlertTriangle className="size-4 shrink-0" style={{ color: colour }} />
       <div className="min-w-0 flex-1 leading-tight">
         <div className="text-[13px] font-semibold">{title}</div>
-        {detail && <div className="mt-0.5 text-[11.5px] text-slate-300">{detail}</div>}
+        {detail && <div className="mt-0.5 text-[11.5px] text-foreground/80">{detail}</div>}
       </div>
       {onView && (
         <button type="button" onClick={onView}
-                className="rounded-full px-3 py-1.5 text-xs font-semibold hover:bg-white/10"
+                className="rounded-full px-3 py-1.5 text-xs font-semibold hover:bg-muted"
                 style={{ color: colour }}>
           {viewLabel}
         </button>
       )}
       {onDismiss && (
         <button type="button" onClick={onDismiss} aria-label="Dismiss"
-                className="-mr-1 grid size-7 place-items-center rounded-full text-slate-400 hover:bg-white/10">
+                className="-mr-1 grid size-7 place-items-center rounded-full text-muted-foreground hover:bg-muted">
           <X className="size-3.5" />
         </button>
       )}
@@ -413,7 +413,7 @@ export function Disc({ colour, children, size = 32, ring }: {
       className="grid shrink-0 place-items-center rounded-full text-white"
       style={{
         width: size, height: size, background: colour,
-        boxShadow: ring ? `0 0 0 2px #0e1116, 0 0 0 4px ${ring}` : "0 0 0 2px #0b0f17",
+        boxShadow: ring ? `0 0 0 2px #0e1116, 0 0 0 4px ${ring}` : "0 0 0 2px #ffffff",
       }}
     >
       {children}
@@ -436,14 +436,14 @@ export function PlaceRow({
       {disc}
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate text-[13px] font-medium">{title}</span>
-        {subtitle && <span className="block truncate text-[11.5px] text-slate-400">{subtitle}</span>}
+        {subtitle && <span className="block truncate text-[11.5px] text-muted-foreground">{subtitle}</span>}
       </span>
-      {trailing && <span className="shrink-0 text-xs tabular-nums text-slate-400">{trailing}</span>}
+      {trailing && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{trailing}</span>}
     </>
   )
   const cls =
     "flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 transition-colors " +
-    (active ? "bg-white/10 ring-1 ring-white/20" : "bg-white/[0.04] hover:bg-white/[0.08]")
+    (active ? "bg-accent ring-1 ring-primary/25" : "bg-muted/60 hover:bg-muted")
   return onClick ? (
     <button type="button" className={cls} onClick={onClick}>{body}</button>
   ) : (
@@ -455,8 +455,8 @@ export function DetailRow({ label, children }: { label: string; children: ReactN
   if (children === null || children === undefined || children === "") return null
   return (
     <div className="flex gap-3 text-xs">
-      <span className="w-28 shrink-0 text-slate-500">{label}</span>
-      <span className="min-w-0 flex-1 text-slate-200">{children}</span>
+      <span className="w-28 shrink-0 text-muted-foreground/80">{label}</span>
+      <span className="min-w-0 flex-1 text-foreground">{children}</span>
     </div>
   )
 }
@@ -472,10 +472,10 @@ export function ActionButton({
   href?: string
 }) {
   const colours =
-    tone === "primary" ? "bg-[#0a84ff] text-white hover:bg-[#0a84ff]/90"
+    tone === "primary" ? "bg-primary text-primary-foreground hover:bg-primary/90"
     : tone === "critical" ? "bg-[#ef4444] text-white hover:bg-[#ef4444]/90"
     : tone === "danger" ? "bg-red-500/15 text-red-300 hover:bg-red-500/25"
-    : "bg-white/10 text-slate-100 hover:bg-white/15"
+    : "bg-muted text-foreground hover:bg-secondary"
   const cls =
     `inline-flex h-11 items-center justify-center gap-2 rounded-full px-4 text-[13px] font-semibold ` +
     `transition-colors disabled:opacity-50 ${colours} ${className}`
@@ -487,7 +487,7 @@ export function ActionButton({
 
 export function BackLink({ onClick, children }: { onClick: () => void; children: ReactNode }) {
   return (
-    <button type="button" onClick={onClick} className="text-xs text-slate-400 underline-offset-2 hover:underline">
+    <button type="button" onClick={onClick} className="text-xs text-muted-foreground underline-offset-2 hover:underline">
       {children}
     </button>
   )

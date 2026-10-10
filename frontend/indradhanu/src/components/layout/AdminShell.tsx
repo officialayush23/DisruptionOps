@@ -3,6 +3,7 @@ import { useRegion, type RegionPick } from "@/lib/region"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Activity,
+  ChevronRight,
   Bluetooth,
   Thermometer,
   Plane,
@@ -79,8 +80,10 @@ import { AutonomyControl } from "@/routes/admin/AutonomyControl"
 type Tone = "blocked" | "gap"
 type Count = { n: number; tone: Tone; what: string }
 
+type Group = "Operations" | "Intelligence" | "Field network" | "Analysis" | "Setup"
+
 const NAV: {
-  group: "Operations" | "Analysis" | "Setup"
+  group: Group
   to: string
   label: string
   icon: typeof Radar
@@ -102,12 +105,12 @@ const NAV: {
     count: (c) => (c.unattended ? { n: c.unattended, tone: "gap", what: "open with nobody on the way" } : null),
   },
   // The bitchat gateway phones linked to this control room, and what they carried.
-  { group: "Operations", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
+  { group: "Field network", to: "/admin/mesh", label: "Mesh & devices", icon: Bluetooth },
   // Tamper-evident record of the response on this device; merges after a partition.
-  { group: "Operations", to: "/admin/ledger", label: "Local DAG Ledger", icon: GitFork },
+  { group: "Field network", to: "/admin/ledger", label: "Local DAG Ledger", icon: GitFork },
   // LoRa field sensors: gas, heat, sound, tapping, tilt — on a map and over time.
-  { group: "Operations", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
-  { group: "Operations", to: "/admin/swarm", label: "Drone swarm", icon: Plane },
+  { group: "Field network", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
+  { group: "Field network", to: "/admin/swarm", label: "Drone swarm", icon: Plane },
   // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
   // authorises, and this is the ledger of what it did — which is what an
   // officer was missing, not a second way to move a vehicle by hand.
@@ -125,12 +128,12 @@ const NAV: {
   },
   // Promoted out of Analysis. It now leads with what got attached to what,
   // which is a live operational question rather than an after-the-fact one.
-  { group: "Operations", to: "/admin/agent", label: "Agent log", icon: Activity },
+  { group: "Intelligence", to: "/admin/agent", label: "Agent log", icon: Activity },
   // The LangGraph cycle the router runs, and plans paused for an officer.
-  { group: "Operations", to: "/admin/graph", label: "Agent graph", icon: GitBranch },
+  { group: "Intelligence", to: "/admin/graph", label: "Agent graph", icon: GitBranch },
   { group: "Operations", to: "/admin/units", label: "Units, live", icon: Truck },
   { group: "Operations", to: "/admin/surge", label: "Surge operations", icon: Siren },
-  { group: "Operations", to: "/admin/models", label: "Models & results", icon: BrainCircuit },
+  { group: "Intelligence", to: "/admin/models", label: "Models & results", icon: BrainCircuit },
 
   // Analysis: real work, none of it urgent. Collapsed by default, so the rail
   // reads as four things rather than sixteen and everything is still one click
@@ -168,7 +171,33 @@ const NAV: {
   { group: "Setup", to: "/admin/configuration", label: "Configuration", icon: Settings2 },
 ]
 
-const GROUPS = ["Operations", "Analysis", "Setup"] as const
+const GROUPS = ["Operations", "Intelligence", "Field network", "Analysis", "Setup"] as const
+
+/** Only Operations is always open. The other groups fold away so the rail reads
+ *  as the handful of screens an officer works from; a group opens by itself
+ *  when the screen being shown is inside it. */
+function useOpenGroups(path: string) {
+  const [open, setOpen] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("indradhanu-nav") || "{}")
+    } catch {
+      return {}
+    }
+  })
+  const isOpen = (g: Group) =>
+    g === "Operations" || !!open[g] || NAV.some((n) => n.group === g && path.startsWith(n.to))
+  const toggle = (g: Group) =>
+    setOpen((o) => {
+      const next = { ...o, [g]: !isOpen(g) }
+      try {
+        localStorage.setItem("indradhanu-nav", JSON.stringify(next))
+      } catch {
+        /* private mode: the rail still works, it just forgets */
+      }
+      return next
+    })
+  return { isOpen, toggle }
+}
 
 /** The world clock, in the header.
  *
@@ -314,7 +343,7 @@ function LoadStrip() {
     ["Alerts out", String(state.alerts.length), state.alerts.length > 0],
   ]
   return (
-    <div className="space-y-1 px-2 py-1">
+    <div className="space-y-1.5 rounded-xl border border-sidebar-border bg-background/70 p-3">
       {rows.map(([label, value, hot]) => (
         <div key={label} className="flex items-center justify-between text-xs">
           <span className="text-muted-foreground truncate">{label}</span>
@@ -332,17 +361,18 @@ function Chrome({ children }: { children: React.ReactNode }) {
   const current = NAV.find((n) => location.pathname.startsWith(n.to))
   const counts = useCounts()
   const [copilot, setCopilot] = useState(false)
+  const { isOpen, toggle } = useOpenGroups(location.pathname)
 
   return (
     <SidebarProvider>
-      <Sidebar collapsible="icon">
-        <SidebarHeader className="border-b">
-          <div className="flex items-center gap-2 px-1 py-1.5">
-            <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground">
+      <Sidebar collapsible="icon" className="border-r border-sidebar-border">
+        <SidebarHeader className="px-3 pt-5 pb-3">
+          <div className="flex items-center gap-2.5 px-1">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground shadow-sm">
               IN
             </div>
             <div className="grid min-w-0 flex-1 leading-tight group-data-[collapsible=icon]:hidden">
-              <span className="truncate text-sm font-semibold">Indradhanu</span>
+              <span className="truncate text-[15px] font-semibold tracking-tight text-foreground">Indradhanu</span>
               <span className="truncate text-xs text-muted-foreground">
                 Pune Municipal Corporation
               </span>
@@ -350,7 +380,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
         </SidebarHeader>
 
-        <SidebarContent>
+        <SidebarContent className="gap-1 px-1">
           {GROUPS.map((group) => (
             <SidebarGroup
               key={group}
@@ -358,10 +388,25 @@ function Chrome({ children }: { children: React.ReactNode }) {
               // officer during an event is not configuring anything and a rail
               // that shows them sixteen equal choices is asking them to triage
               // the navigation before they triage the city.
-              className={group === "Analysis" ? "group-data-[collapsible=icon]:hidden" : undefined}
+              className={group === "Analysis" ? "py-1 group-data-[collapsible=icon]:hidden" : "py-1"}
             >
-              <SidebarGroupLabel>{group}</SidebarGroupLabel>
-              <SidebarGroupContent>
+              {group === "Operations" ? (
+                <SidebarGroupLabel className="text-[11px] font-medium text-muted-foreground">
+                  {group}
+                </SidebarGroupLabel>
+              ) : (
+                <SidebarGroupLabel asChild className="text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                  <button type="button" onClick={() => toggle(group)} aria-expanded={isOpen(group)}>
+                    {group}
+                    <ChevronRight
+                      className={`ml-auto size-3.5 transition-transform ${isOpen(group) ? "rotate-90" : ""}`}
+                    />
+                  </button>
+                </SidebarGroupLabel>
+              )}
+              <SidebarGroupContent
+                className={isOpen(group) ? "" : "hidden group-data-[collapsible=icon]:block"}
+              >
                 <SidebarMenu>
                   {NAV.filter((n) => n.group === group).map((item) => {
                     const count = item.count?.(counts) || null
@@ -370,7 +415,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
                         <SidebarMenuButton
                           asChild
                           isActive={location.pathname.startsWith(item.to)}
-                          size={group === "Operations" ? "lg" : "default"}
+                          className="h-9 gap-2.5 rounded-lg px-3 text-[13.5px]"
                           // The tooltip is the only place a collapsed rail can
                           // say what the dot is about, so it carries the
                           // sentence rather than repeating the label.
@@ -413,14 +458,11 @@ function Chrome({ children }: { children: React.ReactNode }) {
       </Sidebar>
 
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-4">
+        <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border/60 bg-background/85 px-4 backdrop-blur md:px-6">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />
           <div className="flex min-w-0 items-center gap-2">
-            {current && (
-              <current.icon className="size-4 shrink-0 text-muted-foreground" />
-            )}
-            <span className="truncate text-sm font-semibold">
+            <span className="truncate text-base font-semibold tracking-tight sm:text-lg">
               {current?.label ?? "Console"}
             </span>
             {/* Said again at the top of the screen it belongs to, in words. The
@@ -443,9 +485,11 @@ function Chrome({ children }: { children: React.ReactNode }) {
               )
             })()}
           </div>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
             <RegionPicker />
-            <LiveBadge />
+            <div className="hidden md:block">
+              <LiveBadge />
+            </div>
             {/* The Copilot, over whatever they are doing rather than instead of
                 it. As its own primary tab it was the clearest example of the
                 console showing an officer something they had not asked for: a
@@ -477,8 +521,8 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 overflow-auto">
-          <div className="px-4 pt-2 md:px-6">
+        <main className="min-w-0 flex-1 overflow-auto bg-background">
+          <div className="px-4 pt-3 md:px-6 empty:hidden">
             <AutonomyControl />
           </div>
           {children}
@@ -508,7 +552,7 @@ function RegionPicker() {
     <select
       value={region}
       onChange={(e) => setRegion(e.target.value as RegionPick)}
-      className="border-input bg-background h-8 rounded-md border px-2 text-xs font-medium"
+      className="border-input bg-card h-8 w-24 rounded-lg border px-2 text-xs font-medium shadow-xs sm:w-auto sm:px-2.5"
       aria-label="Operating region"
       title="Which region the console shows"
     >

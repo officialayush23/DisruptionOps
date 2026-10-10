@@ -140,7 +140,7 @@ function WallMiniMapImpl({ state, zone, region, w, h }: {
   const fs = Math.max(9, Math.min(12, W / 48))
 
   return (
-    <div className="relative h-full w-full bg-zinc-900">
+    <div className="relative h-full w-full bg-muted">
       {src && (
         <img
           src={src}
@@ -228,14 +228,14 @@ function WallMiniMapImpl({ state, zone, region, w, h }: {
           </text>
         ))}
       </svg>
-      <div className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 flex gap-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] tabular-nums text-zinc-200">
+      <div className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 flex gap-1.5 rounded-md border bg-card/95 px-1.5 py-0.5 text-[10px] tabular-nums text-foreground shadow-sm">
         <span title="units working"><span className="mr-0.5 inline-block size-2 rounded-full bg-sky-500" />{working}</span>
         <span title="units free nearby"><span className="mr-0.5 inline-block size-2 rounded-full border border-sky-400" />{free}</span>
         <span title="hospitals, shelters, relief points"><span className="mr-0.5 inline-block size-2 rounded-sm bg-emerald-500" />{layer.facilities.length}</span>
         {layer.blocks.length > 0 && <span className="text-red-400" title="road blocks">✕{layer.blocks.length}</span>}
       </div>
       {!TOKEN && (
-        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400">
+        <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
           VITE_MAPBOX_TOKEN not set
         </div>
       )}

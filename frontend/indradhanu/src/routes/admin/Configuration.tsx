@@ -176,7 +176,7 @@ export default function Configuration() {
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-1">
           {TABS.map(([k, label, Icon]) => (

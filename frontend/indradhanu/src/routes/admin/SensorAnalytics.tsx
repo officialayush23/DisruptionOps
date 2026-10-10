@@ -482,10 +482,9 @@ export default function SensorAnalytics() {
     .map((k) => ({ name: EVIDENCE_LABEL[k], value: Math.round((evidence[k] ?? 0) * 100) }))
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Sensor analytics</h1>
           <p className="text-muted-foreground text-sm">
             Live LoRa field telemetry · gas, heat, sound, tapping, tilt and shock from each node
           </p>

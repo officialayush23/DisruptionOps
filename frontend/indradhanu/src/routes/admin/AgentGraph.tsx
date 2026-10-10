@@ -128,7 +128,7 @@ export default function AgentGraph() {
   const visited = new Set((last?.trace ?? []).map((t) => t.node))
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {error && <Card className="border-destructive/50 p-4 text-sm">Could not load the agent graph: {error}</Card>}
       {data && !data.available && (
         <Card className="border-amber-500/60 p-4 text-sm">

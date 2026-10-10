@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import mapboxgl from "mapbox-gl"
 import "mapbox-gl/dist/mapbox-gl.css"
 import { Link } from "react-router-dom"
-import { Plane } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -126,10 +125,9 @@ export default function DroneSwarm() {
   }
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight"><Plane className="size-5" />Drone swarm</h1>
           <p className="text-muted-foreground text-sm">
             12-drone rescue swarm (PyBullet, decisions by Jev), live. Survivors it finds become incidents; obstructions it
             flies round over a street become road blocks the router avoids.

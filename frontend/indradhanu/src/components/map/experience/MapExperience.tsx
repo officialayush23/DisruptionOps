@@ -188,7 +188,7 @@ export function MapExperience({
   )
 
   return (
-    <div className={`dark fixed inset-0 overflow-hidden bg-[#0b0f17] text-slate-100 ${className}`}>
+    <div className={`fixed inset-0 overflow-hidden bg-background text-foreground ${className}`}>
       <div ref={safeProbe} aria-hidden className="pointer-events-none invisible fixed left-0 top-0 h-[env(safe-area-inset-bottom)] w-px" />
       <div className={desktop ? "grid h-full grid-cols-[minmax(0,1fr)_minmax(380px,420px)]" : "h-full"}>
         <div className="relative h-full min-w-0">
@@ -226,7 +226,7 @@ export function MapExperience({
             <section
               aria-label="Details"
               className={
-                "absolute z-30 flex flex-col overflow-hidden border border-white/10 bg-[rgb(14_17_22/0.97)] shadow-[0_-8px_32px_rgb(0_0_0/0.4)] backdrop-blur-md " +
+                "absolute z-30 flex flex-col overflow-hidden border border-border bg-card/97 shadow-[0_-8px_28px_rgb(16_24_40/0.12)] backdrop-blur-md " +
                 (tablet
                   ? "bottom-4 left-4 w-[min(560px,60vw)] rounded-3xl"
                   : "inset-x-0 bottom-0 rounded-t-3xl border-b-0")
@@ -244,7 +244,7 @@ export function MapExperience({
                 onPointerCancel={onPointerUp}
               >
                 <div className="flex h-[22px] items-center justify-center" aria-hidden>
-                  <div className="h-1 w-9 rounded-full bg-white/25" />
+                  <div className="h-1 w-9 rounded-full bg-foreground/15" />
                 </div>
                 <div ref={peekRef} className="px-4 pb-2">{peek}</div>
               </div>
@@ -257,9 +257,9 @@ export function MapExperience({
 
         {/* Desktop: the context panel. */}
         {desktop && (
-          <aside className="flex h-full min-h-0 flex-col border-l border-white/10 bg-[#0e1116]">
+          <aside className="flex h-full min-h-0 flex-col border-l border-border bg-card">
             {panelTitle && (
-              <div className="shrink-0 border-b border-white/10 px-5 py-4">{panelTitle}</div>
+              <div className="shrink-0 border-b border-border px-5 py-4">{panelTitle}</div>
             )}
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">{panelContent}</div>
           </aside>

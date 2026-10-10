@@ -17,6 +17,7 @@ import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { StatCard, useSeries } from "@/components/common/StatCard"
 
 /** Units, live: where each one is, where it has been, what happened to it, and
  *  which units are working each incident together.
@@ -122,10 +123,9 @@ export default function UnitsPage() {
   const rerouted = (units.data ?? []).reduce((n, u) => n + (u.reroutes || 0), 0)
 
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Units, live</h1>
           <p className="text-sm text-muted-foreground">
             Where every unit is, where it has been, why it changed course, and who is working each incident.
           </p>
@@ -240,18 +240,9 @@ export default function UnitsPage() {
   )
 }
 
-function Stat({ icon: Icon, label, value, tone }: { icon: typeof Truck; label: string; value: number; tone: string }) {
-  return (
-    <Card>
-      <CardContent className="flex items-center gap-3 p-4">
-        <Icon className={`size-5 ${tone}`} />
-        <div>
-          <div className="text-2xl font-semibold tabular-nums">{value}</div>
-          <div className="text-xs text-muted-foreground">{label}</div>
-        </div>
-      </CardContent>
-    </Card>
-  )
+function Stat({ icon, label, value }: { icon: typeof Truck; label: string; value: number; tone?: string }) {
+  const series = useSeries(`units:${label}`, value)
+  return <StatCard icon={icon} label={label} value={value} series={series} />
 }
 
 function UnitDetail({ unit }: { unit: Unit }) {

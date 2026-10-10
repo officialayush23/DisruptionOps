@@ -1091,7 +1091,7 @@ export default function CitizenApp() {
   }
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [filter, setFilter] = useState("all")
-  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
+  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("day")
   const [dismissedAlert, setDismissedAlert] = useState<string | null>(null)
   const [allAlerts, setAllAlerts] = useState(false)
   /** A place from somewhere else (a mesh notice) shown on the map. */
@@ -1263,8 +1263,8 @@ export default function CitizenApp() {
         <span
           className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold"
           style={{
-            background: sev >= 4 ? "rgb(239 68 68 / 0.18)" : "rgb(234 179 8 / 0.16)",
-            color: sev >= 4 ? "#fca5a5" : "#fde68a",
+            background: sev >= 4 ? "rgb(254 226 226)" : "rgb(254 243 199)",
+            color: sev >= 4 ? "#991b1b" : "#92400e",
           }}
         >
           Severity {sev}
@@ -1291,14 +1291,14 @@ export default function CitizenApp() {
         />
       )}
       {(state?.alerts?.length ?? 0) > 1 && (
-        <div className="mx-auto w-full max-w-md rounded-xl border border-white/10 bg-[rgb(14_17_22/0.92)] text-xs">
+        <div className="mx-auto w-full max-w-md rounded-xl border border-border bg-card/95 text-xs">
           <button className="w-full px-3 py-1.5 text-left font-medium" onClick={() => setAllAlerts((v) => !v)}>
             {allAlerts ? "Hide" : "Show"} all {state!.alerts.length} alerts from the control room
           </button>
           {allAlerts && (
             <ul className="max-h-60 space-y-1.5 overflow-y-auto px-3 pb-2">
               {state!.alerts.map((a) => (
-                <li key={a.id} className="border-t border-white/10 pt-1.5">
+                <li key={a.id} className="border-t border-border pt-1.5">
                   <div className="flex justify-between gap-2 opacity-70">
                     <span>{a.near === false ? `${a.ward ?? "elsewhere"} · ${a.distanceKm ?? "?"} km away` : `Near you${a.ward ? ` · ${a.ward}` : ""}`}</span>
                     <span>{new Date(a.issuedAt).toLocaleTimeString()}</span>
@@ -1312,7 +1312,7 @@ export default function CitizenApp() {
         </div>
       )}
       {flash && (
-        <div className="mx-auto w-fit rounded-full border border-white/10 bg-[rgb(14_17_22/0.92)] px-3 py-1.5 text-xs">
+        <div className="mx-auto w-fit rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs">
           {flash}
         </div>
       )}
@@ -1339,7 +1339,7 @@ export default function CitizenApp() {
         <LegendRow colour={MAP.block} label="Road closed, and how far" />
         <LegendRow colour={MAP.you} label="You" />
       </div>
-      <div className="space-y-1 border-t border-white/10 pt-2.5 text-[11px] text-slate-400">
+      <div className="space-y-1 border-t border-border pt-2.5 text-[11px] text-muted-foreground">
         <div className="flex items-center gap-2"><span className="h-[3px] w-5 rounded" style={{ background: MAP.route }} />Road route</div>
         <div className="flex items-center gap-2"><span className="h-[3px] w-5 rounded" style={{ background: MAP.caution }} />Route near a reported hazard</div>
         <div className="flex items-center gap-2"><span className="h-0 w-5 border-t-[3px] border-dashed" style={{ borderColor: MAP.uncertain }} />Straight line — not a road route</div>
@@ -1402,7 +1402,7 @@ export default function CitizenApp() {
           <ActionButton onClick={() => { setTab("go"); snapTo("half") }} className="flex-1">
             <Navigation className="size-4" /> Directions
           </ActionButton>
-          <div className="text-right text-xs tabular-nums text-slate-400">
+          <div className="text-right text-xs tabular-nums text-muted-foreground">
             {readable(nav.remainingM)} left
           </div>
         </div>
@@ -1412,14 +1412,14 @@ export default function CitizenApp() {
             <ItemDisc item={selected} size={40} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-[15px] font-semibold">{selected.title}</div>
-              <div className="truncate text-xs text-slate-400">
+              <div className="truncate text-xs text-muted-foreground">
                 {kindLabel(selected)} · {formatMetres(distanceTo(selected))} {compass(here, selected.location)}
                 {selected.status ? ` · ${words(selected.status)}` : ""}
                 {selected.severity ? ` · severity ${selected.severity}` : ""}
               </div>
             </div>
             <button type="button" aria-label="Close" onClick={() => setSelectedKey(null)}
-                    className="grid size-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-white/10">
+                    className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted">
               <X className="size-4" />
             </button>
           </div>
@@ -1470,7 +1470,7 @@ export default function CitizenApp() {
               onClick={() => void ask("shelter")}
               className={
                 "flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-semibold text-white disabled:opacity-60 " +
-                (sev >= 4 || state?.alerts?.length ? "bg-[#ef4444]" : "bg-[#0a84ff]")
+                (sev >= 4 || state?.alerts?.length ? "bg-[#ef4444]" : "bg-primary")
               }
             >
               {busy === "shelter" ? <Loader2 className="size-5 animate-spin" /> : <Navigation className="size-5" />}
@@ -1489,7 +1489,7 @@ export default function CitizenApp() {
               onPointerLeave={() => { if (recording) stopRecording() }}
               className={
                 "flex h-14 touch-none select-none flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-semibold disabled:opacity-50 " +
-                (recording ? "bg-[#ef4444] text-white" : "bg-white/10")
+                (recording ? "bg-[#ef4444] text-white" : "bg-muted")
               }
             >
               {busy === "voice" ? <Loader2 className="size-5 animate-spin" />
@@ -1500,7 +1500,7 @@ export default function CitizenApp() {
               type="button"
               disabled={busy === "photo"}
               onClick={() => { setTab("report"); snapTo("half"); photoInput.current?.click() }}
-              className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl bg-white/10 text-xs font-semibold disabled:opacity-50"
+              className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl bg-muted text-xs font-semibold disabled:opacity-50"
             >
               {busy === "photo" ? <Loader2 className="size-5 animate-spin" /> : <Camera className="size-5" />}
               {photo ? "Change photo" : "Take a photo"}
@@ -1508,11 +1508,11 @@ export default function CitizenApp() {
           </div>
           {sorted[0] && (
             <button type="button" onClick={() => select(sorted[0].item)}
-                    className="flex w-full items-center gap-2 text-left text-xs text-slate-400">
+                    className="flex w-full items-center gap-2 text-left text-xs text-muted-foreground">
               <span className="size-2 shrink-0 rounded-full" style={{ background: sorted[0].item.colour }} />
               <span className="min-w-0 flex-1 truncate">
                 {sorted[0].item.critical ? "Critical: " : "Nearest: "}
-                <span className="text-slate-200">{sorted[0].item.title}</span>
+                <span className="text-foreground">{sorted[0].item.title}</span>
               </span>
               <span className="tabular-nums">{formatMetres(sorted[0].d)}</span>
             </button>
@@ -1608,7 +1608,7 @@ export default function CitizenApp() {
           <span className="tabular-nums">{selected.location[1].toFixed(5)}, {selected.location[0].toFixed(5)}</span>
         </DetailRow>
       </div>
-      <p className="text-[11.5px] leading-snug text-slate-400">
+      <p className="text-[11.5px] leading-snug text-muted-foreground">
         {intentFor(selected)
           ? "The safest route is chosen by the guide from what is open and has room, avoiding reported hazards — it may pick a different one than this. Open in Maps gives road directions to exactly this place, without the hazard data."
           : "Open in Maps gives road directions to this exact point. It knows nothing about the closures and hazards reported here."}
@@ -1620,7 +1620,7 @@ export default function CitizenApp() {
     <div className="space-y-3">
       <div>
         <div className="flex items-center gap-2 text-sm font-semibold"><Compass className="size-4" /> Where should I go?</div>
-        <p className="mt-0.5 text-xs text-slate-400">
+        <p className="mt-0.5 text-xs text-muted-foreground">
           Decided from what has room, what is near an open incident, and which
           roads crews have reported blocked.
         </p>
@@ -1651,15 +1651,15 @@ export default function CitizenApp() {
       </div>
 
       {nav && !nav.arrived && (
-        <div className="flex items-center gap-2 rounded-2xl bg-white/[0.04] px-3 py-2 text-xs">
+        <div className="flex items-center gap-2 rounded-2xl bg-muted/70 px-3 py-2 text-xs">
           {/* Asked before arrival, not after, because at the door nobody is
               looking at a phone. One phone is usually a family. */}
-          <span className="text-slate-400">People with you</span>
+          <span className="text-muted-foreground">People with you</span>
           <div className="ml-auto flex items-center gap-1">
-            <button type="button" className="size-7 rounded-full border border-white/15 tabular-nums disabled:opacity-40"
+            <button type="button" className="size-7 rounded-full border border-border tabular-nums disabled:opacity-40"
                     disabled={partySize <= 1} onClick={() => setPartySize((n) => Math.max(1, n - 1))} aria-label="One fewer">−</button>
             <span className="w-6 text-center tabular-nums">{partySize}</span>
-            <button type="button" className="size-7 rounded-full border border-white/15 tabular-nums disabled:opacity-40"
+            <button type="button" className="size-7 rounded-full border border-border tabular-nums disabled:opacity-40"
                     disabled={partySize >= 20} onClick={() => setPartySize((n) => Math.min(20, n + 1))} aria-label="One more">+</button>
           </div>
         </div>
@@ -1681,7 +1681,7 @@ export default function CitizenApp() {
           <p className="text-sm font-medium">{guide.headline}</p>
           {guide.shouldMove && guide.destination && (
             <div className="space-y-1">
-              <div className="text-xs text-slate-400">
+              <div className="text-xs text-muted-foreground">
                 {guide.routeKm} km · about {guide.routeMinutes} min ·{" "}
                 {roadRoute ? "road route" : "straight-line estimate, the router was unreachable"}
                 {guide.hazardsConsidered > 0 && ` · ${guide.hazardsConsidered} hazard(s) taken into account`}
@@ -1711,12 +1711,12 @@ export default function CitizenApp() {
           )}
 
           {guide.shouldMove && guide.routeSteps?.length > 0 && (
-            <div className="rounded-2xl bg-white/[0.04] p-3">
+            <div className="rounded-2xl bg-muted/70 p-3">
               <SectionLabel>The way there</SectionLabel>
               <ol className="mt-1.5 space-y-1">
                 {guide.routeSteps.slice(0, 12).map((st, i) => (
-                  <li key={i} className={`flex gap-2 text-xs ${nav && nav.index === i ? "font-semibold text-white" : nav && i < nav.index ? "text-slate-500" : ""}`}>
-                    <span className="w-12 shrink-0 tabular-nums text-slate-400">
+                  <li key={i} className={`flex gap-2 text-xs ${nav && nav.index === i ? "font-semibold text-foreground" : nav && i < nav.index ? "text-muted-foreground/80" : ""}`}>
+                    <span className="w-12 shrink-0 tabular-nums text-muted-foreground">
                       {st.distanceM >= 1000 ? `${(st.distanceM / 1000).toFixed(1)} km` : `${st.distanceM} m`}
                     </span>
                     <span>{st.instruction}</span>
@@ -1734,11 +1734,11 @@ export default function CitizenApp() {
           )}
           <ul className="space-y-1">
             {guide.reasoning.map((r, i) => (
-              <li key={i} className="text-xs text-slate-400">• {r}</li>
+              <li key={i} className="text-xs text-muted-foreground">• {r}</li>
             ))}
           </ul>
           {guide.alternatives.length > 0 && (
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-muted-foreground">
               Also open: {guide.alternatives.map((a) => a.name).join(", ")}
             </p>
           )}
@@ -1756,7 +1756,7 @@ export default function CitizenApp() {
     <div className="space-y-2.5">
       <div>
         <div className="text-sm font-semibold">Tell us what you can see</div>
-        <p className="mt-0.5 text-xs text-slate-400">
+        <p className="mt-0.5 text-xs text-muted-foreground">
           Say it or type it, in English, Hindi or Marathi. No account needed.
         </p>
       </div>
@@ -1780,7 +1780,7 @@ export default function CitizenApp() {
         )}
       </Button>
       {voiceOff && (
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-muted-foreground">
           Speaking a report is not switched on for this deployment, so type it
           instead. Everything after the words is identical — spoken reports go
           through the same parser and the same scoring.
@@ -1788,18 +1788,18 @@ export default function CitizenApp() {
       )}
 
       {heard && (
-        <div className="space-y-1 rounded-xl border border-white/10 p-2 text-xs">
+        <div className="space-y-1 rounded-xl border border-border p-2 text-xs">
           <div className="flex flex-wrap items-center gap-1.5">
             <Badge variant="outline">{heard.languageName}</Badge>
             {heard.translated && <Badge variant="secondary">translated to English</Badge>}
-            <span className="tabular-nums text-slate-400">{heard.latencyMs} ms</span>
+            <span className="tabular-nums text-muted-foreground">{heard.latencyMs} ms</span>
           </div>
-          <div className="text-slate-400">
-            Read as <span className="text-slate-100">{heard.readAsLabel}</span>.
+          <div className="text-muted-foreground">
+            Read as <span className="text-foreground">{heard.readAsLabel}</span>.
             Correct the text below if that is wrong, then send.
           </div>
           {heard.notes.map((n, i) => (
-            <div key={i} className="italic text-slate-400">{n}</div>
+            <div key={i} className="italic text-muted-foreground">{n}</div>
           ))}
         </div>
       )}
@@ -1832,13 +1832,13 @@ export default function CitizenApp() {
       </Button>
 
       {photoPreview && (
-        <div className="space-y-2 rounded-xl border border-white/10 p-2">
+        <div className="space-y-2 rounded-xl border border-border p-2">
           <div className="flex items-start gap-2">
             <img src={photoPreview} alt="The photo attached to this report"
                  className="size-20 shrink-0 rounded object-cover" />
             <div className="min-w-0 flex-1 space-y-1 text-xs">
               {photo?.unanalysed ? (
-                <p className="text-slate-400">
+                <p className="text-muted-foreground">
                   Attached. Nobody has looked at it — photo analysis is not
                   switched on here — so it counts for a little and not for much.
                 </p>
@@ -1861,14 +1861,14 @@ export default function CitizenApp() {
                     {photo.water?.depthBand && <Badge variant="outline">water {photo.water.depthBand}</Badge>}
                   </div>
                   {photo.hazards?.length ? (
-                    <p className="text-slate-400">Seen in the photo: {photo.hazards.join(", ")}.</p>
+                    <p className="text-muted-foreground">Seen in the photo: {photo.hazards.join(", ")}.</p>
                   ) : (
-                    <p className="text-slate-400">Nothing it recognises as a hazard.</p>
+                    <p className="text-muted-foreground">Nothing it recognises as a hazard.</p>
                   )}
                   {photo.imageQuality && photo.imageQuality !== "good" && (
-                    <p className="text-slate-400">The image is {photo.imageQuality}, so this counts for less.</p>
+                    <p className="text-muted-foreground">The image is {photo.imageQuality}, so this counts for less.</p>
                   )}
-                  <p className="text-slate-400">
+                  <p className="text-muted-foreground">
                     A photo can only raise or lower how much your report is
                     believed. It never decides what happens next.
                   </p>
@@ -1876,7 +1876,7 @@ export default function CitizenApp() {
               ) : null}
             </div>
           </div>
-          <button type="button" className="text-xs text-slate-400 underline" onClick={clearPhoto}>
+          <button type="button" className="text-xs text-muted-foreground underline" onClick={clearPhoto}>
             Remove photo
           </button>
         </div>
@@ -1892,7 +1892,7 @@ export default function CitizenApp() {
         {busy === "report" ? "Sending…" : "Send report"}
       </Button>
       {!text.trim() && (
-        <p className="text-xs text-slate-400">Type what you see, or hold to speak, then send.</p>
+        <p className="text-xs text-muted-foreground">Type what you see, or hold to speak, then send.</p>
       )}
       {/* The answer belongs next to the button that asked. Errors used to show
           only at the top of the sheet, out of sight on a phone. */}
@@ -1902,7 +1902,7 @@ export default function CitizenApp() {
         </Alert>
       )}
       {state && !state.inside && (
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-muted-foreground">
           You are outside the covered area. Your report will go to the nearest
           covered ward{state.ward ? `, ${state.ward.name}` : ""}.
         </p>
@@ -1910,10 +1910,10 @@ export default function CitizenApp() {
       {filed?.queued ? (
         <div className="space-y-1 rounded-xl border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
           <div className="font-medium">Saved on this phone.</div>
-          <div className="text-slate-300">
+          <div className="text-foreground/80">
             {String(filed.message ?? "There is no signal right now. It sends itself the moment there is.")}
           </div>
-          <div className="text-slate-400">
+          <div className="text-muted-foreground">
             It will be timed from now, not from when it finally sends, so
             nothing is lost by the wait.
           </div>
@@ -1921,9 +1921,9 @@ export default function CitizenApp() {
       ) : filed ? (
         <div className="space-y-1 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs" role="status">
           <div className="font-semibold text-emerald-300">Report sent to the command centre.</div>
-          {filed.filedNote ? <div className="text-slate-300">{String(filed.filedNote)}</div> : null}
+          {filed.filedNote ? <div className="text-foreground/80">{String(filed.filedNote)}</div> : null}
           <div className="font-medium">{String(filed.readHow ?? "")}</div>
-          <div className="text-slate-400">{String(filed.summary ?? "")}</div>
+          <div className="text-muted-foreground">{String(filed.summary ?? "")}</div>
           {Boolean(filed.linked) && (
             <Badge variant="outline">
               Merged with an existing report at {((filed.linkScore as number) * 100).toFixed(0)}%
@@ -1931,7 +1931,7 @@ export default function CitizenApp() {
           )}
           {Number(filed.urgencyBoost ?? 0) > 0 && <Badge variant="destructive">Flagged urgent</Badge>}
           {filed.photo != null && (
-            <div className="text-slate-400">Your photo was taken into account when scoring this report.</div>
+            <div className="text-muted-foreground">Your photo was taken into account when scoring this report.</div>
           )}
         </div>
       ) : null}
@@ -1962,7 +1962,7 @@ export default function CitizenApp() {
       )}
       {pinned && (
         <PlaceRow
-          disc={<span className="size-8 shrink-0 rounded-full" style={{ background: MAP.caution, boxShadow: "0 0 0 2px #0b0f17" }} />}
+          disc={<span className="size-8 shrink-0 rounded-full" style={{ background: MAP.caution, boxShadow: "0 0 0 2px #ffffff" }} />}
           title={pinned.label}
           subtitle={`From the mesh · ${formatMetres(metresBetween(here, [pinned.lng, pinned.lat]))} ${compass(here, [pinned.lng, pinned.lat])}`}
           trailing={<span onClick={(e) => { e.stopPropagation(); setPinned(null) }}>Clear</span>}
@@ -1974,7 +1974,7 @@ export default function CitizenApp() {
         {sorted.length > 0 ? ` · ${sorted.length}` : ""}
       </SectionLabel>
       {sorted.length === 0 ? (
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-muted-foreground">
           {state ? "Nothing reported near you." : "Waiting for the first map from the server…"}
         </p>
       ) : (
@@ -2003,10 +2003,10 @@ export default function CitizenApp() {
           {state.risk.drivers.slice(0, 4).map((d, i) => (
             <div key={i} className="text-xs">
               <span className="font-medium">{d.label}</span>{" "}
-              <span className="text-slate-400">{(d.contribution * 100).toFixed(0)}% — {d.detail}</span>
+              <span className="text-muted-foreground">{(d.contribution * 100).toFixed(0)}% — {d.detail}</span>
             </div>
           ))}
-          <p className="pt-1 text-xs text-slate-400">About {state.risk.leadTimeHours}h of lead time.</p>
+          <p className="pt-1 text-xs text-muted-foreground">About {state.risk.leadTimeHours}h of lead time.</p>
         </div>
       )}
       <div className="space-y-2">
@@ -2035,7 +2035,7 @@ export default function CitizenApp() {
             </Button>
             <span />
           </div>
-          <p className="min-w-[180px] flex-1 text-xs text-slate-400">
+          <p className="min-w-[180px] flex-1 text-xs text-muted-foreground">
             These buttons, or WASD and the arrow keys, move you. The route the
             agent recommends is chosen against every hazard that has been
             reported rather than for being shortest.
@@ -2046,7 +2046,7 @@ export default function CitizenApp() {
           an account, so this is for the person handed a tablet who wants the
           signed-in version with a report history. */}
       <DemoCredentials portal="citizen" title="Demo resident sign-in (optional)" />
-      <a href="/login" className="block text-xs text-slate-400 underline">Sign in</a>
+      <a href="/login" className="block text-xs text-muted-foreground underline">Sign in</a>
     </div>
   )
 
@@ -2089,9 +2089,9 @@ export default function CitizenApp() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-base font-semibold">Indradhanu</div>
-            <div className="text-xs text-slate-400">Report what you can see, and find out where to go.</div>
+            <div className="text-xs text-muted-foreground">Report what you can see, and find out where to go.</div>
           </div>
-          <a href="/login" className="text-xs text-slate-400 underline">Sign in</a>
+          <a href="/login" className="text-xs text-muted-foreground underline">Sign in</a>
         </div>
       }
       map={(padding) => (

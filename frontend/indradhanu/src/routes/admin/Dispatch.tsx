@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
+import { StatCard, useSeries } from "@/components/common/StatCard"
 
 /** The allocation ledger. Who is on what, what is spare, what nobody has.
  *
@@ -241,7 +242,7 @@ export default function Dispatch() {
   const free = spare.filter((r) => r.status === "available").length
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {/* Four numbers, and the only two that change a decision are the last
           two. Red is reserved for the one that means somebody is not coming. */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -628,18 +629,6 @@ function Stat({
   value: string | number
   tone?: "bad"
 }) {
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardDescription>{label}</CardDescription>
-        <CardTitle
-          className={`text-2xl tabular-nums ${
-            tone === "bad" ? "text-red-600 dark:text-red-400" : ""
-          }`}
-        >
-          {value}
-        </CardTitle>
-      </CardHeader>
-    </Card>
-  )
+  const series = useSeries(`dispatch:${label}`, parseFloat(String(value)))
+  return <StatCard label={label} value={value} tone={tone} series={series} />
 }

@@ -199,21 +199,21 @@ function Screen({ state, zone, region, onExpand, main, fresh, size, onResize, se
         }
       }}
       style={{ width: size.w, height: size.h, resize: "both", minWidth: 220, minHeight: 170, maxWidth: 1400, maxHeight: 900 }}
-      className={`group relative shrink-0 cursor-pointer snap-start overflow-hidden rounded-lg border-2 bg-black shadow-lg ${
-        selected ? "border-sky-400 ring-4 ring-sky-400/60" : main ? "border-sky-500/40" : "border-zinc-700"
-      } ${fresh && !selected ? "ring-4 ring-amber-400/70" : ""}`}
+      className={`group relative shrink-0 cursor-pointer snap-start overflow-hidden rounded-xl border bg-muted shadow-card transition-shadow hover:shadow-md ${
+        selected ? "border-primary ring-2 ring-primary/30" : main ? "border-primary/30" : "border-border"
+      } ${fresh && !selected ? "ring-2 ring-amber-400/70" : ""}`}
     >
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2 bg-gradient-to-b from-black/90 to-black/0 px-2.5 py-1.5 text-white">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2 bg-gradient-to-b from-card via-card/80 to-card/0 px-3 py-2 text-foreground">
         {zone ? (
           <span className={`h-3 w-1.5 rounded-sm ${SEV_BAR[zone.severity] ?? "bg-zinc-400"}`} />
         ) : (
-          <MonitorPlay className="size-3.5 text-sky-300" />
+          <MonitorPlay className="size-3.5 text-primary" />
         )}
         <span className="truncate text-xs font-semibold tracking-wide uppercase">
           {zone ? zone.name : `All zones · ${region?.name ?? "every region"}`}
         </span>
         {fresh && <Badge className="h-4 bg-amber-400 px-1 text-[10px] text-black">NEW</Badge>}
-        <span className="ml-auto flex items-center gap-2 text-[11px] tabular-nums text-zinc-300">
+        <span className="ml-auto flex items-center gap-2 text-[11px] tabular-nums text-muted-foreground">
           {zone ? (
             <>
               <span title="open incidents"><Siren className="mr-0.5 inline size-3" />{zone.incidents.length}</span>
@@ -232,10 +232,10 @@ function Screen({ state, zone, region, onExpand, main, fresh, size, onResize, se
       {seen ? (
         <WallMiniMap state={state} zone={zone} region={region} w={size.w} h={size.h} />
       ) : (
-        <div className="h-full w-full bg-zinc-900" />
+        <div className="h-full w-full bg-muted" />
       )}
       {selected && (
-        <span className="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-sky-500 px-1.5 text-[10px] font-semibold text-black">
+        <span className="pointer-events-none absolute bottom-2 left-2 z-10 rounded-md bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
           ANALYTICS
         </span>
       )}
@@ -244,7 +244,7 @@ function Screen({ state, zone, region, onExpand, main, fresh, size, onResize, se
           e.stopPropagation()
           onExpand()
         }}
-        className="absolute right-6 bottom-2 z-10 rounded-md bg-black/70 p-1.5 text-white opacity-80 transition group-hover:opacity-100 hover:bg-black"
+        className="absolute right-6 bottom-2 z-10 rounded-lg border bg-card/95 p-1.5 text-foreground opacity-80 shadow-sm transition group-hover:opacity-100 hover:bg-card"
         aria-label={`Expand ${zone ? zone.name : "city"} screen`}
       >
         <Maximize2 className="size-4" />
@@ -278,30 +278,30 @@ function Expanded({ state, zones, region, index, onClose, onStep, onPickWard }: 
   const wardName = new Map(state.wards.map((w) => [w.id, w.name]))
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black text-white">
-      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
-        <Button size="icon" variant="ghost" className="text-white hover:bg-zinc-800" onClick={() => onStep(-1)} aria-label="Previous screen">
+    <div className="fixed inset-0 z-50 flex flex-col bg-background text-foreground">
+      <div className="flex items-center gap-2 border-b bg-card px-4 py-2.5">
+        <Button size="icon" variant="ghost" className="hover:bg-muted" onClick={() => onStep(-1)} aria-label="Previous screen">
           <ChevronLeft className="size-5" />
         </Button>
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold uppercase tracking-wide">
             {zone ? zone.name : `All zones · ${region?.name ?? "every region"}`}
           </div>
-          <div className="text-xs text-zinc-400">
+          <div className="text-xs text-muted-foreground">
             Screen {index + 2} of {zones.length + 1} · ← → between screens · click a ward for its numbers · Esc to close
           </div>
         </div>
-        <Button size="icon" variant="ghost" className="text-white hover:bg-zinc-800" onClick={() => onStep(1)} aria-label="Next screen">
+        <Button size="icon" variant="ghost" className="hover:bg-muted" onClick={() => onStep(1)} aria-label="Next screen">
           <ChevronRight className="size-5" />
         </Button>
-        <Button size="icon" variant="ghost" className="ml-auto text-white hover:bg-zinc-800" onClick={onClose} aria-label="Close">
+        <Button size="icon" variant="ghost" className="ml-auto hover:bg-muted" onClick={onClose} aria-label="Close">
           <X className="size-5" />
         </Button>
       </div>
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_360px]">
         <ScreenMap state={state} zone={zone} region={region} big className="h-full min-h-[50vh] w-full"
                    onPickWard={onPickWard} />
-        <aside className="min-h-0 overflow-y-auto border-l border-zinc-800 p-3">
+        <aside className="min-h-0 overflow-y-auto border-l bg-card p-4">
           {zone && (
             <div className="mb-3 grid grid-cols-3 gap-2 text-center">
               <Kpi label="Incidents" value={zone.incidents.length} />
@@ -319,14 +319,14 @@ function Expanded({ state, zones, region, index, onClose, onStep, onPickWard }: 
               <li key={i.id}>
                 <button
                   onClick={() => navigate(`/admin/response?incident=${i.id}`)}
-                  className="w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-left text-sm hover:border-sky-500"
+                  className="w-full rounded-lg border bg-card p-2.5 text-left text-sm hover:border-primary"
                 >
                   <div className="flex items-start gap-2">
                     <span className={`mt-1 h-3 w-1.5 shrink-0 rounded-sm ${SEV_BAR[i.severity] ?? "bg-zinc-400"}`} />
                     <span className="flex-1 leading-tight">{i.title}</span>
-                    <span className="text-xs text-zinc-400">S{i.severity}</span>
+                    <span className="text-xs text-muted-foreground">S{i.severity}</span>
                   </div>
-                  <div className="mt-1 pl-3.5 text-xs text-zinc-400">
+                  <div className="mt-1 pl-3.5 text-xs text-muted-foreground">
                     {!zone && `${wardName.get(i.wardId) ?? i.wardId} · `}
                     {i.reportCount} report{i.reportCount === 1 ? "" : "s"} ·{" "}
                     {i.unitsEnRoute ? (
@@ -347,9 +347,9 @@ function Expanded({ state, zones, region, index, onClose, onStep, onPickWard }: 
 
 function Kpi({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-md border border-zinc-800 bg-zinc-900 p-2">
+    <div className="rounded-lg border bg-card p-2.5">
       <div className="text-lg font-semibold tabular-nums">{value}</div>
-      <div className="text-[11px] text-zinc-400">{label}</div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
     </div>
   )
 }
@@ -417,7 +417,7 @@ export default function CommandWall() {
       <section className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <MonitorPlay className="size-4" />
-          <h2 className="text-sm font-semibold">Live wall</h2>
+          <h2 className="text-base font-semibold tracking-tight">Live wall</h2>
           <span className="text-muted-foreground text-xs">
             {liveZones.length} active zone{liveZones.length === 1 ? "" : "s"}
             {unattended > 0 && <> · <b className="text-amber-600 dark:text-amber-400">{unattended} incident{unattended === 1 ? "" : "s"} with nobody assigned</b></>}
@@ -432,7 +432,7 @@ export default function CommandWall() {
             <select
               value={regionPick}
               onChange={(e) => pickRegion(e.target.value)}
-              className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+              className="border-input bg-card h-8 rounded-lg border px-2.5 text-xs shadow-xs"
               aria-label="Region"
               title="Which region the wall shows"
             >
@@ -455,7 +455,7 @@ export default function CommandWall() {
         </div>
         <div
           ref={strip}
-          className="flex snap-x items-start gap-2 overflow-x-auto rounded-xl bg-zinc-950 p-2 [scrollbar-width:thin]"
+          className="flex snap-x items-start gap-3 overflow-x-auto rounded-xl border bg-card p-3 shadow-card [scrollbar-width:thin]"
         >
           <Screen state={wallState} zone={null} region={region} main onExpand={() => setOpen(-1)}
                   size={sizeOf("city", true)} onResize={(s) => resize("city", s)}
@@ -474,7 +474,7 @@ export default function CommandWall() {
             />
           ))}
           {zones.length === 0 && (
-            <div className="flex w-[340px] shrink-0 items-center justify-center self-stretch rounded-lg border-2 border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-400">
+            <div className="flex w-[340px] shrink-0 items-center justify-center self-stretch rounded-xl border-2 border-dashed border-border p-6 text-center text-sm text-muted-foreground">
               <Users className="mr-2 size-4" /> No open incidents. Zone screens appear here as soon as one opens.
             </div>
           )}

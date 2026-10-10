@@ -79,7 +79,7 @@ export const statusRing = (status: string) =>
 
 /** The floating surfaces every control over the map sits on. */
 export const SURFACE =
-  "border border-white/10 bg-[rgb(14_17_22/0.92)] text-slate-100 shadow-[0_6px_24px_rgb(0_0_0/0.35)] backdrop-blur-md"
+  "border border-border/80 bg-card/95 text-foreground shadow-[0_4px_16px_rgb(16_24_40/0.10)] backdrop-blur-md"
 
 /** Metres between two lng/lat points, haversine. */
 export function metresBetween(a: [number, number], b: [number, number]): number {

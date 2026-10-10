@@ -17,7 +17,7 @@ const queryClient = new QueryClient({
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ThemeProvider>
+    <ThemeProvider defaultTheme="light" storageKey="indradhanu-theme">
       <QueryClientProvider client={queryClient}>
         <TooltipProvider delayDuration={200}>
           <BrowserRouter>

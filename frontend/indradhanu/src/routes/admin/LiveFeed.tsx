@@ -210,7 +210,7 @@ export default function LiveFeed() {
   ]
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <DronePanel items={drone.items} error={drone.error} />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Card>

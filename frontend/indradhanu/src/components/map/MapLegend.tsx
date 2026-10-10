@@ -46,7 +46,7 @@ const PLACE = [
 function Swatch({ colour, round = true }: { colour: string; round?: boolean }) {
   return (
     <span
-      className={`inline-block size-3 shrink-0 border border-white/40 ${
+      className={`inline-block size-3 shrink-0 border border-black/10 ${
         round ? "rounded-full" : "rounded-[2px]"
       }`}
       style={{ background: colour }}
@@ -63,12 +63,12 @@ function Group({
 }) {
   return (
     <div>
-      <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+      <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
       <div className="space-y-0.5">
         {items.map(([label, colour]) => (
-          <div key={label} className="flex items-center gap-1.5 text-[11px] text-slate-200">
+          <div key={label} className="flex items-center gap-1.5 text-[11px] text-foreground">
             <Swatch colour={colour} round={round} />
             <span className="truncate">{label}</span>
           </div>
@@ -83,12 +83,12 @@ export function MapLegend({ className = "" }: { className?: string }) {
 
   return (
     <div
-      className={`pointer-events-auto rounded-lg border border-slate-500/30 bg-[rgb(9_12_20/0.92)] shadow-lg backdrop-blur-sm ${className}`}
+      className={`pointer-events-auto rounded-lg border border-border bg-card/95 text-foreground shadow-card backdrop-blur-sm ${className}`}
     >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-slate-200"
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-foreground"
       >
         <Info className="size-3 shrink-0" />
         Legend
@@ -100,17 +100,17 @@ export function MapLegend({ className = "" }: { className?: string }) {
       </button>
 
       {open && (
-        <div className="grid gap-3 border-t border-slate-500/25 px-2.5 py-2 sm:grid-cols-2">
+        <div className="grid gap-3 border-t border-border px-2.5 py-2 sm:grid-cols-2">
           <Group title="Ward risk (fill)" items={WARD} round={false} />
           <Group title="Hazard severity" items={HAZARD} />
           <Group title="Unit status" items={UNIT} />
           <Group title="Facility kind" items={PLACE} />
 
           <div className="sm:col-span-2">
-            <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+            <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               Lines and marks
             </div>
-            <div className="space-y-0.5 text-[11px] text-slate-200">
+            <div className="space-y-0.5 text-[11px] text-foreground">
               <div className="flex items-center gap-1.5">
                 <span className="inline-block h-[3px] w-4 shrink-0 rounded bg-[#f59e0b]" />
                 <span>A unit driving to its task, on real streets</span>
@@ -127,11 +127,11 @@ export function MapLegend({ className = "" }: { className?: string }) {
                 <span className="inline-block size-3 shrink-0 rounded-full border-2 border-[#ef4444]" />
                 <span>Facility that has reported itself full or closed</span>
               </div>
-              <div className="flex items-center gap-1.5 text-slate-400">
+              <div className="flex items-center gap-1.5 text-muted-foreground">
                 <span className="w-4 shrink-0 text-center tabular-nums">3</span>
                 <span>Reports merged into one incident</span>
               </div>
-              <div className="flex items-center gap-1.5 text-slate-400">
+              <div className="flex items-center gap-1.5 text-muted-foreground">
                 <span className="w-4 shrink-0 text-center">◎</span>
                 <span>A bigger halo is more reports, not more severity</span>
               </div>

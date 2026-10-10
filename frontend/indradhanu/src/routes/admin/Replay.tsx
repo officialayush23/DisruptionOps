@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  AlertTriangle, ChevronLeft, ChevronRight, History, Loader2, Pause, Play,
+  AlertTriangle, ChevronLeft, ChevronRight, Loader2, Pause, Play,
 } from "lucide-react"
 import { request } from "@/api/httpClient"
 import { LiveMap } from "@/components/map/LiveMap"
@@ -193,13 +193,10 @@ export default function Replay() {
   }, [data, frame])
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <h1 className="flex items-center gap-2 text-lg font-semibold">
-            <History className="size-5" /> Replay
-          </h1>
-          <p className="text-muted-foreground max-w-2xl text-xs">
+          <p className="text-muted-foreground max-w-2xl text-sm">
             Every decision this system made, in the order it made them, with the
             reason it recorded at the time. Nothing here is re-computed — it is
             the append-only event log, folded back into the world it described.

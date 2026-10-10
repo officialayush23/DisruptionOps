@@ -170,11 +170,10 @@ export default function Architecture() {
   }, [state])
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold">How this works</h1>
-          <p className="text-muted-foreground max-w-2xl text-xs">
+          <p className="text-muted-foreground max-w-2xl text-sm">
             The whole system on one page, wired to the live run. Each band shows
             what has passed through it, so this is a reading rather than a
             drawing. Report → understand → score the zone → check authority →

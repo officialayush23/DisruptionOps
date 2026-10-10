@@ -442,9 +442,8 @@ export default function AgentTrace() {
   }, [joined, only])
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="space-y-1.5">
-        <h1 className="text-lg font-semibold tracking-tight">Agent log</h1>
         <p className="text-muted-foreground max-w-3xl text-sm">
           Every agent action, as the agent wrote it. The table below decodes each
           row into what was joined to what; the raw rows and their causation

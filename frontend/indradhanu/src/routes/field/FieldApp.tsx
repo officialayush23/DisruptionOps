@@ -466,7 +466,7 @@ export default function FieldApp() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [filter, setFilter] = useState("all")
   const [tab, setTab] = useState<"task" | "report" | "status" | "units">("task")
-  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
+  const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("day")
   const [camera, setCamera] = useState<CameraRequest | null>(null)
   const cameraSeq = useRef(0)
   const fly = useCallback((req: Omit<CameraRequest, "key">) => {
@@ -676,7 +676,7 @@ export default function FieldApp() {
         <span className="flex min-w-0 items-center gap-2">
           <ConnectivityPill online={online} reachable={!/failed to fetch|networkerror|load failed/i.test(error ?? "")} staleSince={null}
                             lastLive={lastLive} queued={queued} now={clock} />
-          <span className="shrink-0 text-[11px] text-slate-500">· {gpsShort}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground/80">· {gpsShort}</span>
         </span>
       }
       right={<FilterControl value={filter} options={filterOptions} onChange={(id) => { setFilter(id); if (id !== "all") setSelectedKey(null) }} />}
@@ -689,7 +689,7 @@ export default function FieldApp() {
         <AlertBanner tone="caution" title="Something did not go through" detail={error} onDismiss={() => setError(null)} />
       )}
       {flash && (
-        <div className="mx-auto w-fit rounded-full border border-white/10 bg-[rgb(14_17_22/0.92)] px-3 py-1.5 text-xs">
+        <div className="mx-auto w-fit rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs">
           {flash}
         </div>
       )}
@@ -740,7 +740,7 @@ export default function FieldApp() {
       <ItemDisc item={unitItem(unit)} size={40} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-[15px] font-semibold">{unit.label}</div>
-        <div className="truncate text-xs text-slate-400">
+        <div className="truncate text-xs text-muted-foreground">
           {words(unit.status)}
           {unit.assignedTo ? ` → ${unit.assignedTo}${taskRef}` : " · no task"}
           {unit.distanceKm ? ` · ${unit.distanceKm.toFixed(1)} km` : ""}
@@ -768,7 +768,7 @@ export default function FieldApp() {
             <ItemDisc item={picked} size={40} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-[15px] font-semibold">{picked.title}</div>
-              <div className="truncate text-xs text-slate-400">
+              <div className="truncate text-xs text-muted-foreground">
                 {kindLabel(picked)}
                 {origin ? ` · ${formatMetres(metresBetween(origin, picked.location))} ${compass(origin, picked.location)}` : ""}
                 {picked.status ? ` · ${words(picked.status)}` : ""}
@@ -776,7 +776,7 @@ export default function FieldApp() {
               </div>
             </div>
             <button type="button" aria-label="Close" onClick={() => setSelectedKey(null)}
-                    className="grid size-8 shrink-0 place-items-center rounded-full text-slate-400 hover:bg-white/10">
+                    className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted">
               <X className="size-4" />
             </button>
           </div>
@@ -817,7 +817,7 @@ export default function FieldApp() {
           </div>
         </>
       ) : (
-        <p className="py-1 text-xs text-slate-400">
+        <p className="py-1 text-xs text-muted-foreground">
           {state ? "No units for this operator. Sign in as a field operator." : "Loading your units…"}
         </p>
       )}
@@ -829,7 +829,7 @@ export default function FieldApp() {
       {unit && (unit.steps?.length ?? 0) > 0 ? (
         <div className="space-y-2">
           <div className="text-sm font-semibold">{unit.label} to {unit.assignedTo}</div>
-          <div className="text-xs text-slate-400">
+          <div className="text-xs text-muted-foreground">
             {unit.distanceKm ? `${unit.distanceKm.toFixed(1)} km` : ""}
             {unit.etaModel ? ` · ${Math.round(unit.etaModel.p50)} min (90% within ${Math.round(unit.etaModel.p90)})`
               : unit.etaMinutes ? ` · about ${unit.etaMinutes} min` : ""}
@@ -857,10 +857,10 @@ export default function FieldApp() {
               </>
             )}
           </div>
-          <ol className="space-y-1 rounded-2xl bg-white/[0.04] p-3">
+          <ol className="space-y-1 rounded-2xl bg-muted/70 p-3">
             {unit.steps!.slice(0, 12).map((st, i) => (
-              <li key={i} className={`flex gap-2 text-xs ${step && step.index === i ? "font-semibold text-white" : step && i < step.index ? "text-slate-500" : ""}`}>
-                <span className="w-14 shrink-0 tabular-nums text-slate-400">
+              <li key={i} className={`flex gap-2 text-xs ${step && step.index === i ? "font-semibold text-foreground" : step && i < step.index ? "text-muted-foreground/80" : ""}`}>
+                <span className="w-14 shrink-0 tabular-nums text-muted-foreground">
                   {st.distanceM >= 1000 ? `${(st.distanceM / 1000).toFixed(1)} km` : `${st.distanceM} m`}
                 </span>
                 <span>{st.instruction}</span>
@@ -871,7 +871,7 @@ export default function FieldApp() {
       ) : unit ? (
         <div className="space-y-2">
           {unitSummary}
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-muted-foreground">
             {unit.assignedTo
               ? "No street directions for this task yet. The line on the map is the direct line, not a road."
               : "This unit has no task. The control room assigns one; it appears here and on the map."}
@@ -888,7 +888,7 @@ export default function FieldApp() {
       ) : null}
 
       {picked && picked.kind !== "unit" && (
-        <div className="space-y-1.5 border-t border-white/10 pt-3">
+        <div className="space-y-1.5 border-t border-border pt-3">
           <SectionLabel>Selected</SectionLabel>
           <DetailRow label="Type">{kindLabel(picked)}</DetailRow>
           <DetailRow label="Distance">
@@ -926,7 +926,7 @@ export default function FieldApp() {
       {/* Report what is in front of you. The most credible reporters in the
           city could see things and had nowhere to put them. */}
       <div className="flex items-center gap-2 text-sm font-semibold"><MapPin className="size-4" /> Report a hazard here</div>
-      <div className="text-xs text-slate-400">
+      <div className="text-xs text-muted-foreground">
         <GpsLine
           gps={gps}
           fixAgeS={fixAgeS}
@@ -951,7 +951,7 @@ export default function FieldApp() {
             onClick={() => setHazardCat(hazardCat === c.id ? "" : c.id)}
             className={
               "rounded-full border px-3 py-1.5 text-sm " +
-              (hazardCat === c.id ? "border-white/40 bg-white/15 font-medium" : "border-white/10")
+              (hazardCat === c.id ? "border-primary/40 bg-accent text-accent-foreground font-medium" : "border-border")
             }
           >
             {c.displayName}
@@ -972,10 +972,10 @@ export default function FieldApp() {
                 ? " — merged into an incident already open there"
                 : " — held, no incident"}
           </div>
-          <div className="text-slate-400">
+          <div className="text-muted-foreground">
             Trust {filed.trust.toFixed(2)} · {filed.trustStatus.replace(/_/g, " ")}
           </div>
-          <div className="text-slate-400">{filed.readHow}</div>
+          <div className="text-muted-foreground">{filed.readHow}</div>
         </div>
       )}
     </div>
@@ -993,7 +993,7 @@ export default function FieldApp() {
       )}
       <div className="space-y-2">
         <div className="flex items-center gap-2 text-sm font-semibold"><Radio className="size-4" /> Report status</div>
-        <div className="text-xs text-slate-400">
+        <div className="text-xs text-muted-foreground">
           {unit ? `${unit.label} — ${unit.status.replace(/_/g, " ")}` : "Pick a unit"}
           {unit?.unavailableReason && ` (${unit.unavailableReason})`}
         </div>
@@ -1014,17 +1014,17 @@ export default function FieldApp() {
       </div>
       <div className="space-y-2">
         <div className="text-sm font-semibold">Facilities</div>
-        <p className="text-xs text-slate-400">Declaring one full stops the citizen agent sending anyone there.</p>
+        <p className="text-xs text-muted-foreground">Declaring one full stops the citizen agent sending anyone there.</p>
         {[...(state?.facilities ?? [])]
           .sort((a, b) => (picked?.key === `facility:${b.id}` ? 1 : 0) - (picked?.key === `facility:${a.id}` ? 1 : 0))
           .slice(0, 6)
           .map((f) => (
-            <div key={f.id} className={`rounded-xl border p-2 text-xs ${picked?.key === `facility:${f.id}` ? "border-white/30" : "border-white/10"}`}>
+            <div key={f.id} className={`rounded-xl border p-2 text-xs ${picked?.key === `facility:${f.id}` ? "border-primary/50" : "border-border"}`}>
               <div className="flex items-center gap-2">
                 <button type="button" className="font-medium hover:underline" onClick={() => select(facilityItem(f))}>{f.name}</button>
                 <Badge variant={f.status === "full" ? "destructive" : "outline"}>{f.status}</Badge>
                 {f.capacity ? (
-                  <span className="ml-auto text-slate-400">
+                  <span className="ml-auto text-muted-foreground">
                     {Math.max(0, f.capacity - (f.occupancy ?? 0))}/{f.capacity} free
                   </span>
                 ) : null}
@@ -1060,7 +1060,7 @@ export default function FieldApp() {
           />
         ))}
         {state?.units.length === 0 && (
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-muted-foreground">
             No units for this operator. Sign in as a field operator, or pass
             <code className="mx-1">?operator=</code>.
           </p>
@@ -1080,18 +1080,18 @@ export default function FieldApp() {
                 className={
                   "space-y-1.5 rounded-xl border p-2.5 " +
                   (closed ? "border-emerald-500/40 bg-emerald-500/5"
-                    : held ? "border-amber-500/40 bg-amber-500/5" : "border-white/10")
+                    : held ? "border-amber-500/40 bg-amber-500/5" : "border-border")
                 }
               >
                 <p className="line-clamp-2 text-xs">{r.text}</p>
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
                   <Badge variant="outline" className="font-normal">{r.readAs.replace(/_/g, " ")}</Badge>
                   {r.trust !== null && (
-                    <span className="text-slate-400">
+                    <span className="text-muted-foreground">
                       trust {trustWords(r.trust)}<span className="tabular-nums"> ({r.trust.toFixed(2)})</span>
                     </span>
                   )}
-                  <span className="text-slate-400">
+                  <span className="text-muted-foreground">
                     {new Date(r.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })}
                   </span>
                   {onMap && (
@@ -1112,9 +1112,9 @@ export default function FieldApp() {
                     <p>
                       {closed ? "Closed: " : "On "}
                       <span className="font-medium">{r.incidentTitle}</span>
-                      {r.incidentSeverity != null && <span className="text-slate-400"> · severity {r.incidentSeverity}</span>}
+                      {r.incidentSeverity != null && <span className="text-muted-foreground"> · severity {r.incidentSeverity}</span>}
                     </p>
-                    <p className="text-slate-400">
+                    <p className="text-muted-foreground">
                       {r.reportCount > 1 ? `${r.reportCount} reports on it` : "the only report on it"}
                       {" · "}
                       {closed
@@ -1126,7 +1126,7 @@ export default function FieldApp() {
                     </p>
                   </div>
                 ) : (
-                  <p className="text-xs text-slate-400">Filed, not yet on an incident. The next plan will look at it.</p>
+                  <p className="text-xs text-muted-foreground">Filed, not yet on an incident. The next plan will look at it.</p>
                 )}
               </div>
             )
@@ -1137,18 +1137,18 @@ export default function FieldApp() {
       <div className="space-y-1">
         <SectionLabel>Unit status changes</SectionLabel>
         {state?.recent.slice(0, 10).map((r, i) => (
-          <div key={i} className="text-xs text-slate-400">
-            <span className="font-medium text-slate-200">{r.subjectId}</span> · {r.statusKind.replace(/_/g, " ")}
+          <div key={i} className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">{r.subjectId}</span> · {r.statusKind.replace(/_/g, " ")}
             {r.note && ` — ${r.note}`}
           </div>
         ))}
-        {state?.recent.length === 0 && <p className="text-xs text-slate-400">Nothing reported yet.</p>}
+        {state?.recent.length === 0 && <p className="text-xs text-muted-foreground">Nothing reported yet.</p>}
       </div>
 
       {/* The two crew accounts, on the crew screen: Fire Brigade and PMC
           Drainage see different units, and switching is how anyone sees that. */}
       <DemoCredentials portal="field" title="Demo crew sign-ins" />
-      <a href="/login" className="block text-xs text-slate-400 underline">Sign in</a>
+      <a href="/login" className="block text-xs text-muted-foreground underline">Sign in</a>
     </div>
   )
 
@@ -1188,11 +1188,11 @@ export default function FieldApp() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-base font-semibold">Field</div>
-            <div className="text-xs text-slate-400">
+            <div className="text-xs text-muted-foreground">
               {state?.operator ?? "All agencies"} · {state?.units.length ?? 0} unit(s)
             </div>
           </div>
-          <a href="/login" className="text-xs text-slate-400 underline">Sign in</a>
+          <a href="/login" className="text-xs text-muted-foreground underline">Sign in</a>
         </div>
       }
       map={(padding) => (

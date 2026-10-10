@@ -158,7 +158,7 @@ export default function AgencyHandoff() {
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="grid gap-4 md:grid-cols-3">
         <Card className={shortfalls.length ? "border-destructive/50" : undefined}>
           <CardHeader className="pb-3">

@@ -9,6 +9,7 @@ import type { DemoState } from "@/routes/demo/useDemo"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useMeshStatus } from "./meshApi"
 import { isOpen, type Zone } from "./zones"
+import { StatCard, useSeries } from "@/components/common/StatCard"
 
 /** Everything the system knows, as charts, each with a jump to where it is acted on.
  *
@@ -60,17 +61,10 @@ function Stat({ label, value, sub, to, warn }: {
   label: string; value: string | number; sub?: string; to: string; warn?: boolean
 }) {
   const navigate = useNavigate()
+  const series = useSeries(`wall:${label}`, parseFloat(String(value)))
   return (
-    <button
-      onClick={() => navigate(to)}
-      className={`bg-card hover:border-primary rounded-lg border p-3 text-left transition-colors ${
-        warn ? "border-amber-500/60" : ""
-      }`}
-    >
-      <div className="text-muted-foreground text-xs">{label}</div>
-      <div className="text-2xl font-semibold tabular-nums">{value}</div>
-      {sub && <div className="text-muted-foreground text-[11px]">{sub}</div>}
-    </button>
+    <StatCard label={label} value={value} sub={sub} series={series}
+              tone={warn ? "warn" : undefined} onClick={() => navigate(to)} />
   )
 }
 

@@ -179,34 +179,34 @@ try {
  *  might rewrite. */
 const POPUP_CSS = `
 .indra-pop .mapboxgl-popup-content {
-  background: rgb(9 12 20 / 0.96);
-  color: #e6edf7;
-  border: 1px solid rgb(148 163 184 / 0.28);
-  border-radius: 10px;
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid #e8eaef;
+  border-radius: 12px;
   padding: 10px 12px;
-  box-shadow: 0 10px 30px rgb(0 0 0 / 0.45);
+  box-shadow: 0 8px 24px rgb(16 24 40 / 0.12);
   max-width: 320px;
   font: 12px/1.45 ui-sans-serif, system-ui, sans-serif;
 }
 .indra-pop .mapboxgl-popup-tip { display: none; }
-.indra-pop .ip-title { font-size: 13px; font-weight: 600; color: #fff; }
-.indra-pop .ip-sub { color: #93a4bd; margin-top: 1px; }
+.indra-pop .ip-title { font-size: 13px; font-weight: 600; color: #111827; }
+.indra-pop .ip-sub { color: #6b7280; margin-top: 1px; }
 .indra-pop .ip-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 3px; }
-.indra-pop .ip-row span:first-child { color: #93a4bd; }
-.indra-pop .ip-row span:last-child { color: #e6edf7; font-variant-numeric: tabular-nums; }
+.indra-pop .ip-row span:first-child { color: #6b7280; }
+.indra-pop .ip-row span:last-child { color: #111827; font-variant-numeric: tabular-nums; }
 .indra-pop .ip-chip {
   display: inline-block; padding: 1px 7px; border-radius: 999px;
   font-size: 11px; font-weight: 500; margin-top: 6px;
 }
-.indra-pop .ip-hr { border-top: 1px solid rgb(148 163 184 / 0.2); margin: 8px 0 6px; }
-.indra-pop .ip-head { color: #93a4bd; font-size: 10.5px; letter-spacing: .06em;
+.indra-pop .ip-hr { border-top: 1px solid #eef0f3; margin: 8px 0 6px; }
+.indra-pop .ip-head { color: #6b7280; font-size: 10.5px; letter-spacing: .06em;
   text-transform: uppercase; }
 .indra-pop .ip-act { display: flex; gap: 7px; margin-top: 4px; }
-.indra-pop .ip-act i { color: #64748b; font-style: normal; flex: none;
+.indra-pop .ip-act i { color: #9ca3af; font-style: normal; flex: none;
   font-variant-numeric: tabular-nums; }
-.indra-pop .ip-act span { color: #cbd5e1; }
-.indra-pop .ip-warn { color: #fca5a5; }
-.indra-pop .ip-ok { color: #86efac; }
+.indra-pop .ip-act span { color: #374151; }
+.indra-pop .ip-warn { color: #b91c1c; }
+.indra-pop .ip-ok { color: #15803d; }
 .indra-pulse { width: 28px; height: 28px; pointer-events: none; }
 .indra-pulse::before, .indra-pulse::after {
   content: ""; position: absolute; inset: 0; border-radius: 999px;

@@ -62,7 +62,7 @@ export default function MeshDevices() {
   }
 
   return (
-    <div className="space-y-4 p-4 md:p-6">
+    <div className="space-y-6 p-4 md:p-6">
       {error && (
         <Card className="border-destructive/50 p-4 text-sm">
           Could not read the mesh status: {error}

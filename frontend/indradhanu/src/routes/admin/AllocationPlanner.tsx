@@ -94,7 +94,7 @@ export default function AllocationPlanner() {
   const shortBy = unmet.reduce((n, x) => n + (x.required - x.met), 0)
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-wrap items-center gap-2">
         <Button
           onClick={() => run("replan", "/demo/replan")}

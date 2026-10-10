@@ -4,6 +4,7 @@ import { request } from "@/api/httpClient"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { StatCard } from "@/components/common/StatCard"
 
 /** The models, in the open: how each did on held-out storms against the simpler
  *  baselines, what they changed for crews on the road and in the scenario
@@ -42,9 +43,8 @@ export default function ModelsPage() {
   const P = d.passability?.results
   const pm = d.meta.passability
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">Models</h1>
         <p className="text-sm text-muted-foreground">
           Road passability at arrival time and response ETA. Trained on simulated storms 2015–21 (weather and river
           drivers from ERA5 and GloFAS), tuned and calibrated on 2022, tested once on 2023–26. Every result below is on
@@ -201,12 +201,6 @@ export default function ModelsPage() {
   )
 }
 
-function Stat({ icon: Icon, label, value, sub }: { icon: typeof Brain; label: string; value: string; sub: string }) {
-  return (
-    <Card>
-      <CardHeader className="pb-1"><CardDescription className="flex items-center gap-1.5"><Icon className="size-4" /> {label}</CardDescription>
-        <CardTitle className="truncate text-xl tabular-nums">{value}</CardTitle></CardHeader>
-      <CardContent className="pb-4 text-xs text-muted-foreground">{sub}</CardContent>
-    </Card>
-  )
+function Stat({ icon, label, value, sub }: { icon: typeof Brain; label: string; value: string; sub: string }) {
+  return <StatCard icon={icon} label={label} value={value} sub={sub} />
 }
