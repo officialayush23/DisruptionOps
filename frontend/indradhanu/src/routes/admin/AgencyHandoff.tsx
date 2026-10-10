@@ -158,8 +158,8 @@ export default function AgencyHandoff() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="grid gap-4 md:grid-cols-3">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
+      <div className="grid gap-5 md:grid-cols-3">
         <Card className={shortfalls.length ? "border-destructive/50" : undefined}>
           <CardHeader className="pb-3">
             <CardDescription>Needs nobody is covering</CardDescription>
@@ -192,7 +192,7 @@ export default function AgencyHandoff() {
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">

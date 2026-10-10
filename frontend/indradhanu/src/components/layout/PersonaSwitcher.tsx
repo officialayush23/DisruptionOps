@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { useAuth } from "@/auth/AuthProvider"
 
 const PERSONAS = [
-  { id: "admin", label: "Administration", short: "Admin", to: "/admin/risk", icon: Building2 },
+  { id: "admin", label: "Administration", short: "Admin", to: "/admin/wall", icon: Building2 },
   { id: "citizen", label: "Citizen", short: "Citizen", to: "/citizen", icon: User },
   { id: "field", label: "Field operator", short: "Field", to: "/field", icon: HardHat },
 ]

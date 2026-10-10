@@ -173,8 +173,8 @@ export default function IntakeInbox() {
   const merged = counts.merged ?? 0
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="grid gap-4 md:grid-cols-4">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
+      <div className="grid gap-5 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Reports received</CardDescription>
@@ -289,7 +289,7 @@ export default function IntakeInbox() {
                 </button>
 
                 {expanded && (
-                  <CardContent className="grid gap-4 border-t pt-3 md:grid-cols-2">
+                  <CardContent className="grid gap-5 border-t pt-3 md:grid-cols-2">
                     <div className="space-y-3">
                       <div>
                         <div className="text-muted-foreground mb-1 text-xs font-medium uppercase tracking-wide">

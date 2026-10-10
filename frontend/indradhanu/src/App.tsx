@@ -27,6 +27,8 @@ import Replay from "@/routes/admin/Replay"
 import Architecture from "@/routes/admin/Architecture"
 import LiveFeed from "@/routes/admin/LiveFeed"
 import CommandWall from "@/routes/admin/CommandWall"
+import ZonePage from "@/routes/admin/ZonePage"
+import ZoneAgents from "@/routes/admin/ZoneAgents"
 import AgentGraph from "@/routes/admin/AgentGraph"
 import IncidentResponse from "@/routes/admin/IncidentResponse"
 import MeshDevices from "@/routes/admin/MeshDevices"
@@ -68,6 +70,8 @@ export function App() {
             <AdminShell>
               <Routes>
                 <Route path="wall" element={<CommandWall />} />
+                <Route path="wall/zone/:zoneId" element={<ZonePage />} />
+                <Route path="wall/zone/:zoneId/agents" element={<ZoneAgents />} />
                 <Route path="console" element={<DemoConsole />} />
                 <Route path="copilot" element={<Copilot />} />
                 {/* Who is going where. It was only on the map, which answers

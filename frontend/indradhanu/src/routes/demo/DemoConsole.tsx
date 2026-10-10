@@ -93,7 +93,7 @@ export default function DemoConsole() {
   const merged = state.incidents.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-center gap-2">
         {!state.running ? (
           <Button onClick={() => run("start", "/demo/start", { cityId: "pune", region: region.id, reportEveryTicks: 4 })}

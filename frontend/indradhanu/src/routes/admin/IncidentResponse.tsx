@@ -91,7 +91,7 @@ export default function IncidentResponse() {
   const select = (id: string) => setParams({ incident: id }, { replace: true })
 
   return (
-    <div className="grid h-full min-h-0 gap-4 p-4 md:p-6 lg:grid-cols-[minmax(280px,380px)_1fr]">
+    <div className="grid h-full min-h-0 gap-6 p-5 md:p-8 xl:px-10 lg:grid-cols-[minmax(280px,380px)_1fr]">
       <div className="flex min-h-0 flex-col gap-2">
         <div className="flex items-center gap-2">
           <div className="relative flex-1">

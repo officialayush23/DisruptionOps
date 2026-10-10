@@ -126,8 +126,8 @@ export default function ResourcesPage() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="grid gap-4 md:grid-cols-4">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
+      <div className="grid gap-5 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Units in fleet</CardDescription>
@@ -244,7 +244,7 @@ export default function ResourcesPage() {
               assignments, not a separate logistics system.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <CardContent className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
             {stock.map(([item, qty]) => (
               <div key={item} className="rounded-md border p-2">
                 <div className="text-muted-foreground text-xs">{pretty(item)}</div>

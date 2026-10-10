@@ -119,7 +119,7 @@ export default function AfterAction() {
   // question that gets asked before the demo starts at least as often as after.
   if (!state.events.length) {
     return (
-      <div className="space-y-6 p-4 md:p-6">
+      <div className="space-y-8 p-5 md:p-8 xl:px-10">
         <Empty
           icon={<History className="text-muted-foreground size-8" />}
           title="Nothing to review yet"
@@ -131,8 +131,8 @@ export default function AfterAction() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="grid gap-4 md:grid-cols-4">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
+      <div className="grid gap-5 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Decisions</CardDescription>

@@ -75,7 +75,7 @@ export default function DecisionGate() {
   const waiting = counts.get("awaiting_approval") ?? 0
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       {waiting > 0 && (
         <Card className="border-destructive/50">
           <CardHeader className="pb-3">

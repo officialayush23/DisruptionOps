@@ -123,7 +123,7 @@ export default function UnitsPage() {
   const rerouted = (units.data ?? []).reduce((n, u) => n + (u.reroutes || 0), 0)
 
   return (
-    <div className="flex flex-col gap-6 p-4 md:p-6">
+    <div className="flex flex-col gap-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">
@@ -157,7 +157,7 @@ export default function UnitsPage() {
         </TabsList>
 
         <TabsContent value="units" className="mt-3">
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
             <Card className="min-w-0">
               <CardHeader className="gap-3 pb-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -455,7 +455,7 @@ function SitesBoard({ region }: { region: "pune" | "ncr" }) {
   })
   const sel = sites.data?.find((s) => s.id === pick)
   return (
-    <div className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
+    <div className="grid gap-5 xl:grid-cols-[1.3fr_1fr]">
       <Card>
         <CardHeader className="flex-row items-center justify-between pb-2">
           <div><CardTitle className="text-base">Sites</CardTitle>

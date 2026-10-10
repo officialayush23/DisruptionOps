@@ -107,7 +107,7 @@ export default function IncidentQueue() {
   const merged = rows.reduce((n, i) => n + Math.max(0, i.reportCount - 1), 0)
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-center gap-2">
         <Input
           value={query}

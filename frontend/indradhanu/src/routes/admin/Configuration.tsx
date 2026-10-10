@@ -162,7 +162,7 @@ export default function Configuration() {
 
   if (!data) {
     return (
-      <div className="p-6">
+      <div className="p-5 md:p-8 xl:px-10">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
@@ -176,7 +176,7 @@ export default function Configuration() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-1">
           {TABS.map(([k, label, Icon]) => (
@@ -220,7 +220,7 @@ export default function Configuration() {
 
       {/* ------------------------------------------------------------ city */}
       {tab === "city" && (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-5 lg:grid-cols-2">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">Deployments</CardTitle>
@@ -298,7 +298,7 @@ export default function Configuration() {
 
       {/* ----------------------------------------------------------- wards */}
       {tab === "wards" && (
-        <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+        <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
           <Card className="min-w-0">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">
@@ -400,7 +400,7 @@ export default function Configuration() {
             ))}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+          <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
             <Card className="min-w-0">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm">{data.resources.length} units</CardTitle>
@@ -512,7 +512,7 @@ export default function Configuration() {
             ))}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+          <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
             <Card className="min-w-0">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm">{data.lifelines.length} facilities</CardTitle>
@@ -623,7 +623,7 @@ export default function Configuration() {
 
       {/* ---------------------------------------------------------- people */}
       {tab === "people" && (
-        <div className="grid gap-4 lg:grid-cols-[1fr_380px]">
+        <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
           <Card className="min-w-0">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">{data.people.length} accounts</CardTitle>

@@ -73,8 +73,8 @@ export default function RiskBoard() {
   const atRisk = rows.reduce((n, r) => n + (r.populationAtRisk ?? 0), 0)
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="grid gap-4 md:grid-cols-3">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
+      <div className="grid gap-5 md:grid-cols-3">
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Wards scored</CardDescription>
@@ -137,7 +137,7 @@ export default function RiskBoard() {
         </Card>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+      <div className="grid gap-5 lg:grid-cols-[420px_1fr]">
         <Card className="min-w-0">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">

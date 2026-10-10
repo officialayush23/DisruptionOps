@@ -74,11 +74,13 @@ const Empty = ({ text }: { text: string }) => (
 
 const pretty = (s: string) => s.replace(/_/g, " ")
 
-export default function WallAnalytics({ zones, now, state, scope, onClearScope }: {
+export default function WallAnalytics({ zones, now, state, scope, onClearScope, stats = true }: {
   zones: Zone[]; now: number; state: DemoState
   /** The zone whose screen is selected, or null for the whole city. */
   scope: Zone | null
   onClearScope: () => void
+  /** The headline number row; a zone page has its own. */
+  stats?: boolean
 }) {
   const { data: mesh } = useMeshStatus(5000)
 
@@ -199,9 +201,9 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
   const unattended = d.open.filter((i) => !i.unitsEnRoute).length
 
   return (
-    <section className="space-y-3">
+    <section className="space-y-5">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-semibold">Analytics</h2>
+        <h2 className="text-base font-semibold tracking-tight">Analytics</h2>
         {scope ? (
           <>
             <span className="rounded-md bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-800 dark:text-sky-300">
@@ -218,7 +220,7 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+      {stats && <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Open incidents" value={d.open.length} sub={`${zones.length} zones`} to="/admin/response" />
         <Stat label="Nobody assigned" value={unattended} to="/admin/response" warn={unattended > 0} />
         <Stat label="Units committed" value={`${d.committed}/${state.resources.length}`} to="/admin/dispatch" />
@@ -227,9 +229,9 @@ export default function WallAnalytics({ zones, now, state, scope, onClearScope }
         <Stat label="Waiting approval" value={d.waiting} to="/admin/decisions" warn={d.waiting > 0} />
         <Stat label="Alerts out" value={state.alerts.length} sub={`${d.reach.toLocaleString()} reached`} to="/admin/alerts" />
         <Stat label="Mesh gateways" value={gateways} sub="linked now" to="/admin/mesh" warn={gateways === 0} />
-      </div>
+      </div>}
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
         <Panel title="Open incidents by severity" sub="S5 critical → S1 minor" to="/admin/response" cta="Incidents & response">
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={d.bySeverity} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>

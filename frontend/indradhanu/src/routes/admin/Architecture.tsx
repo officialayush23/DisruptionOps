@@ -170,7 +170,7 @@ export default function Architecture() {
   }, [state])
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <p className="text-muted-foreground max-w-2xl text-sm">
@@ -415,7 +415,7 @@ export default function Architecture() {
 
       {/* The claims the diagram makes, each with the thing that backs it, so a
           judge can check one rather than take six on trust. */}
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-5 md:grid-cols-3">
         <Card>
           <CardHeader className="pb-3">
             <CardDescription>Audit spine</CardDescription>

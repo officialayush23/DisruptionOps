@@ -19,6 +19,67 @@ export type Zone = {
   center: [number, number]
   radiusKm: number
   since: number
+  /** Hazard groups present among the zone's open incidents. */
+  hazards: Hazard[]
+  /** Open incidents where a life is directly at stake: casualties, people
+   *  stranded, fire, collapse, evacuation. */
+  lifeSafety: number
+  /** The ward's own estimate of people at risk (from the hazard agent), or null
+   *  when the ward has not been scored. */
+  exposed: number | null
+  needsTotal: number
+  needsMet: number
+  /** Units working this zone that are already on scene. */
+  onScene: number
+  allocation: Allocation
+  /** 0-100, how urgently this zone needs attention. See `riskIndex`. */
+  risk: number
+}
+
+/** Where the allocation for a zone stands, in the order an officer worries. */
+export type Allocation = "unassigned" | "partial" | "enroute" | "covered"
+export const ALLOCATION: Record<Allocation, { label: string; tone: string; dot: string }> = {
+  unassigned: { label: "Nobody assigned", tone: "bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/15 dark:text-red-300 dark:ring-red-500/30", dot: "bg-red-500" },
+  partial: { label: "Partly covered", tone: "bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-500/30", dot: "bg-amber-500" },
+  enroute: { label: "Units en route", tone: "bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-500/15 dark:text-blue-300 dark:ring-blue-500/30", dot: "bg-blue-500" },
+  covered: { label: "Covered", tone: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30", dot: "bg-emerald-500" },
+}
+
+/** Incident categories, grouped the way an officer filters them. */
+export type Hazard = "flood" | "fire" | "structure" | "trees" | "heat" | "people" | "other"
+export const HAZARD_OF: Record<string, Hazard> = {
+  flooded_road: "flood", waterlogging: "flood", blocked_drain: "flood", flood: "flood",
+  fire: "fire",
+  structural_damage: "structure", earthquake_damage: "structure", collapse: "structure",
+  fallen_tree: "trees", power_line: "trees", tree: "trees",
+  heat_casualty: "heat", air_quality: "heat",
+  person_stranded: "people", evacuation: "people", shelter_full: "people", traffic_corridor: "people",
+}
+export const hazardOf = (category: string): Hazard => HAZARD_OF[category] ?? "other"
+export const HAZARD_LABEL: Record<Hazard, string> = {
+  flood: "Flood", fire: "Fire", structure: "Structural", trees: "Trees & power",
+  heat: "Heat & air", people: "People", other: "Other",
+}
+const LIFE = new Set([
+  "heat_casualty", "person_stranded", "fire", "structural_damage", "earthquake_damage", "evacuation", "collapse",
+])
+export const isLifeSafety = (category: string) => LIFE.has(category)
+
+/** How urgently a zone needs attention, 0-100.
+ *
+ *    50  worst severity (S5 = 50)
+ *    25  incidents where a life is at stake (5 or more = 25)
+ *    15  people the ward estimates are at risk (20,000 or more = 15)
+ *    10  incidents nobody is on the way to yet (3 or more = 10)
+ *
+ *  Fixed weights, not learned: an officer can check the arithmetic. */
+export function riskIndex(z: Pick<Zone, "severity" | "lifeSafety" | "exposed" | "unattended">): number {
+  return Math.round(
+    (z.severity / 5) * 50 +
+    (Math.min(z.lifeSafety, 5) / 5) * 25 +
+    Math.min((z.exposed ?? 0) / 20000, 1) * 15 +
+    (Math.min(z.unattended, 3) / 3) * 10,
+  )
 }
 
 export const isOpen = (status: string) => !/resolved|closed|cancel/i.test(status)
@@ -35,6 +96,7 @@ export function km(a: [number, number], b: [number, number]): number {
 
 export function zonesOf(state: DemoState): Zone[] {
   const wardName = new Map(state.wards.map((w) => [w.id, w.name]))
+  const wardExposed = new Map(state.wards.map((w) => [w.id, w.populationAtRisk]))
   const wardCentre = new Map(state.wards.map((w) => [w.id, w.centroid]))
   const byWard = new Map<string, Incident[]>()
   for (const i of state.incidents) {
@@ -51,22 +113,51 @@ export function zonesOf(state: DemoState): Zone[] {
     const center: [number, number] =
       Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : (wardCentre.get(id) ?? [0, 0])
     const radiusKm = Math.max(0.6, ...incidents.map((i) => km(center, i.location)))
+    const ids = new Set(incidents.map((i) => i.id))
+    const needs = state.needs.filter((x) => ids.has(x.incidentId))
+    const needsTotal = needs.reduce((s, x) => s + x.required, 0)
+    const needsMet = needs.reduce((s, x) => s + Math.min(x.met, x.required), 0)
+    const working = state.resources.filter((r) => r.incidentId && ids.has(r.incidentId))
+    const onScene = working.filter((r) => /on_site|on_scene/.test(r.status) || r.assignmentStatus === "on_site").length
+    const unitsEnRoute = incidents.reduce((s, i) => s + (i.unitsEnRoute || 0), 0)
+    const busy = new Set(working.map((r) => r.incidentId))
+    // No allocation: nobody driving to it and nobody on scene.
+    const unattended = incidents.filter((i) => !i.unitsEnRoute && !busy.has(i.id)).length
+    const allocation: Allocation =
+      unitsEnRoute === 0 && onScene === 0 ? "unassigned"
+      : unattended > 0 ? "partial"
+      : needsTotal > 0 && needsMet >= needsTotal && onScene > 0 ? "covered"
+      : "enroute"
+    const lifeSafety = incidents.filter((i) => isLifeSafety(i.category)).length
+    const exposed = wardExposed.get(id) ?? null
+    const severity = Math.max(...incidents.map((i) => i.severity))
     zones.push({
       id,
       name: wardName.get(id) ?? id,
       incidents: [...incidents].sort((a, b) => b.severity - a.severity),
-      severity: Math.max(...incidents.map((i) => i.severity)),
+      severity,
       reports: incidents.reduce((s, i) => s + (i.reportCount || 0), 0),
-      unitsEnRoute: incidents.reduce((s, i) => s + (i.unitsEnRoute || 0), 0),
-      unattended: incidents.filter((i) => !i.unitsEnRoute).length,
+      unitsEnRoute,
+      unattended,
       center,
       radiusKm,
       since: Math.min(...incidents.map((i) => Date.parse(i.createdAt) || Date.now())),
+      hazards: [...new Set(incidents.map((i) => hazardOf(i.category)))],
+      lifeSafety,
+      exposed,
+      needsTotal,
+      needsMet,
+      onScene,
+      allocation,
+      risk: riskIndex({ severity, lifeSafety, exposed, unattended }),
     })
   }
-  // Worst first; ties by how long it has been going on, so positions are stable.
+  // Riskiest first: the index, then lives at stake, then people exposed; ties
+  // by how long it has been going on, so positions are stable.
   return zones.sort(
-    (a, b) => b.severity - a.severity || b.incidents.length - a.incidents.length || a.since - b.since,
+    (a, b) =>
+      b.risk - a.risk || b.lifeSafety - a.lifeSafety || (b.exposed ?? 0) - (a.exposed ?? 0) ||
+      b.incidents.length - a.incidents.length || a.since - b.since,
   )
 }
 

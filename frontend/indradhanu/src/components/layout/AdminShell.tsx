@@ -366,7 +366,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider>
       <Sidebar collapsible="icon" className="border-r border-sidebar-border">
-        <SidebarHeader className="px-3 pt-5 pb-3">
+        <SidebarHeader className="px-4 pt-6 pb-4">
           <div className="flex items-center gap-2.5 px-1">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground shadow-sm">
               IN
@@ -380,7 +380,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
           </div>
         </SidebarHeader>
 
-        <SidebarContent className="gap-1 px-1">
+        <SidebarContent className="gap-1.5 px-2 pb-4">
           {GROUPS.map((group) => (
             <SidebarGroup
               key={group}
@@ -458,7 +458,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
       </Sidebar>
 
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border/60 bg-background/85 px-4 backdrop-blur md:px-6">
+        <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-border/60 bg-background/85 px-5 backdrop-blur md:px-8 xl:px-10">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />
           <div className="flex min-w-0 items-center gap-2">
@@ -522,7 +522,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="min-w-0 flex-1 overflow-auto bg-background">
-          <div className="px-4 pt-3 md:px-6 empty:hidden">
+          <div className="px-5 pt-4 md:px-8 xl:px-10 empty:hidden">
             <AutonomyControl />
           </div>
           {children}

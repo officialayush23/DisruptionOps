@@ -43,7 +43,7 @@ export default function ModelsPage() {
   const P = d.passability?.results
   const pm = d.meta.passability
   return (
-    <div className="flex flex-col gap-6 p-4 md:p-6">
+    <div className="flex flex-col gap-8 p-5 md:p-8 xl:px-10">
       <div>
         <p className="text-sm text-muted-foreground">
           Road passability at arrival time and response ETA. Trained on simulated storms 2015–21 (weather and river
@@ -119,7 +119,7 @@ export default function ModelsPage() {
         <Card>
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Clock className="size-4" /> Response ETA (P50 to plan, P90 to promise)</CardTitle>
             <CardDescription>{d.eta.test.toLocaleString()} test trips · used live in dispatch, the field app and the Units page</CardDescription></CardHeader>
-          <CardContent className="grid gap-4 p-0 md:grid-cols-[1.4fr_1fr]">
+          <CardContent className="grid gap-5 p-0 md:grid-cols-[1.4fr_1fr]">
             <Table>
               <TableHeader><TableRow><TableHead>Estimate</TableHead><TableHead>Mean error</TableHead><TableHead>Within 5 min</TableHead><TableHead>P90 covers</TableHead></TableRow></TableHeader>
               <TableBody>

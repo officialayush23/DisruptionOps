@@ -75,7 +75,7 @@ export function SurgeOperations({ ops, level, region }: { ops?: Ops; level: numb
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_1.3fr]">
+      <div className="grid gap-5 xl:grid-cols-[1fr_1.3fr]">
         {/* zones */}
         <Card>
           <CardHeader className="flex-row items-center justify-between pb-2">
@@ -123,7 +123,7 @@ export function SurgeOperations({ ops, level, region }: { ops?: Ops; level: numb
         </Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-5 xl:grid-cols-3">
         {/* corridors */}
         <Card>
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4" /> Priority corridors</CardTitle>
@@ -176,7 +176,7 @@ export function SurgeOperations({ ops, level, region }: { ops?: Ops; level: numb
         </Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.3fr_1fr]">
+      <div className="grid gap-5 xl:grid-cols-[1.3fr_1fr]">
         {/* public channel */}
         <Card>
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Megaphone className="size-4" /> Public channel</CardTitle>

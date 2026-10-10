@@ -125,7 +125,7 @@ export default function Ledger() {
 
   const btn = "rounded-md border px-2.5 py-1 text-xs hover:bg-muted disabled:opacity-50"
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col gap-3 p-4 md:p-6">
+    <div className="flex h-[calc(100vh-4rem)] flex-col gap-3 p-5 md:p-8 xl:px-10">
       {/* Pane 1: status */}
       <Card className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
         <div className="flex items-center gap-2">

@@ -193,7 +193,7 @@ export default function Replay() {
   }, [data, frame])
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <p className="text-muted-foreground max-w-2xl text-sm">
@@ -326,7 +326,7 @@ export default function Replay() {
             }
           />
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-3">
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm">At {clock(frame.at)}</CardTitle>

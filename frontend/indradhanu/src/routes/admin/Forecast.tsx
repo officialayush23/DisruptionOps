@@ -72,7 +72,7 @@ export default function Forecast() {
 
   if (!f || (!f.facilities.length && !f.recurrence.length)) {
     return (
-      <div className="p-6">
+      <div className="p-5 md:p-8 xl:px-10">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
@@ -94,7 +94,7 @@ export default function Forecast() {
   )
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm">

@@ -94,7 +94,7 @@ export default function AllocationPlanner() {
   const shortBy = unmet.reduce((n, x) => n + (x.required - x.met), 0)
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-center gap-2">
         <Button
           onClick={() => run("replan", "/demo/replan")}
@@ -225,7 +225,7 @@ export default function AllocationPlanner() {
             )}
           </Card>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
             {GROUPS.map(({ key, tone }) => {
               const list = plan[key] ?? []
               return (

@@ -442,7 +442,7 @@ export default function AgentTrace() {
   }, [joined, only])
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="space-y-1.5">
         <p className="text-muted-foreground max-w-3xl text-sm">
           Every agent action, as the agent wrote it. The table below decodes each

@@ -242,10 +242,10 @@ export default function Dispatch() {
   const free = spare.filter((r) => r.status === "available").length
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       {/* Four numbers, and the only two that change a decision are the last
           two. Red is reserved for the one that means somebody is not coming. */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Units committed" value={`${assigned.length}/${state.resources.length}`} />
         <Stat label="Spare and ready" value={free} />
         <Stat
@@ -467,7 +467,7 @@ export default function Dispatch() {
         wards={state.wards}
       />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-5 lg:grid-cols-2">
         {/* --------------------------------------------------------- left -- */}
         <Card>
           <CardHeader className="pb-3">

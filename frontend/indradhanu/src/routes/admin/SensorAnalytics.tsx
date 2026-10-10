@@ -482,7 +482,7 @@ export default function SensorAnalytics() {
     .map((k) => ({ name: EVIDENCE_LABEL[k], value: Math.round((evidence[k] ?? 0) * 100) }))
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-muted-foreground text-sm">
@@ -528,7 +528,7 @@ export default function SensorAnalytics() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
+          <div className="grid gap-5 xl:grid-cols-[1fr_340px]">
             {nodes.length ? (
               <FieldMap nodes={nodes} metric={metric} selected={selected} onSelect={setSelected} />
             ) : (

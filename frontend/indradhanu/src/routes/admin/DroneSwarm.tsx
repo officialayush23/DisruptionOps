@@ -125,7 +125,7 @@ export default function DroneSwarm() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
+    <div className="space-y-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-muted-foreground text-sm">
@@ -159,7 +159,7 @@ export default function DroneSwarm() {
             <Kpi label="Placed at" value={`×${s.scale}`} sub={s.anchorSource || "—"} />
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
+          <div className="grid gap-5 xl:grid-cols-[1fr_360px]">
             <SwarmMap s={s} />
             <div className="space-y-4">
               <Card>
@@ -190,7 +190,7 @@ export default function DroneSwarm() {
             </div>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-5 lg:grid-cols-2">
             <Card>
               <CardHeader className="pb-2"><CardTitle className="text-sm">Drones</CardTitle></CardHeader>
               <CardContent>

@@ -78,7 +78,7 @@ export default function SurgePage() {
   const occ = m.shelters?.occupancy_ratio ?? 0
 
   return (
-    <div className="flex flex-col gap-6 p-4 md:p-6">
+    <div className="flex flex-col gap-8 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-sm font-medium">{region === "pune" ? "Pune" : "Ghaziabad (NCR)"}</p>
@@ -157,7 +157,7 @@ export default function SurgePage() {
 
       <SurgeOperations ops={d.operations} level={d.level} region={region} />
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-5 xl:grid-cols-2">
         <Card>
           <CardHeader className="flex-row items-center justify-between pb-2">
             <div><CardTitle className="text-base">Mutual aid</CardTitle><CardDescription>Requests the ladder made and what came of them</CardDescription></div>
@@ -205,7 +205,7 @@ export default function SurgePage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
+      <div className="grid gap-5 xl:grid-cols-[1.2fr_1fr]">
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base">Surge log</CardTitle><CardDescription>Every move, with its reason</CardDescription></CardHeader>
           <CardContent>

@@ -104,9 +104,9 @@ export const DEMO_IDENTITIES: DemoIdentity[] = [
 
 /** Where a role belongs once it is signed in. */
 export const LANDING: Record<string, string> = {
-  commissioner: "/admin/console",
-  ward_officer: "/admin/console",
-  admin: "/admin/console",
+  commissioner: "/admin/wall",
+  ward_officer: "/admin/wall",
+  admin: "/admin/wall",
   field_operator: "/field",
   citizen: "/citizen",
 }
