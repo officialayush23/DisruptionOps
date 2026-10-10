@@ -734,22 +734,26 @@ async def _citizen_scope(lng: float, lat: float, city_id: str, metres: float):
             lng, lat, city_id, metres,
         )
     ]
+    # Every alert the control room issued for this person's region, not only
+    # the ones beside them: the ones near them first (those route them), the
+    # rest after, marked as elsewhere. Pune and Ghaziabad never mix.
     alerts = [
         {"id": r["id"], "headline": r["headline"], "action": r["action"],
          "severity": r["severity"], "issuedAt": r["issued_at"].isoformat(),
-         "safeLocation": r["safe_location"]}
+         "safeLocation": r["safe_location"], "near": bool(r["near"]), "ward": r["ward"],
+         "distanceKm": round(float(r["m"]) / 1000, 1)}
         for r in await db.fetch(
             """
+            with me as (select extensions.ST_SetSRID(extensions.ST_MakePoint($2,$3),4326)::extensions.geography g)
             select a.id::text, a.headline, a.action, a.severity, a.issued_at,
-                   a.safe_location
+                   a.safe_location, w.name ward,
+                   extensions.ST_Distance(w.centroid, me.g) m,
+                   extensions.ST_DWithin(w.centroid, me.g, $4 * 3) near
               from alerts a
-              join wards w on w.id = a.ward_id
+              join wards w on w.id = a.ward_id, me
              where w.city_id = $1
-               and extensions.ST_DWithin(
-                     w.centroid,
-                     extensions.ST_SetSRID(extensions.ST_MakePoint($2,$3),4326)::extensions.geography,
-                     $4 * 3)
-             order by a.issued_at desc limit 10
+               and ((w.id like 'w-gzb%') = ($2 >= 75.5))
+             order by near desc, a.issued_at desc limit 25
             """,
             city_id, lng, lat, metres,
         )

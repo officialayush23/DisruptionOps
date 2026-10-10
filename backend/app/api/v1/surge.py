@@ -76,3 +76,63 @@ async def declare(principal: CommissionerPrincipal, region: str = "pune") -> dic
                              "reason": "declaration approved by an officer; NDRF and Army requested"})
     made = await service.request_aid(region, m, min_level=4, approved_by=principal.full_name or "commissioner")
     return {"level": 4, "requested": made}
+
+
+@router.post("/evacuate")
+async def evacuate(_: StaffPrincipal, region: str = "pune") -> dict:
+    """Run the staged evacuation now: zone the wards (A evacuate, B prepare,
+    C shelter in place), send convoys for zone A on fixed routes, publish."""
+    from app.surge import operations
+    region = _region(region)
+    lvl = service.level(region)
+    await operations.staged_evacuation(region, max(lvl, 3))
+    return await operations.overview(region)
+
+
+@router.post("/pools/open")
+async def open_pools(_: StaffPrincipal, region: str = "pune") -> dict:
+    """Open requisitioned hotel rooms and registered host families now."""
+    from app.surge import operations
+    region = _region(region)
+    return {"opened": await operations.open_pools(region, max(service.level(region), 3))}
+
+
+@router.post("/demobilise")
+async def demobilise(_: StaffPrincipal, region: str = "pune", to: int = 0) -> dict:
+    """Step down by hand (normally the ladder does it after calm checks): closes
+    what the higher levels opened, returns aid, publishes the all-clear and the
+    recovery checklist when reaching 0."""
+    from app.db import session as db
+    from app.surge import operations
+    region = _region(region)
+    to = max(0, min(4, to))
+    frm = service.level(region)
+    await db.execute("update surge_state set level = $2, since = now(), updated_at = now(), counters = '{}' "
+                     "where region = $1", region, to)
+    service._LEVEL[region] = to
+    return await operations.demobilise(region, frm, to)
+
+
+@router.get("/recovery")
+async def recovery(_: StaffPrincipal, region: str = "pune") -> dict:
+    from app.surge import operations
+    return await operations.recovery_checklist(_region(region))
+
+
+class NoticeIn(Camel):
+    region: str = "pune"
+    kind: str = "general"
+    headline: str = Field(min_length=3, max_length=200)
+    body: str = Field(min_length=3, max_length=1000)
+    wards: list[str] = []
+
+
+@router.post("/notice")
+async def notice(body: NoticeIn, principal: StaffPrincipal) -> dict:
+    """An officer publishes on the single public channel (supersedes the last
+    notice of the same kind for the same wards)."""
+    from app.surge import operations
+    region = _region(body.region)
+    nid = await operations.publish(region, service.level(region), body.kind, body.headline, body.body, body.wards,
+                                   ref=",".join(sorted(body.wards)) or body.kind)
+    return {"id": nid}

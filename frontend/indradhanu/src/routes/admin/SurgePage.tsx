@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { SurgeOperations, type Ops } from "./SurgeOperations"
 
 /** Surge operations: what happens when units and shelters run out.
  *
@@ -39,14 +40,15 @@ type Overview = {
   offers: { id: string; agency: string; label: string; kind: string; quantity: number; response_minutes: number
     accept_p: number; min_level: number }[]
   log: { id: number; at: string; kind: string; actor: string; payload: Record<string, unknown> }[]
+  operations?: Ops
 }
 
 const LADDER = [
   { name: "Normal", what: "Routine planning", icon: Check },
   { name: "Strained", what: "Triage: life-safety first, vulnerable wards next · rationing · stock redistributed", icon: AlertOctagon },
   { name: "Mutual aid", what: "Red Cross, volunteers, neighbouring corporation, SDRF asked; aid joins the fleet", icon: HandHelping },
-  { name: "Surge shelters", what: "Schools and halls opened · buses and tankers requisitioned · staged evacuation", icon: School },
-  { name: "Declaration", what: "State/national declaration · NDRF and Army (officer approves)", icon: ShieldAlert },
+  { name: "Surge shelters", what: "Schools, hotel rooms, host families · convoys by zone on fixed routes · shelter in place", icon: School },
+  { name: "Declaration", what: "National: NDRF, Army, helicopters (officer approves)", icon: ShieldAlert },
 ]
 const pretty = (s?: string | null) => (s ?? "").replace(/_/g, " ")
 const time = (iso?: string | null) => (iso ? new Date(iso).toLocaleTimeString() : "—")
@@ -152,6 +154,8 @@ export default function SurgePage() {
           <CardContent className="pb-4 text-xs text-muted-foreground">Rationed ×0.7 and restocked from low-need sites while strained.</CardContent>
         </Card>
       </div>
+
+      <SurgeOperations ops={d.operations} level={d.level} region={region} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>

@@ -81,6 +81,11 @@ PROFILES: dict[str, Profile] = {p.kind: p for p in (
             signal_delay_s=10, capabilities=("search_rescue", "field_assessment")),
     Profile("resident", "foot", "Resident on foot", depth_limit_m=0.2, cruise_kmh=4.5,
             signal_delay_s=30),
+    # Helicopter (state / IAF, requested at level 4): straight line at cruise
+    # speed after 10 minutes to start and lift; grounded when it rains harder
+    # than its limit (assumption; replaced by the operator's minima).
+    Profile("helicopter", "air", "Helicopter", cruise_kmh=180.0, max_wind_ms=18.0, max_rain_mmph=25.0,
+            capabilities=("water_rescue", "search_rescue", "medical_transport", "supply_delivery")),
     Profile("drone", "air", "Drone", cruise_kmh=45.0, max_wind_ms=12.0, max_rain_mmph=8.0,
             battery_reserve=0.2, endurance_min=25.0,
             capabilities=("aerial_survey", "survivor_search", "payload_drop", "comms_relay")),

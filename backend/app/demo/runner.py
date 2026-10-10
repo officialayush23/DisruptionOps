@@ -1812,7 +1812,8 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
                 update lifelines
                    set supplies  = coalesce(supplies_baseline, '{}'::jsonb),
                        occupancy = coalesce(occupancy_baseline, 0),
-                       status    = 'open',
+                       status    = case when kind in ('school', 'hotel', 'host_family') or id like 'surge-%'
+                                        then 'closed' else 'open' end,
                        last_reported_at = null
                  where city_id = $1
                 """,
@@ -1865,6 +1866,9 @@ async def reset(*, city_id: str = "pune") -> dict[str, int]:
     # flood for another three seconds. Cheap to drop, confusing not to.
     cache.citizen_state.clear()
     cache.ward_risk.clear()
+
+    from app.surge import service as surge
+    await surge.reset_world()
 
     state.beat("reset", "World reset to its opening position.")
 

@@ -479,6 +479,9 @@ async def replan(
         matrix = await routing.travel_matrix(
             [u.location for u in units], [d.location for d in demands], blocked
         )
+        # Aircraft do not use roads: straight line at cruise speed plus start-up,
+        # and nothing at all when it rains harder than the aircraft's limit.
+        _air_matrix(units, demands, matrix)
         # A unit an officer took off an incident must not be sent straight back
         # to it by the next solve. Pricing the pair out of reach does that
         # without a second code path in the solver.
@@ -705,13 +708,22 @@ async def replan(
                where a.status = any($1::assignment_status[])
                group by a.incident_id, a.capability_id
             )
+            , target as (
+              -- the join on capability needs the need row itself, which an
+              -- UPDATE's FROM cannot see ("invalid reference to FROM-clause
+              -- entry for table n"), so the new numbers are worked out first
+              select x.incident_id, x.capability_id, coalesce(c.n, 0) met
+                from incident_needs x
+                join incidents i on i.id = x.incident_id and i.status <> 'resolved'
+                left join counts c on c.incident_id = x.incident_id
+                                  and c.capability_id = x.capability_id
+            )
             update incident_needs n
-               set met = coalesce(c.n, 0), updated_at = $2
-              from incidents i
-              left join counts c on c.incident_id = i.id and c.capability_id = n.capability_id
-             where i.id = n.incident_id
-               and i.status <> 'resolved'
-               and n.met is distinct from coalesce(c.n, 0)
+               set met = t.met, updated_at = $2
+              from target t
+             where t.incident_id = n.incident_id
+               and t.capability_id = n.capability_id
+               and n.met is distinct from t.met
             """,
             list(ACTIVE), now,
         )
@@ -781,6 +793,8 @@ async def _reroute_if_blocked(
     if not exposure:
         return None
 
+    if alloc.unit.kind == "helicopter":
+        return None                      # flies; road closures do not reroute it
     line = await routing.route_line(alloc.unit.location, alloc.demand.location, blocked)
     geometry = (
         {"type": "LineString", "coordinates": line.coordinates}
@@ -842,6 +856,35 @@ async def _reroute_if_blocked(
     return line.minutes if line.is_real_road else None
 
 
+AIR_STARTUP_MIN = 10.0
+
+
+def _rain_now_mmph() -> float | None:
+    try:
+        from app.nav import live
+        r = live._cache
+        if r is not None and len(r.features):
+            return float(r.features["rain_1h"].iloc[0])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _air_matrix(units: Sequence[Any], demands: Sequence[Any], matrix: Any) -> None:
+    from app.nav.profiles import PROFILES
+    rain = _rain_now_mmph()
+    for i, u in enumerate(units):
+        p = PROFILES.get(u.kind)
+        if p is None or p.mode != "air" or u.kind == "drone":
+            continue
+        grounded = rain is not None and p.max_rain_mmph is not None and rain > p.max_rain_mmph
+        for j, d in enumerate(demands):
+            km = routing.haversine_km(u.location, d.location)
+            matrix.durations[i][j] = (MAX_ETA_MINUTES + 1 if grounded
+                                      else AIR_STARTUP_MIN + km / (p.cruise_kmh or 150.0) * 60.0)
+            matrix.distances[i][j] = km
+
+
 async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str | None,
                             now: datetime, blocked: Sequence[tuple[float, float]] = ()) -> str:
     # The road, not the line. A crew given a straight bearing to a flooded
@@ -849,7 +892,14 @@ async def _write_assignment(conn: Any, plan_id: str, alloc: Any, sim_run_id: str
     # the console looks like a simulation rather than a dispatch. The geometry
     # is stored so the unit drives it, the field app can show it, and the
     # console can draw what every committed unit is actually doing.
-    line = await routing.route_line(alloc.unit.location, alloc.demand.location, blocked)
+    if alloc.unit.kind == "helicopter":
+        km = routing.haversine_km(alloc.unit.location, alloc.demand.location)
+        line = routing.RouteLine(coordinates=[list(alloc.unit.location), list(alloc.demand.location)],
+                                 km=km, minutes=int(round(AIR_STARTUP_MIN + km / 180.0 * 60.0)), engine="air")
+    else:
+        line = None
+    if line is None:
+        line = await routing.route_line(alloc.unit.location, alloc.demand.location, blocked)
     geometry = (
         {"type": "LineString", "coordinates": line.coordinates}
         if len(line.coordinates) > 1

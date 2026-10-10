@@ -97,12 +97,47 @@ class Scorer:
         return p, sd, why
 
 
+_registered: set[str] = set()
+
+
+async def ensure_registered(conn, version: str, task: str = "passability") -> None:
+    """nav_predictions.model_version references model_registry. A fresh database
+    (or one where ml.relearn ran without DATABASE_URL) has no row for the model
+    the server ships with, and every prediction log then fails its foreign key.
+    The server registers what it serves - as champion, with the metrics saved
+    beside the model - once per process."""
+    if version in _registered:
+        return
+    meta, d = {}, MODELS / task / version
+    for name in ("model.json", "meta.json"):
+        if (d / name).exists():
+            try:
+                meta = json.loads((d / name).read_text())
+                break
+            except ValueError:
+                pass
+    metrics = meta.get("test") or meta.get("metrics") or {}
+    window = {k: meta[k] for k in ("trained_on", "train_rows", "tune_rows") if k in meta}
+    # one champion per task (unique index): if another is already champion the
+    # served model goes in as a candidate, and ml.relearn decides promotion
+    await conn.execute(
+        "insert into model_registry (version, task, status, data_window, metrics, artifact_uri, promoted_at) "
+        "select $1, $2, case when exists (select 1 from model_registry where task = $2 and status = 'champion') "
+        "then 'candidate' else 'champion' end, $3::jsonb, $4::jsonb, $5, now() "
+        "on conflict (version) do nothing",
+        version, task, json.dumps(window, default=str), json.dumps(metrics, default=str),
+        f"serving/models/{task}/{version}")
+    _registered.add(version)
+
+
 async def log_predictions(conn, rows: list[dict]) -> int:
     """Insert what the router used into nav_predictions (migration 031).
     rows: seg_id, lon, lat, profile, horizon_min, p, sd, features (dict), model_version,
     optional assignment_id, used_for ('route' | 'scan' | 'shadow'), city_id, sim_run_id."""
     if not rows:
         return 0
+    for v in {r["model_version"] for r in rows}:
+        await ensure_registered(conn, v)
     await conn.executemany(
         "insert into nav_predictions (city_id, sim_run_id, model_version, seg_id, location, profile, horizon_min, "
         "p_blocked, p_sd, features, assignment_id, used_for) values ($1,$2,$3,$4, "

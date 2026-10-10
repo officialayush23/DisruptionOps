@@ -58,7 +58,8 @@ type State = {
   incidents: { id: string; title: string; category: string; severity: number
                reportCount: number; location: [number, number]; distanceM: number }[]
   alerts: { id: string; headline: string; action: string; severity: number
-            issuedAt: string; safeLocation: { name: string; distance_km: number } | null }[]
+            issuedAt: string; safeLocation: { name: string; distance_km: number } | null
+            near?: boolean; ward?: string; distanceKm?: number }[]
   facilities: { id: string; name: string; kind: string; status: string
                 capacity: number | null; occupancy: number | null
                 location: [number, number]; distanceM: number }[]
@@ -828,6 +829,8 @@ export default function CitizenApp() {
   useEffect(() => {
     const alert = state?.alerts?.[0]
     if (!alert) return
+    // Alerts for other wards are listed, never routed for.
+    if (alert.near === false) return
     // `inside` means inside the wards this deployment scores. An advisory that
     // has already picked a shelter for you does not need that check as well:
     // standing just past a ward boundary is not a reason to be told a shelter
@@ -1090,6 +1093,7 @@ export default function CitizenApp() {
   const [filter, setFilter] = useState("all")
   const [lightPreset, setLightPreset] = useState<"night" | "dusk" | "day">("night")
   const [dismissedAlert, setDismissedAlert] = useState<string | null>(null)
+  const [allAlerts, setAllAlerts] = useState(false)
   /** A place from somewhere else (a mesh notice) shown on the map. */
   const [pinned, setPinned] = useState<{ lng: number; lat: number; label: string } | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
@@ -1285,6 +1289,27 @@ export default function CitizenApp() {
           viewLabel={busy === "shelter" ? "Finding the way…" : "Take me there"}
           onDismiss={() => { setDismissedAlert(alert.id); setNewAlert(null) }}
         />
+      )}
+      {(state?.alerts?.length ?? 0) > 1 && (
+        <div className="mx-auto w-full max-w-md rounded-xl border border-white/10 bg-[rgb(14_17_22/0.92)] text-xs">
+          <button className="w-full px-3 py-1.5 text-left font-medium" onClick={() => setAllAlerts((v) => !v)}>
+            {allAlerts ? "Hide" : "Show"} all {state!.alerts.length} alerts from the control room
+          </button>
+          {allAlerts && (
+            <ul className="max-h-60 space-y-1.5 overflow-y-auto px-3 pb-2">
+              {state!.alerts.map((a) => (
+                <li key={a.id} className="border-t border-white/10 pt-1.5">
+                  <div className="flex justify-between gap-2 opacity-70">
+                    <span>{a.near === false ? `${a.ward ?? "elsewhere"} · ${a.distanceKm ?? "?"} km away` : `Near you${a.ward ? ` · ${a.ward}` : ""}`}</span>
+                    <span>{new Date(a.issuedAt).toLocaleTimeString()}</span>
+                  </div>
+                  <div className="font-medium">{a.headline}</div>
+                  <div className="opacity-80">{a.action}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {flash && (
         <div className="mx-auto w-fit rounded-full border border-white/10 bg-[rgb(14_17_22/0.92)] px-3 py-1.5 text-xs">

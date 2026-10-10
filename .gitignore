@@ -7,3 +7,10 @@ data/train/
 data/relearn/demo_runs/
 .venv/
 backend/.venv/
+
+# local virtual environments
+req/
+backend/ml/Scripts/
+backend/ml/Lib/
+backend/ml/Include/
+backend/ml/pyvenv.cfg

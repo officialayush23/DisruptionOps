@@ -215,11 +215,18 @@ async def evaluate(region: str = "pune", *, actor: str = "agent:surge") -> dict[
                                      "unmet": {k: v for k, v in m["unmet"].items() if k != "items"}}})
         if to > frm:
             await _on_enter(region, to, m)
+        try:
+            from app.surge import operations
+            await operations.on_level_change(region, frm, to, m)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("surge_operations_failed", error=str(exc)[:200])
     await db.execute(
         "update surge_state set level = $2, reasons = $3::jsonb, metrics = $4::jsonb, counters = $5::jsonb, "
         "since = case when level <> $2 then now() else since end, updated_at = now() where region = $1",
         region, lvl, json.dumps(reasons), json.dumps(m, default=str), json.dumps(counters))
     _LEVEL[region] = lvl
+    from app.surge import operations
+    await operations.tick(region, lvl, m)
     return {"region": region, "level": lvl, "name": LEVELS[lvl], "reasons": reasons, "metrics": m,
             "changed": bool(changed)}
 
@@ -348,7 +355,7 @@ async def open_surge_shelters(region: str, m: dict, limit: int = 3) -> list[str]
          where l.kind = 'school' and l.status = 'closed' {candidates_sql_extra}
            and not exists (select 1 from incidents i where i.ward_id = l.ward_id and i.status <> 'resolved'
                             and i.category in ('flooded_road','waterlogging','person_stranded'))
-           and not exists (select 1 from lifelines s where s.id = 'surge-' || l.id)
+           and not exists (select 1 from lifelines s where s.id = 'surge-' || l.id and s.status <> 'closed')
          order by d limit $1
         """, limit)
     opened = []
@@ -361,7 +368,8 @@ async def open_surge_shelters(region: str, m: dict, limit: int = 3) -> list[str]
             "select $1, 'shelter', 'Surge shelter: ' || name, ward_id, location, $2, 0, city_id, false, 'open', '{}', "
             "'{\"blankets\":200,\"food_packets\":400,\"medical_kits\":20,\"water_litres\":3000}'::jsonb, "
             "'{\"blankets\":200,\"food_packets\":400,\"medical_kits\":20,\"water_litres\":3000}'::jsonb, null, 0, now(), now() "
-            "from lifelines where id = $3 on conflict (id) do nothing", sid, int(r["cap"]), r["id"])
+            "from lifelines where id = $3 on conflict (id) do update set status = 'open', capacity = excluded.capacity, "
+            "occupancy = 0, opened_at = now(), supplies = excluded.supplies", sid, int(r["cap"]), r["id"])
         await ev.append(clock=clocks.WALL, kind="surge.shelter_opened", actor="agent:surge", subject_type="lifeline",
                         subject_id=sid, ward_id=r["ward_id"],
                         payload={"name": r["name"], "capacity": int(r["cap"]),
@@ -392,9 +400,9 @@ async def redistribute(region: str) -> list[dict]:
             give = int(float(_j(hi["supplies"])[line]) * 0.3)
             if give <= 0:
                 continue
-            await db.execute("update lifelines set supplies = jsonb_set(supplies, array[$2], to_jsonb((supplies->>$2)::numeric - $3)) where id = $1",
+            await db.execute("update lifelines set supplies = jsonb_set(supplies, array[$2::text], to_jsonb((supplies->>$2::text)::numeric - $3::int)) where id = $1",
                              hi["id"], line, give)
-            await db.execute("update lifelines set supplies = jsonb_set(supplies, array[$2], to_jsonb((supplies->>$2)::numeric + $3)) where id = $1",
+            await db.execute("update lifelines set supplies = jsonb_set(supplies, array[$2::text], to_jsonb((supplies->>$2::text)::numeric + $3::int)) where id = $1",
                              lo["id"], line, give)
             await ev.append(clock=clocks.WALL, kind="surge.redistributed", actor="agent:surge", subject_type="lifeline",
                             subject_id=lo["id"],
@@ -478,7 +486,13 @@ async def overview(region: str) -> dict:
                             "where o.region = $1 order by o.min_level, o.response_minutes", region)
     drill = await db.fetchval("select count(*) from surge_drill where region = $1 and restored_at is null", region)
     iso = lambda v: v.isoformat() if hasattr(v, "isoformat") else v  # noqa: E731
+    from app.surge import operations
+    try:
+        ops = await operations.overview(region)
+    except Exception as exc:  # noqa: BLE001
+        ops = {"available": False, "reason": str(exc)[:160]}
     return {
+        "operations": ops,
         "available": True, "region": region, "level": st["level"], "name": LEVELS[st["level"]], "levels": LEVELS,
         "reasons": _j(st["reasons"]) if not isinstance(st["reasons"], list) else st["reasons"],
         "metrics": _j(st["metrics"]), "since": iso(st["since"]), "updatedAt": iso(st["updated_at"]),
@@ -517,3 +531,23 @@ async def maybe_evaluate(min_interval_s: float = 20.0) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("surge_evaluate_failed", region=region, error=str(exc)[:200])
             return
+
+
+async def reset_world() -> None:
+    """Demo world reset: the ladder back to normal, pending aid cancelled, aid
+    units returned, drills restored, everything the surge opened closed."""
+    try:
+        for region in ("pune", "ncr"):
+            if await db.fetchval("select count(*) from surge_drill where region = $1 and restored_at is null", region):
+                await end_drill(region)
+        await db.execute("update surge_state set level = 0, reasons = '[]', counters = '{}', since = now(), "
+                         "updated_at = now()")
+        await db.execute("update surge_aid set outcome = 'cancelled', decided_at = now() where outcome is null")
+        await db.execute("update resources set status = 'offline', unavailable_reason = 'returned to home agency', "
+                         "status_note = 'demobilised' where id like 'AID-%'")
+        for k in _LEVEL:
+            _LEVEL[k] = 0
+        from app.surge import operations
+        await operations.reset()
+    except Exception as exc:  # noqa: BLE001 - surge tables may not exist
+        log.warning("surge_reset_failed", error=str(exc)[:200])
