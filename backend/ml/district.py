@@ -38,9 +38,13 @@ WEATHER_POINTS = {
 }
 
 REPO = Path(__file__).resolve().parents[2]
-RAW = REPO / "data" / "raw"
-PROCESSED = REPO / "data" / "processed"
-SIM = REPO / "data" / "sim"
+#: DISRUPTIONOPS_DATA points elsewhere when deployed (the API image carries a
+#: small serving bundle, backend/serving/data; see ml/export_serving.py).
+import os as _os  # noqa: E402
+DATA = Path(_os.environ.get("DISRUPTIONOPS_DATA") or (REPO / "data"))
+RAW = DATA / "raw"
+PROCESSED = DATA / "processed"
+SIM = DATA / "sim"
 
 #: Ward seeds from migration 029 (the wards are the Voronoi cells of these
 #: points clipped to BBOX), so a segment's ward is its nearest seed.

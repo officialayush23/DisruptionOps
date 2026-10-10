@@ -345,6 +345,8 @@ async def _tick_locked() -> None:
         state.sim_now = state.sim_now + timedelta(minutes=SIM_MINUTES_PER_TICK)
 
     await _move_units()
+    from app.surge import service as surge
+    await surge.maybe_evaluate()
     await _work_and_resolve()
 
     if state.tick % state.report_every_ticks == 0:
@@ -1290,6 +1292,9 @@ async def _draw_down_supplies() -> None:
         # point has no beds and no occupancy, and still hands out water.
         served = float(r["rate"]) * pressure
         people = max(served, float(r["occupancy"])) * hours
+        # Rationing while the region is strained or worse (app/surge).
+        from app.surge import service as surge
+        people *= surge.ration_factor(r["lng"])
 
         opening = state.supply_baseline.setdefault(r["id"], dict(stock))
         drained: dict[str, float] = {}

@@ -1,6 +1,6 @@
 {
  "passability": {
-  "champion": "pass-20261010-0817",
+  "champion": "pass-20261010-1049",
   "history": [
    {
     "version": "pass-20261010-0817",
@@ -222,6 +222,20 @@
     "at": "2026-10-10T09:20:16",
     "decision": {
      "outcome": "restored after the relearn demo"
+    },
+    "metrics": {}
+   },
+   {
+    "version": "pass-20261010-0817",
+    "status": "retired",
+    "at": "2026-10-10T11:21:46"
+   },
+   {
+    "version": "pass-20261010-1049",
+    "status": "champion",
+    "at": "2026-10-10T11:21:46",
+    "decision": {
+     "outcome": "registered by hand"
     },
     "metrics": {}
    }

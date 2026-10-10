@@ -199,3 +199,35 @@ champion stays the simulation-trained model until real outcomes exist.
   above come from `ml/route_eval.py` on our own road graph.
 * The relearn demo's recent hold-out had only 21 positives; in production the
   gate should wait for more.
+
+## 7. Update: everyday disruptions, live serving (2026-10-10, evening)
+
+**Everyday disruptions.** The simulator now runs disruptions on every day, rain
+or not: old trees falling, water-main bursts flooding a road and its
+neighbours, overflowing drains, old walls giving way, and crashes/breakdowns
+(a quarter block the road). 36 dry-day `everyday` windows were added (80
+windows, 240 runs). Confirmed everyday incidents in the live system (fallen
+tree, waterlogging, collapse, downed line) are written as learning outcomes by
+migration 033.
+
+**New champion `pass-20261010-1049`** (3 members, trained in 6 min), on the
+2023-26 test windows including everyday days (762,534 rows, 6.9% blocked):
+
+| | AUC | Misses a closure | Blocks an open road | Calibration error |
+|---|---|---|---|---|
+| **Model** | **0.983** | **8.9%** | 1.1% | **0.0006** |
+| Logistic regression | 0.954 | 6.4% | 81% | 0.016 |
+| Current status only | 0.620 | 90.2% | 0.5% | 0.008 |
+
+Roads open now that close before arrival: caught 68% (AUC 0.86) vs 4%.
+Trips (1,576, realization 0, storms + everyday days): routes that hit a block
+12.1% → **3.7%**; mean delay vs best possible 5.6 → **1.1 min**; P90 arrival
+32.4 → 29.5 min (oracle 28.9).
+
+**Live.** `app/nav/live.py` scores PCMC roads from the live database every 5
+minutes (reports, crew sightings, closures, resolved incidents, Open-Meteo
+rain, GloFAS river stage) and the router avoids roads with p ≥ 0.6 (or whose
+ensemble upper bound crosses it). `GET /api/v1/nav/risk` serves the layer the
+console map draws. The API image carries a 29 MB serving bundle
+(`python -m ml.export_serving` after each new champion). `NAV_PREDICTIVE=0`
+switches back to current-status routing.

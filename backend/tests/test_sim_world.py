@@ -86,3 +86,17 @@ def test_observations_lie_the_way_they_should(truth, obs):
     assert ((pat["t_obs_min"] - pat["t_true_min"]) <= 10).all()
     assert (obs.traffic == 255).any()                    # closed roads often show no data, not red
     assert obs.meta["drones"] == "paused"
+
+
+def test_everyday_window_has_disruptions_without_a_storm():
+    import pandas as pd
+    from ml.sim.world import simulate
+    cat = pd.read_parquet(SIM / "storms.parquet")
+    ev = cat[cat["tier"] == "everyday"]
+    if ev.empty:
+        pytest.skip("no everyday windows")
+    tr = simulate(ev["storm_id"].iloc[0], 0)
+    kinds = set(tr.events["kind"])
+    assert kinds & {"crash", "breakdown", "tree", "water_main", "drain_overflow"}
+    for r in tr.events[tr.events["kind"] == "water_main"].itertuples():
+        assert float(tr.depth[r.t0, r.seg]) >= r.depth_m - 0.01      # a burst main puts water on its road

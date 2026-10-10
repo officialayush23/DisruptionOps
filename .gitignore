@@ -5,3 +5,5 @@ data/raw/dem/
 __pycache__/
 data/train/
 data/relearn/demo_runs/
+.venv/
+backend/.venv/

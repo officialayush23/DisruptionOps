@@ -65,11 +65,14 @@ class Demand:
     location: tuple[float, float]
     severity: int
     population_at_risk: int
+    #: Surge triage (app/surge): x2 for life-safety needs and x1.3 for wards with
+    #: many elderly people while the region is strained or worse; 1 otherwise.
+    priority: float = 1.0
 
     @property
     def weight(self) -> float:
         """Severity dominates; population breaks ties within a severity band."""
-        return (self.severity**2) * (1.0 + self.population_at_risk / 10_000.0)
+        return (self.severity**2) * (1.0 + self.population_at_risk / 10_000.0) * self.priority
 
 
 @dataclass(slots=True)

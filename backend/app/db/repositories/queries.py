@@ -59,7 +59,7 @@ select id, city_id, number, name, population, elderly_share, elevation_m, area_s
        extensions.ST_AsGeoJSON(boundary)::json -> 'coordinates' as boundary
 from wards
 where city_id = $1
-order by number::int
+order by (number !~ '^[0-9]+$'), nullif(regexp_replace(number, '[^0-9]', '', 'g'), '')::int, number
 """
 
 
@@ -111,7 +111,7 @@ async def ward_contexts(hazard: str, city_id: str = "pune") -> list[WardContext]
         left join hist on hist.ward_id = w.id
         where w.city_id = $2
         group by w.id
-        order by w.number::int
+        order by (w.number !~ '^[0-9]+$'), nullif(regexp_replace(w.number, '[^0-9]', '', 'g'), '')::int, w.number
         """,
         str(hazard),
         city_id,

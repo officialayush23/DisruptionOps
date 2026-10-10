@@ -458,7 +458,7 @@ select w.id, w.name, w.number, w.population,
        extensions.ST_AsGeoJSON(w.boundary)::json -> 'coordinates' -> 0 as boundary
   from wards w
  where w.city_id = $1
- order by w.number::int
+ order by (w.number !~ '^[0-9]+$'), nullif(regexp_replace(w.number, '[^0-9]', '', 'g'), '')::int, w.number
 """
 
 #: What actually moves: the latest risk row per ward.

@@ -13,7 +13,9 @@ Wet days less than two days apart form one spell. Each spell becomes one
 72-hour window anchored on its wettest six hours (or, for a river-only spell,
 on the peak-flow day), starting 18 hours before the anchor so the rise is in
 the window. A sample of ordinary monsoon days (25-50 mm) is added as `moderate`
-windows, so the models also see storms where little goes wrong.
+windows, so the models also see storms where little goes wrong, and three dry
+days a year as `everyday` windows: no storm, but trees still fall, mains burst
+and crashes block roads (ml.sim.world PARAMS["everyday"]).
 
 Split by year, never within a storm: train 2015-2021, tune 2022, test 2023+.
 GloFAS after July 2022 is forecast-based (`glofas_kind` says which).
@@ -68,7 +70,7 @@ def river_stats(q: pd.DataFrame) -> dict[str, dict[str, float]]:
     return out
 
 
-def build(moderate_per_year: int = 2, seed: int = 7) -> pd.DataFrame:
+def build(moderate_per_year: int = 2, everyday_per_year: int = 3, seed: int = 7) -> pd.DataFrame:
     dist, up = load_era5("district"), load_era5("maval_upstream")
     q = load_glofas()
     stats = river_stats(q)
@@ -133,6 +135,14 @@ def build(moderate_per_year: int = 2, seed: int = 7) -> pd.DataFrame:
             window(qq.idxmax() + pd.Timedelta(hours=12), "major", len(sp))
 
     rng = np.random.default_rng(seed)
+    # Everyday windows: dry or near-dry days in every season. No storm, but the
+    # everyday disruptions (tree falls, burst mains, overflowing drains, crashes)
+    # still close roads, and the models must learn those too.
+    dry = day_rain[day_rain < 2]
+    for y, grp in dry.groupby(dry.index.year):
+        pick = rng.choice(len(grp), size=min(everyday_per_year, len(grp)), replace=False)
+        for i in sorted(pick):
+            window(grp.index[i] + pd.Timedelta(hours=LEAD_H + 6), "everyday", 0)
     mod = day_rain[(day_rain >= 25) & (day_rain < 50)]
     for y, grp in mod.groupby(mod.index.year):
         pick = rng.choice(len(grp), size=min(moderate_per_year, len(grp)), replace=False)

@@ -35,7 +35,7 @@ HORIZONS_MIN = (30, 60, 90)
 CLS_CODE = {"main": 0, "minor": 1, "local": 2, "path": 3}
 OBS_COLUMNS = ["source", "kind", "t_obs_min", "x", "y", "seg_rep", "depth_class", "depth_est_m",
                "blocked_est", "reliability"]
-HAZARD_KINDS = ("tree", "wire", "collapse", "landslide")
+HAZARD_KINDS = ("tree", "wire", "collapse", "landslide", "crash")
 
 STATIC_FEATURES = ["hand_m", "dist_river_m", "dist_water_m", "sink_m", "pond_m", "slope_pct", "elev_m",
                    "underpass", "bridge", "river_bridge", "low_bridge", "cls_code", "length_m", "density",

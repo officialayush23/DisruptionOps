@@ -77,7 +77,7 @@ async def deployment(
                    (select count(*) from incidents i
                      where i.ward_id = w.id and i.status <> 'resolved')::int open_incidents,
                    (select count(*) from lifelines l where l.ward_id = w.id)::int lifelines
-              from wards w where w.city_id = $1 order by w.number::int
+              from wards w where w.city_id = $1 order by (w.number !~ '^[0-9]+$'), nullif(regexp_replace(w.number, '[^0-9]', '', 'g'), '')::int, w.number
             """,
             city_id,
         ),

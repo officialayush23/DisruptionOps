@@ -75,3 +75,10 @@ python-dotenv>=1.0
 langgraph>=0.4
 langgraph-checkpoint-postgres>=2.0
 psycopg[binary]>=3.2
+
+# ---- live road-risk scoring (app/nav/live.py loads the trained passability model) ----
+numpy>=1.26
+pandas>=2.1
+pyarrow>=15
+scipy>=1.11
+xgboost-cpu>=2.1          # CPU-only build: same `import xgboost`, a fraction of the size

@@ -784,7 +784,7 @@ def _channels(text: str) -> list[dict]:
     out = []
     for part in re.findall(r"\(([^)]*)\)", text):
         for item in part.split(","):
-            mm = re.match(r"\s*([^\d%]+?)\s+(\d+)%", item)
+            mm = re.match(r"\s*(.+?)\s+(\d+)%\s*$", item)
             if mm:
                 out.append({"name": mm.group(1).strip(), "pct": int(mm.group(2))})
     for name, pct in re.findall(r"(human|structural|environment)\s+(\d+)%", text):

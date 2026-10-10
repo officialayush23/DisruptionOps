@@ -20,8 +20,39 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import os
+
 REPO = Path(__file__).resolve().parents[3]
-MODELS = REPO / "models"
+#: DISRUPTIONOPS_MODELS when deployed (backend/serving/models in the image).
+MODELS = Path(os.environ.get("DISRUPTIONOPS_MODELS") or (REPO / "models"))
+
+
+class LightEnsemble:
+    """The trained ensemble without scikit-learn: XGBoost boosters averaged, then
+    the isotonic calibration applied as the piecewise-linear map it is
+    (np.interp over its thresholds, clipped) - identical to
+    IsotonicRegression.predict with out_of_bounds='clip', and light enough for a
+    small API container."""
+
+    def __init__(self, d: Path):
+        import xgboost as xgb
+        meta = json.loads((d / "model.json").read_text())
+        self.features = meta["features"]
+        self.members = []
+        for f in sorted(d.glob("member_*.json")):
+            b = xgb.Booster()
+            b.load_model(str(f))
+            self.members.append(b)
+        c = json.loads((d / "calibration.json").read_text())
+        self.cx, self.cy = np.asarray(c["x"], float), np.asarray(c["y"], float)
+
+    def predict(self, X: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        import xgboost as xgb
+        dm = xgb.DMatrix(X[self.features].astype(np.float32))
+        ps = np.stack([m.predict(dm, iteration_range=(0, m.best_iteration + 1)) if m.best_iteration is not None
+                       else m.predict(dm) for m in self.members])
+        mean = ps.mean(0)
+        return np.interp(mean, self.cx, self.cy), ps.std(0)
 
 
 @dataclass
@@ -37,14 +68,13 @@ class Scorer:
 
     @classmethod
     def load(cls, version: str | None = None) -> "Scorer":
-        from ml.train_passability import Ensemble
         reg = json.loads((MODELS / "registry.json").read_text()) if (MODELS / "registry.json").exists() else {}
         version = version or (reg.get("passability") or {}).get("champion")
         if not version:
             raise RuntimeError("no passability champion registered (python -m ml.relearn register ...)")
         d = MODELS / "passability" / version
         meta = json.loads((d / "model.json").read_text())
-        return cls(Ensemble.load(d), version, float(meta["threshold"]))
+        return cls(LightEnsemble(d), version, float(meta["threshold"]))
 
     def score(self, F: pd.DataFrame, confirmations: list[Confirmation] | None = None,
               cand: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:

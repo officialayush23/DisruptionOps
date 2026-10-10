@@ -18,6 +18,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+# Live road-risk scoring: the feature code and the serving bundle (trained model,
+# per-segment features, river rating inputs). Refresh with
+# `python -m ml.export_serving` after a new champion is registered.
+COPY ml ./ml
+COPY serving ./serving
+ENV DISRUPTIONOPS_DATA=/app/serving/data \
+    DISRUPTIONOPS_MODELS=/app/serving/models \
+    LIVE_RISK_TTL_S=300
 
 # Never run as root.
 RUN useradd --create-home --uid 10001 indradhanu \

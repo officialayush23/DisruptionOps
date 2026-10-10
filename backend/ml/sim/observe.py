@@ -48,7 +48,8 @@ DEPTH_CLASSES = (0.05, 0.15, 0.45)   # none < 5 cm <= ankle < 15 cm <= knee < 45
 
 OBS_PARAMS = {
     "flood_report_h": 0.06,         # reports/hour from one flooded segment in the densest area, early on
-    "event_reports": {"tree": 1.5, "wire": 2.0, "collapse": 3.0, "landslide": 2.0, "fire": 4.0, "gas": 3.0},
+    "event_reports": {"tree": 1.5, "wire": 2.0, "collapse": 3.0, "landslide": 2.0, "fire": 4.0, "gas": 3.0,
+                      "crash": 2.5, "breakdown": 0.6, "water_main": 2.0, "drain_overflow": 1.0},
     "delay_median_min": 12.0, "delay_sigma": 0.9, "delay_cap_min": 360,
     "gps_sd_m": 25.0, "landmark_p": 0.15, "landmark_sd_m": 150.0,
     "class_err_p": 0.3, "kind_err_p": 0.08,
@@ -164,7 +165,11 @@ def observe(tr: Truth, params: dict | None = None) -> Observations:
         lam = p["event_reports"].get(e.kind, 1.0) * (0.3 + dens[e.seg]) * awake[e.t0]
         for _ in range(1 + rng.poisson(lam)):
             t = int(min(e.t1 - 1, e.t0 + rng.exponential(1.0) / DT_H))
-            report("citizen", e.kind, max(e.t0, t), int(e.seg))
+            if e.kind in ("water_main", "drain_overflow"):     # people say "the road is flooded"
+                tt = max(e.t0, t)
+                report("citizen", "flood", tt, int(e.seg), cls_=int(depth_class(np.array([depth[tt, e.seg]]))[0]))
+            else:
+                report("citizen", e.kind, max(e.t0, t), int(e.seg))
 
     # ---- rumours and hoaxes --------------------------------------------------
     for t in range(T):
@@ -221,7 +226,7 @@ def observe(tr: Truth, params: dict | None = None) -> Observations:
             report("official", "closure", e.t0, int(e.seg), rel=1.0, lag=int(rng.uniform(15, 60)), exact=True)
             if e.t1 < T:
                 report("official", "reopen", e.t1, int(e.seg), rel=1.0, lag=int(rng.uniform(15, 60)), exact=True)
-        elif e.kind in ("tree", "wire") and e.t1 < T and rng.random() < 0.6:
+        elif e.kind in ("tree", "wire", "crash", "water_main") and e.t1 < T and rng.random() < 0.6:
             report("official", "cleared", e.t1, int(e.seg), rel=1.0, lag=int(rng.uniform(10, 40)), exact=True)
 
     reports = pd.DataFrame(rows)

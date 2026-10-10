@@ -30,6 +30,12 @@ What it simulates per segment and step
   landslides (steep segments, rain over 72 h), fires (live wires, waterlogged
   industrial units), gas leaks (flooded industrial land), and bridge closures
   (authorities close bridges at the river's danger level).
+* Everyday disruptions, rain or not (`PARAMS["everyday"]`): old trees falling,
+  water-main bursts that flood a road and the roads joined to it, blocked
+  drains overflowing at low spots, old walls giving way, and road crashes and
+  breakdowns (busier hours have more; a quarter block the road, the rest slow
+  it). These run in every window, storm or not, so the models also learn the
+  roads that close on a dry day.
 * Traffic and crowds: time-of-day congestion by road class, slower in rain,
   and spill-over onto the roads next to every blocked one; crowds at hospitals,
   at shelters while nearby areas flood, and onlookers on bridges in high flow.
@@ -86,12 +92,20 @@ PARAMS = {
     "gas_per_flooded_ind_h": 2e-4,
     "clear_tree_h": (3.0, 0.6), "clear_wire_h": (4.0, 0.5), "fire_h": (2.0, 0.5), "gas_h": (3.0, 0.5),
     # traffic and crowds
+    # everyday disruptions, on any day, rain or not (totals for the district;
+    # assumptions sized to PCMC news: a couple of tree falls a day, a water-main
+    # burst every few days, ~10 road crashes a day of which a quarter block a road)
+    "everyday": {"tree_h": 0.08, "water_main_h": 0.0125, "drain_overflow_h": 0.01, "collapse_h": 0.002,
+                 "crash_h": 0.42, "crash_block_p": 0.25, "main_depth_m": (0.15, 0.5), "main_h": (4.0, 0.5),
+                 "drain_depth_m": (0.1, 0.3), "drain_h": (3.0, 0.5), "crash_h_dur": (0.75, 0.5),
+                 "breakdown_jam": 0.5},
     "jam_rain": 0.25, "jam_spill_1": 0.30, "jam_spill_2": 0.15,
     "crowd_hospital": 0.15, "crowd_shelter": 0.4, "crowd_onlookers": 0.6,
 }
 
 F_FLOWING, F_DEBRIS, F_WIRE, F_COLLAPSE, F_LANDSLIDE, F_BRIDGE = 1, 2, 4, 8, 16, 32
-EVENT_KINDS = ("tree", "wire", "collapse", "landslide", "fire", "gas", "bridge_closure")
+EVENT_KINDS = ("tree", "wire", "collapse", "landslide", "fire", "gas", "bridge_closure",
+               "water_main", "drain_overflow", "crash", "breakdown")
 CLASS_JAM = {"main": 1.0, "minor": 0.8, "local": 0.4, "path": 0.0}
 
 
@@ -302,10 +316,10 @@ def simulate(storm_id: str, realization: int = 0, params: dict | None = None) ->
     ind = st["industrial"].to_numpy()
     lon, lat = st["lon"].to_numpy(), st["lat"].to_numpy()
 
-    def add(kind: str, i: int, t0: int, dur: int, cause: str, radius: float = 0.0) -> None:
+    def add(kind: str, i: int, t0: int, dur: int, cause: str, radius: float = 0.0, depth_m: float = 0.0) -> None:
         events.append({"kind": kind, "seg": int(i), "x": float(x[i]), "y": float(y[i]),
                        "lon": float(lon[i]), "lat": float(lat[i]), "t0": int(t0), "t1": int(min(T, t0 + dur)),
-                       "radius_m": radius, "cause": cause})
+                       "radius_m": radius, "cause": cause, "depth_m": depth_m})
 
     def draw(rate: np.ndarray, t: int) -> np.ndarray:
         tot = float(rate.sum()) * DT_H
@@ -315,7 +329,44 @@ def simulate(storm_id: str, realization: int = 0, params: dict | None = None) ->
         return rng.choice(len(rate), size=k, replace=True, p=rate / rate.sum())
 
     tree_w = length_km * np.where(cls == "path", 0.2, 1.0) * (1 + 0.5 * resid)
+    E = p["everyday"]
+    _times = pd.DatetimeIndex(drv["time"])
+    _hours = _times.hour.to_numpy() + _times.minute.to_numpy() / 60
+    busy = 0.12 + 0.38 * np.exp(-((_hours - 10) / 1.5) ** 2) + 0.45 * np.exp(-((_hours - 19) / 2.0) ** 2)
+    busy = np.where((_hours < 6) | (_hours >= 23), 0.04, busy)
+    busy = busy / busy.mean()
+    road_w = length_km * drivable * np.where(cls == "main", 3.0, np.where(cls == "minor", 1.5, 0.3))
+    pipe_w = length_km * drivable * np.where(cls == "local", 0.5, 1.0)
+    pond_w = drivable * (pond > 0) * (1 + pond)
+    wall_w = resid * (1 + dens)
+
+    def pick(w: np.ndarray) -> int | None:
+        tot = float(w.sum())
+        return int(rng.choice(len(w), p=w / tot)) if tot > 0 else None
+
     for t in range(T):
+        # ---- everyday disruptions, rain or not ----------------------------
+        if rng.random() < E["tree_h"] * DT_H and (i := pick(tree_w * drivable)) is not None:
+            add("tree", i, t, _lognormal_steps(rng, *p["clear_tree_h"]), "old tree fell (no storm)")
+            if rng.random() < p["wire_with_tree_p"]:
+                add("wire", i, t, _lognormal_steps(rng, *p["clear_wire_h"]), "tree on the line")
+        if rng.random() < E["water_main_h"] * DT_H and (i := pick(pipe_w)) is not None:
+            add("water_main", i, t, _lognormal_steps(rng, *E["main_h"]), "water main burst",
+                depth_m=float(rng.uniform(*E["main_depth_m"])))
+        if rng.random() < E["drain_overflow_h"] * DT_H and (i := pick(pond_w)) is not None:
+            add("drain_overflow", i, t, _lognormal_steps(rng, *E["drain_h"]), "blocked drain overflowing",
+                depth_m=float(rng.uniform(*E["drain_depth_m"])))
+        if rng.random() < E["collapse_h"] * DT_H and (i := pick(wall_w)) is not None:
+            add("collapse", i, t, T, "old wall gave way (no storm)")
+        for _ in range(rng.poisson(E["crash_h"] * busy[t] * DT_H)):
+            i = pick(road_w)
+            if i is None:
+                continue
+            if rng.random() < E["crash_block_p"]:
+                add("crash", i, t, _lognormal_steps(rng, *E["crash_h_dur"]), "crash blocking the road")
+            else:
+                add("breakdown", i, t, _lognormal_steps(rng, *E["crash_h_dur"]), "crash or breakdown, one lane")
+
         g = max(0.0, gust[t] - p["gust_floor_kmh"]) / p["gust_scale_kmh"]
         r_t = rain[t] * field_
         if g > 0:
@@ -350,10 +401,21 @@ def simulate(storm_id: str, realization: int = 0, params: dict | None = None) ->
             t1 = int(T - np.argmax(on[::-1]))
             add("bridge_closure", i, t0, t1 - t0, "river at the danger mark")
 
-    ev = pd.DataFrame(events, columns=["kind", "seg", "x", "y", "lon", "lat", "t0", "t1", "radius_m", "cause"])
-    for kind, flag in (("tree", F_DEBRIS), ("wire", F_WIRE), ("collapse", F_COLLAPSE), ("landslide", F_LANDSLIDE)):
+    ev = pd.DataFrame(events, columns=["kind", "seg", "x", "y", "lon", "lat", "t0", "t1", "radius_m", "cause", "depth_m"])
+    for kind, flag in (("tree", F_DEBRIS), ("wire", F_WIRE), ("collapse", F_COLLAPSE), ("landslide", F_LANDSLIDE),
+                       ("crash", F_DEBRIS)):
         for r in ev[ev["kind"] == kind].itertuples():
             flags[r.t0:r.t1, r.seg] |= flag
+    # water on the road with no rain: a burst main floods its road and spills onto
+    # the roads joined to it; an overflowing drain floods its low spot.
+    for r in ev[ev["kind"].isin(["water_main", "drain_overflow"])].itertuples():
+        depth[r.t0:r.t1, r.seg] = np.maximum(depth[r.t0:r.t1, r.seg], r.depth_m)
+        if r.kind == "water_main":
+            nb = adj[r.seg].indices
+            depth[r.t0:r.t1][:, nb] = np.maximum(depth[r.t0:r.t1][:, nb], 0.5 * r.depth_m)
+    breakdown_jam = np.zeros((T, n), dtype=np.float32)
+    for r in ev[ev["kind"] == "breakdown"].itertuples():
+        breakdown_jam[r.t0:r.t1, r.seg] = E["breakdown_jam"]
 
     # ---- traffic -----------------------------------------------------------
     times = pd.DatetimeIndex(drv["time"])
@@ -372,6 +434,7 @@ def simulate(storm_id: str, realization: int = 0, params: dict | None = None) ->
             s1 = adj @ b
             s2 = adj @ (s1 > 0).astype(np.float32)
             j = j + p["jam_spill_1"] * np.minimum(1, s1) + p["jam_spill_2"] * np.minimum(1, s2) * (s1 == 0)
+        j = j + breakdown_jam[t]
         jam[t] = np.clip(j, 0, 1) * drivable
     # stored in steps of 0.02 (5/250): finer than any feed reports, and it compresses
     jam_u8 = (np.round(jam * 50) * 5).astype(np.uint8)

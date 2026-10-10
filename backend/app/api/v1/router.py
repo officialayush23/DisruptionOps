@@ -26,6 +26,8 @@ from app.api.v1 import (
     ingest,
     agent_log,
     units,
+    nav,
+    surge,
 )
 from app.hazards import registry
 
@@ -38,6 +40,8 @@ api_router = APIRouter()
 # so the doors that take the volume are matched before the console's long tail.
 api_router.include_router(ingest.router)
 api_router.include_router(units.router)
+api_router.include_router(nav.router)
+api_router.include_router(surge.router)
 api_router.include_router(system.router)
 api_router.include_router(auth.router)
 api_router.include_router(runs.router)

@@ -227,7 +227,7 @@ async def _open_demands(conn: Any, city_id: str, sim_run_id: str | None) -> list
     rows = await conn.fetch(
         """
         select i.id::text as incident_id, i.title, i.ward_id, i.severity,
-               n.capability_id, n.required,
+               n.capability_id, n.required, w.elderly_share,
                extensions.ST_X(i.location::extensions.geometry) as lng,
                extensions.ST_Y(i.location::extensions.geometry) as lat,
                coalesce(wr.population_at_risk, w.population / 8) as exposed
@@ -247,7 +247,10 @@ async def _open_demands(conn: Any, city_id: str, sim_run_id: str | None) -> list
         city_id, sim_run_id,
     )
     demands: list[Demand] = []
+    from app.surge import service as surge
     for r in rows:
+        prio = surge.triage_factor(r["ward_id"], r["capability_id"],
+                                   float(r["elderly_share"]) if r["elderly_share"] is not None else None)
         for k in range(int(r["required"])):
             demands.append(
                 Demand(
@@ -259,6 +262,7 @@ async def _open_demands(conn: Any, city_id: str, sim_run_id: str | None) -> list
                     location=(float(r["lng"]), float(r["lat"])),
                     severity=int(r["severity"]),
                     population_at_risk=int(r["exposed"] or 0),
+                    priority=prio,
                 )
             )
     return demands
@@ -370,7 +374,23 @@ async def _blocked_points(
         """,
         city_id, sim_run_id,
     )
-    return [(float(r["lng"]), float(r["lat"])) for r in rows]
+    points = [(float(r["lng"]), float(r["lat"])) for r in rows]
+    # Roads the passability model expects to be blocked by the time a unit gets
+    # there (app/nav/live.py, PCMC district): avoided like reported blocks, so a
+    # crew is not sent into an underpass that is about to fill. Confirmed blocks
+    # come first; predictions fill the rest of the router's 50 avoid points.
+    # NAV_PREDICTIVE=0 turns this off (current-status-only routing).
+    import os
+    if sim_run_id is None and os.getenv("NAV_PREDICTIVE", "1") != "0":
+        try:
+            from app.nav import live
+            pred = await live.predicted_blocks(limit=max(0, min(live.MAX_POINTS, 50 - len(points))))
+            if pred:
+                points += [(lo, la) for lo, la, _ in pred]
+                await live.log_used(pred, "route")
+        except Exception as exc:  # noqa: BLE001 - prediction is advice; routing must not fail on it
+            log.warning("predicted_blocks_failed", error=str(exc)[:200])
+    return points
 
 
 class _Preview(Exception):
@@ -714,6 +734,12 @@ async def replan(
         reassigned=len(diff.reassigned), released=len(diff.released),
         uncovered=len(diff.uncovered),
     )
+    # The surge ladder reads the plan that was just written (unmet needs, load).
+    try:
+        from app.surge import service as surge
+        await surge.maybe_evaluate()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("surge_after_replan_failed", error=str(exc)[:200])
     return diff
 
 
