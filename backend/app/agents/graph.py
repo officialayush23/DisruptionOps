@@ -32,6 +32,7 @@ agent:
       └─ guard_in ─(kill switch / run storm)─► held ─► END
             └─ triage ─(S≥5)─► command ─┐
             └──────────────────────┴─► fanout ─Send×4─► sense ─► assess
+                                         └─► aerial (tasks the drone swarm) ─► END
                                                                    │
                          ┌──────────Send per domain with a need────┘
                          ▼
@@ -206,6 +207,7 @@ class GraphState(TypedDict, total=False):
     guard_ok: bool
     guardrail_trips: Annotated[list[dict[str, Any]], operator.add]
     trace: Annotated[list[dict[str, Any]], operator.add]
+    aerial: dict[str, Any]
 
 
 _HINTS = get_type_hints(GraphState, include_extras=True)
@@ -683,6 +685,35 @@ async def dispatch(view, _mem) -> dict[str, Any]:
                            + (" Audit flagged: " + trips[0]["detail"] if trips else ""))}
 
 
+@contract("aerial", reads=("max_severity",), writes=("aerial",))
+async def aerial(view, _mem) -> dict[str, Any]:
+    """The aerial agent. Runs on every cycle in parallel with the sensors and tasks the drone swarm itself
+    (app/drone/swarm_link.py): drones to verify unconfirmed reports, eyes on severe / life-safety incidents,
+    supply drops where supplies are short; keeps the swarm in step (severity) and stands it down on resolved
+    incidents. What the drones then report comes back as field.* events, which re-enter this graph."""
+    try:
+        from app.drone import swarm_link
+        link = swarm_link.link()
+    except Exception:  # noqa: BLE001 - the swarm is optional
+        link = None
+    if link is None:
+        return {"aerial": {"skipped": "swarm link off"}, "trace": _step("aerial", "Drone swarm not linked; no aerial tasking.")}
+    try:
+        out = await asyncio.wait_for(link.agent_cycle(city_id=view["city_id"], trigger=view.get("trigger", "")), timeout=20)
+    except Exception as exc:  # noqa: BLE001 - never fail the cycle over the swarm
+        return {"aerial": {"skipped": f"{type(exc).__name__}"}, "trace": _step("aerial", f"Drone swarm step failed: {type(exc).__name__}.")}
+    if out.get("skipped"):
+        text = f"Drone swarm: {out['skipped']}."
+    elif out["decisions"]:
+        text = "Tasked the swarm: " + "; ".join(
+            f"{d['action']} {str(d.get('incident_id') or d.get('swarm_incident_id') or '')[:8]} ({d['why']})" for d in out["decisions"][:6])
+    else:
+        text = (f"Swarm already covers what needs aerial eyes ({out.get('drones_busy', 0)} drones on "
+                f"{out.get('open_swarm_incidents', 0)} incidents); nothing new to send.")
+    return {"aerial": {k: v for k, v in out.items() if k in ("decisions", "skipped", "drones_busy", "open_swarm_incidents")},
+            "trace": _step("aerial", text)}
+
+
 @contract("observe", reads=("dispatched", "proposal", "outcome"), writes=("outcome",))
 def observe(view, _mem) -> dict[str, Any]:
     d = view.get("dispatched") or view.get("proposal") or {}
@@ -697,7 +728,7 @@ NODES = (
     ("assess", assess), ("domain", domain), ("optimise", optimise), ("validate", validate),
     ("give_up", give_up), ("policy_gate", policy_gate), ("held", held),
     ("human_approval", human_approval), ("rejected", rejected), ("dispatch", dispatch),
-    ("observe", observe),
+    ("observe", observe), ("aerial", aerial),
 )
 
 
@@ -711,6 +742,10 @@ def build(checkpointer: Any = None) -> Any:
     g.add_conditional_edges("triage", after_triage, {"command": "command", "fanout": "fanout"})
     g.add_edge("command", "fanout")
     g.add_conditional_edges("fanout", to_sensors, ["sense"])
+    # The aerial agent runs beside the sensors on every cycle and ends on its own: drone tasking never waits
+    # for the ground plan's approval, and the ground plan never waits for the swarm.
+    g.add_edge("fanout", "aerial")
+    g.add_edge("aerial", END)
     g.add_edge("sense", "assess")
     g.add_conditional_edges("assess", to_domains, ["domain", "optimise"])
     g.add_edge("domain", "optimise")

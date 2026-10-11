@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import mapboxgl from "mapbox-gl"
 import "mapbox-gl/dist/mapbox-gl.css"
 import { request } from "@/api/httpClient"
@@ -48,7 +48,7 @@ const LEVEL_CLS: Record<string, string> = {
 }
 const LOG_FILTERS = { all: () => true, alerts: (l: LogItem) => l.level === "alert" || l.kind === "decline",
   situation: (l: LogItem) => l.kind === "situation", decisions: (l: LogItem) =>
-    ["plan", "applied", "recheck", "replan", "verified", "task", "rejected", "queued"].includes(l.kind) } as const
+    ["plan", "applied", "recheck", "replan", "verified", "task", "rejected", "queued", "agent"].includes(l.kind) } as const
 type LogFilter = keyof typeof LOG_FILTERS
 
 const post = async (path: string, body: unknown, success = "Sent to the swarm") => {
@@ -162,8 +162,10 @@ export default function DroneLink() {
     <div className="space-y-6 p-5 md:p-8 xl:px-10">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <p className="text-muted-foreground max-w-3xl text-sm">
-          The agentic drone swarm, linked both ways. The drones report what they see (only what matters is logged here);
-          DisruptionOps tasks them, rechecks the result and re-plans when it falls short. Simulation only.
+          Autonomous. The LangGraph agent's <span className="font-medium">aerial</span> node tasks the swarm on every cycle
+          (verify reports, eyes on severe incidents, supply drops, stand-down on resolve); the swarm reasoner reads every drone
+          report, re-plans ground units, rechecks the result and re-plans again when it falls short. Officers watch here and can
+          override. Simulation only.
         </p>
         {s && (
           <span className={`flex items-center gap-2 text-xs ${s.connected ? "text-emerald-600" : "text-red-500"}`}>
@@ -218,9 +220,9 @@ export default function DroneLink() {
             <LinkMap s={s} sel={sel} onSelect={setSel} onPick={setPick} pick={pick} />
             <Card className="max-h-[520px] overflow-y-auto">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm">{inc ? `${inc.id} · ${inc.title ?? inc.category}` : "Task the swarm"}</CardTitle>
+                <CardTitle className="text-sm">{inc ? `${inc.id} · ${inc.title ?? inc.category}` : "Swarm incidents"}</CardTitle>
                 <CardDescription className="text-xs">{inc ? `${inc.status} · severity ${inc.severity ?? "—"} · ${inc.people ?? "?"} people${inc.control_mode === "orchestrated" ? " · DisruptionOps-led" : ""}`
-                  : "Pick an incident on the map or the list, or click the map for a new task."}</CardDescription>
+                  : "Tasked automatically. Pick one to see what the drones report; overrides below."}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-xs">
                 {!inc && (
@@ -232,8 +234,9 @@ export default function DroneLink() {
                           <span className="text-muted-foreground">{i.drones.join(",") || "no drone"} · {i.units.length} unit(s)</span>
                         </button>))}
                     </div>
-                    <div className="space-y-2 rounded-md border p-2">
-                      <div className="font-medium">New task {pick ? `at ${pick.lat.toFixed(5)}, ${pick.lng.toFixed(5)}` : "(click the map)"}</div>
+                    <details className="rounded-md border p-2" open={!!pick}>
+                      <summary className="cursor-pointer font-medium">Manual override: send drones to a point {pick ? `(${pick.lat.toFixed(5)}, ${pick.lng.toFixed(5)})` : "(click the map)"}</summary>
+                      <div className="mt-2 space-y-2">
                       <div className="flex flex-wrap gap-2">
                         <select value={nt.kind} onChange={(e) => setNt({ ...nt, kind: e.target.value })} className="bg-background rounded border px-1 py-0.5">
                           <option value="assess">assess</option><option value="sos">sos</option><option value="supply">supply drop</option></select>
@@ -245,7 +248,8 @@ export default function DroneLink() {
                       <input value={nt.note} onChange={(e) => setNt({ ...nt, note: e.target.value })} placeholder="what to look for (optional)" className="bg-background w-full rounded border px-2 py-1" />
                       <button type="button" disabled={!pick || !canTask} className="bg-primary text-primary-foreground rounded-md px-2.5 py-1 disabled:opacity-50"
                         onClick={async () => { if (!pick) return; await task({ action: "new_task", ...pick, ...nt }); setPick(null); refresh() }}>Send drones</button>
-                    </div>
+                      </div>
+                    </details>
                   </>
                 )}
                 {inc && (
@@ -262,6 +266,9 @@ export default function DroneLink() {
                     {inc.wait_reason && <div className="text-amber-600">Waiting: {inc.wait_reason}</div>}
                     {inc.expecting && <div className="text-amber-600">Checking result: {inc.expecting.units.join(", ") || `${inc.expecting.drones} drone(s)`} ·{" "}
                       {inc.expecting.rechecked ? "rechecked, re-plan in" : "recheck in"} {Math.max(0, inc.expecting.due_in_s)} s</div>}
+                    <details className="rounded-md border p-2">
+                    <summary className="cursor-pointer font-medium">Manual override</summary>
+                    <div className="mt-2 space-y-2">
                     <div className="flex flex-wrap gap-1.5">
                       <Btn disabled={!canTask} onClick={async () => { await task({ action: "recheck", incident_id: inc.id }, "Asked the drones for a fresh report"); refresh() }}>Recheck</Btn>
                       <Btn disabled={!canTask} onClick={async () => { await task({ action: "replan", incident_id: inc.id }, "Re-planned"); refresh() }}>Re-plan now</Btn>
@@ -285,6 +292,8 @@ export default function DroneLink() {
                       <input value={upd.severity} onChange={(e) => setUpd({ ...upd, severity: e.target.value })} placeholder="sev 1-5" className="bg-background w-16 rounded border px-1 py-0.5" />
                       <Btn disabled={!canTask || (!upd.people && !upd.severity)} onClick={async () => { await task({ action: "update", incident_id: inc.id, ...(upd.people ? { people: Number(upd.people) } : {}), ...(upd.severity ? { severity: Number(upd.severity) } : {}) }, "Incident updated"); setUpd({ people: "", severity: "" }); refresh() }}>Update</Btn>
                     </div>
+                    </div>
+                    </details>
                   </>
                 )}
               </CardContent>
@@ -344,7 +353,7 @@ export default function DroneLink() {
   )
 }
 
-function Btn({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+function Btn({ children, onClick, disabled }: { children: ReactNode; onClick: () => void; disabled?: boolean }) {
   return <button type="button" disabled={disabled} onClick={onClick} className="hover:bg-muted rounded-md border px-2 py-0.5 disabled:opacity-50">{children}</button>
 }
 

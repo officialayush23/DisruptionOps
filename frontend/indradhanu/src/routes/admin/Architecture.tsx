@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react"
+import { useDragScroll } from "@/hooks/useDragScroll"
 import { useDemo } from "@/routes/demo/DemoProvider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -145,6 +146,8 @@ function bandY(i: number) {
 const TOTAL_H = bandY(BANDS.length - 1) + BAND_H + 28
 
 export default function Architecture() {
+  // Wide figure: drag to scroll it sideways on small screens.
+  const dragRef = useDragScroll<HTMLDivElement>()
   const { state } = useDemo()
   const [flow, setFlow] = useState(true)
   const [focus, setFocus] = useState<string | null>(null)
@@ -191,7 +194,7 @@ export default function Architecture() {
       </div>
 
       <Card>
-        <CardContent className="overflow-x-auto p-2 sm:p-4">
+        <CardContent ref={dragRef} className="overflow-x-auto p-2 sm:p-4">
           <svg
             viewBox={`0 0 ${W} ${TOTAL_H}`}
             className="h-auto w-full min-w-[760px]"

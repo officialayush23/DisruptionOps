@@ -259,6 +259,15 @@ def reason(inc: dict, body: dict, units: list[dict], drones: list[dict], *, excl
     return {"incident_id": iid, "observations": obs, "reasoning": why, "actions": actions, "summary": summary[:300]}
 
 
+def _graph_drives() -> bool:
+    """True when the LangGraph cycle (with its aerial node) is what tasks the swarm."""
+    try:
+        from app.agents import event_router, graph
+        return graph.enabled() and event_router.running()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ----------------------------------------------------------------- the link --
 class SwarmLink(SwarmAgency):
     def __init__(self, *a, auto: bool = True, take_command: bool = True, **k):
@@ -581,11 +590,18 @@ class SwarmLink(SwarmAgency):
             cmd, payload = f"{action}_incident", {"incident_id": iid, "reason": str(body.get("reason") or f"{action}d by {by}")[:120]}
         elif action == "new_task":
             lng, lat = float(body["lng"]), float(body["lat"])
+            x, y = to_local(lng, lat, self.anchor)
+            b = self.bounds
+            if not (b[0] <= x <= b[2] and b[1] <= y <= b[3]):
+                raise ValueError(f"That point is outside the swarm's map ({abs(b[0]):.0f} m around its base); pick a point inside the drone area")
             kind = body.get("kind") or "assess"
             cmd, payload = "agency_request", {
                 "request_id": f"dops-panel-{uuid.uuid4().hex[:10]}", "kind": kind, "position": to_local(lng, lat, self.anchor),
                 "category": body.get("category") or "flood", "people": max(1, min(200, int(body.get("people") or 1))),
-                "needs": body.get("needs") or (["food", "water"] if kind == "supply" else []),
+                **({"needs": body["needs"]} if body.get("needs") else
+                   {"needs": ["food", "first_aid", "medical"]} if kind == "supply" else
+                   {"needs": ["assessment"]} if kind == "assess" else
+                   {"needs": ["rescue", "first_aid"]} if (body.get("category") or "") in ("trapped", "flood") else {}),
                 "priority": max(1, min(5, int(body.get("priority") or 4))), "requested_by": f"disruptionops:panel:{by}"[:60],
                 "title": (body.get("note") or "")[:120] or None}
         elif action == "replan":
@@ -614,6 +630,65 @@ class SwarmLink(SwarmAgency):
             self.expect[iid] = {"plan_id": "", "units": units, "drones": have + drones if drones else 0,
                                 "due": time.monotonic() + RECHECK_S, "rechecked": False}
         return {"ok": ok, "error": ack.get("error"), "result": res}
+
+    # --- the LangGraph agent's aerial step -----------------------------------------------
+    async def agent_cycle(self, *, city_id: str = "pune", trigger: str = "") -> dict:
+        """Called by the agent graph's `aerial` node on every cycle. Decides drone work for DisruptionOps incidents:
+        new requests (assess unverified reports, eyes on severe / life-safety incidents, supply drops), keeps the
+        swarm in step (severity / people changes) and stands it down on resolved incidents. Returns what it did and why."""
+        out: dict = {"connected": self.connected, "can_task": self.can_task, "decisions": [], "skipped": None}
+        if not self.connected:
+            out["skipped"] = "swarm not connected"
+            return out
+        if self.can_task is False:
+            out["skipped"] = "swarm token is view-only"
+            return out
+        if self.ports.autonomy_paused():
+            out["skipped"] = "emergency stop: no drone tasking"
+            return out
+        before = set(self.sent)
+        try:
+            await self.scan_once()                       # bounded to the swarm map; dedups per incident+kind
+        except Exception as exc:  # noqa: BLE001
+            out["decisions"].append({"action": "scan_failed", "why": f"{type(exc).__name__}: {str(exc)[:120]}"})
+        for rid in [r for r in self.sent if r not in before]:
+            info = self.sent[rid]
+            why = {"assess": "report not verified yet: send a drone to look before ground units commit",
+                   "sos": "severe / life-safety incident: eyes on scene for the planner",
+                   "supply": "supplies short: drone drop until a truck can get through"}.get(info.get("kind"), "aerial help")
+            out["decisions"].append({"action": f"request_{info.get('kind')}", "incident_id": info["incident_id"],
+                                     "swarm_incident_id": info.get("swarm_incident_id"), "why": why,
+                                     "answer": info.get("reply")})
+            self._log("agent", f"Agent graph tasked the swarm ({info.get('kind')}) for incident {str(info['incident_id'])[:8]}: {why}.",
+                      incident_id=info.get("swarm_incident_id"), frm="agent:langgraph", level="info")
+        # keep the swarm in step with DisruptionOps: resolved -> close; severity up -> update
+        try:
+            from app.db import session as db
+            ids = [i["incident_id"] for i in self.sent.values() if i.get("swarm_incident_id")]
+            rows = await db.fetch("select id::text id, status::text status, severity, report_count from incidents where id = any($1::uuid[])",
+                                  ids) if ids else []
+        except Exception:  # noqa: BLE001
+            rows = []
+        by = {r["id"]: r for r in rows}
+        for rid, info in list(self.sent.items()):
+            row, sid = by.get(info["incident_id"]), info.get("swarm_incident_id")
+            sw = self._inc(sid)
+            if not row or not sw or sw.get("status") == "resolved":
+                continue
+            if row["status"] == "resolved":
+                ack = await self.command("close_incident", {"incident_id": sid, "reason": "resolved in DisruptionOps"})
+                out["decisions"].append({"action": "close", "swarm_incident_id": sid, "why": "resolved in DisruptionOps: stand the drones down",
+                                         "ok": ack.get("ok")})
+                self._log("agent", f"Agent graph stood the swarm down on {sid}: resolved in DisruptionOps.", incident_id=sid,
+                          frm="agent:langgraph", level="good")
+            elif int(row["severity"] or 0) > int(sw.get("severity") or 0):
+                ack = await self.command("update_incident", {"incident_id": sid, "severity": int(row["severity"]),
+                                                             "people": max(int(sw.get("people") or 1), int(row["report_count"] or 1))})
+                out["decisions"].append({"action": "update", "swarm_incident_id": sid,
+                                         "why": f"severity rose to {row['severity']} in DisruptionOps", "ok": ack.get("ok")})
+        out["open_swarm_incidents"] = sum(1 for i in self.state.get("incidents") or [] if i.get("status") != "resolved")
+        out["drones_busy"] = sum(1 for d in self.state.get("drones") or [] if d.get("task_id"))
+        return out
 
     # --- worker: reasoning and persistence (never on the socket reader) ------------------
     async def _worker(self) -> None:
@@ -695,9 +770,16 @@ class SwarmLink(SwarmAgency):
                                           frm="disruptionops", level="info")
                             for iid in open_ids:
                                 self._queue("reason", iid, "initial review on connect")
+                            # Wake the agent graph: its aerial node decides drone work for DisruptionOps' incidents.
+                            with contextlib.suppress(Exception):
+                                from app.agents import event_router
+                                event_router.request_replan("drone swarm linked")
                             last_scan = 0.0
                             while not reader.done():
-                                if time.monotonic() - last_scan >= float(env("SWARM_SCAN_S", "10")):
+                                # The agent graph's aerial node tasks the swarm on every cycle; this timer is only the
+                                # fallback when the graph is off (or between cycles, for a request still unsent).
+                                period = float(env("SWARM_SCAN_S", "10")) * (6 if _graph_drives() else 1)
+                                if time.monotonic() - last_scan >= period:
                                     last_scan = time.monotonic()
                                     try:
                                         await self.scan_once()

@@ -120,6 +120,11 @@ def request_kind(category: str, needs: dict[str, int], life_safety: bool) -> str
     return None
 
 
+def request_kind_for(c: dict) -> str | None:
+    """request_kind plus: anything severity 4+ gets a drone to look, so the plan is built on what is really there."""
+    return request_kind(c["category"], c["needs"], c["life_safety"]) or ("sos" if int(c.get("severity") or 0) >= 4 else None)
+
+
 def vulnerable_count(notes: str, ward_elderly_share: float | None, people: int) -> int:
     t = (notes or "").lower()
     named = any(w in t for w in VULNERABLE_WORDS)
@@ -143,7 +148,9 @@ def build_payload(ctx: dict, anchor: tuple[float, float] = ANCHOR) -> dict:
         "position": to_local(lng, lat, anchor),
         "category": ctx["category"],
         "people": people,
-        "needs": ctx.get("swarm_needs") or ([] if kind != "supply" else ["food", "water"]),
+        # The swarm validates needs against first_aid, medical, food, assessment, rescue; omitted = its own default.
+        **({"needs": ctx["swarm_needs"]} if ctx.get("swarm_needs") else
+           {"needs": ["food", "first_aid"]} if kind == "supply" else {"needs": ["assessment"]} if kind == "assess" else {}),
         "priority": max(1, min(int(ctx.get("severity") or 3), 5)),
         "requested_by": f"disruptionops:{ctx['incident_id']}",
         "situation": {
@@ -371,7 +378,7 @@ class SwarmAgency:
         unanswered = sum(1 for r in self.sent.values() if not r.get("answered"))
         count = 0
         for c in await self.ports.candidates():
-            kind = request_kind(c["category"], c["needs"], c["life_safety"])
+            kind = request_kind_for(c)
             if not kind or unanswered + count >= MAX_OPEN:
                 continue
             rid = f"dops-{c['incident_id']}-{kind}"[:128]
