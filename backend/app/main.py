@@ -57,6 +57,12 @@ async def lifespan(_: FastAPI):
     from app.drone import swarm as drone_swarm
 
     await drone_swarm.start()
+    # Two-way link with the agentic drone swarm (drone_swarm repo): filtered drone
+    # log, tasking from the panel, recheck-and-replan reasoner. SWARM_AGENCY=1.
+    from app.drone import swarm_link
+
+    if swarm_link.enabled():
+        await swarm_link.start()
     # The ingest bus's drainers. Zero here when a separate worker deployment
     # (python -m app.worker) does the draining.
     from app.core import ingest
@@ -66,6 +72,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         await ingest.stop()
+        await swarm_link.stop()
         await drone_swarm.stop()
         await iot_virtual.stop()
         await event_router.stop()

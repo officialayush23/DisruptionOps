@@ -113,6 +113,8 @@ const NAV: {
   // LoRa field sensors: gas, heat, sound, tapping, tilt — on a map and over time.
   { group: "Field network", to: "/admin/analytics", label: "Sensor analytics", icon: Thermometer },
   { group: "Field network", to: "/admin/swarm", label: "Drone swarm", icon: Plane },
+  // Two-way link with the agentic swarm: filtered drone log, tasking, recheck-and-replan reasoning.
+  { group: "Field network", to: "/admin/drone-link", label: "Drone command", icon: Plane },
   // Not "Dispatch". Nothing on it dispatches: the solver assigns, the gate
   // authorises, and this is the ledger of what it did — which is what an
   // officer was missing, not a second way to move a vehicle by hand.

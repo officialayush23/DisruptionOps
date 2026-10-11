@@ -1,0 +1,50 @@
+diff --git a/backend/app/ops/agency_replies.py b/backend/app/ops/agency_replies.py
+index 34343f3..f1753b6 100644
+--- a/backend/app/ops/agency_replies.py
++++ b/backend/app/ops/agency_replies.py
+@@ -108,6 +108,11 @@ REPLY_SET: dict[str, dict[str, Any]] = {
+     },
+ }
+ 
++#: Agencies that are real systems answering over their own channel (the drone swarm, see
++#: app/drone/swarm_agency.py). They are never answered by the random REPLY_SET and have no DisruptionOps units to
++#: stage: an acceptance is recorded as fulfilled with no AID- units.
++EXTERNAL_AGENCIES = frozenset({"drone-swarm"})
++
+ #: Second answer after a "delayed": mostly they come through.
+ _AFTER_DELAY = {"accept_full": 0.6, "accept_partial": 0.2, "decline_capacity": 0.2}
+ 
+@@ -169,6 +174,9 @@ async def schedule(request_id: str, *, conn: Any = None, minutes: tuple[float, f
+     """Ask for an answer to arrive in a few (sim-compressed) minutes."""
+     if not await ready():
+         return
++    if await db.fetchval("select to_agency = any($2::text[]) from agency_requests where id = $1::uuid",
++                         request_id, list(EXTERNAL_AGENCIES)):
++        return                       # an external agency replies over its own channel
+     due = _later(random.uniform(*minutes))
+     q = "update agency_requests set reply_due_at = $2 where id = $1::uuid"
+     if conn is not None:
+@@ -315,12 +323,12 @@ async def _apply(req: dict, kind: str, text: str, *, source: dict | None, given:
+     replan = False
+ 
+     if kind in ("accept_full", "accept_partial") and source:
+-        units = await _stage_units(req, source, given)
++        units = [] if source.get("external") else await _stage_units(req, source, given)
+         status = "fulfilled"
+         replan = bool(units)
+         steps.append(f"Staged {len(units)} {_nice(source['kind'])}(s) at {source['base']}; "
+                      f"re-planning so the allocator assigns them")
+-        rest = int(req["quantity"]) - len(units)
++        rest = 0 if source.get("external") else int(req["quantity"]) - len(units)
+         if rest > 0:
+             steps.append(await _follow_up(req, rest, reason=f"{agency_name} could spare only {len(units)}"))
+     elif kind == "delayed":
+@@ -410,6 +418,8 @@ async def _source(agency: str, capability: str, ward_id: str | None) -> dict | N
+     """Which kind of unit this agency would send for this capability, and from
+     where. Its standing mutual-aid offer first (that is what it has agreed to
+     lend), otherwise one of its own units' bases."""
++    if agency in EXTERNAL_AGENCIES:
++        return {"external": True, "kind": "drone", "base": "the swarm docks"}
+     offer = await db.fetchrow(
+         """
+         select o.kind, o.stage_lng lng, o.stage_lat lat, coalesce(a.short_name, a.name) || ' base' base

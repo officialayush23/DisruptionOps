@@ -77,3 +77,100 @@ async def drone_swarm_configure(body: SwarmConfig, _: StaffPrincipal) -> dict[st
     anchor = ((body.anchor_lat, body.anchor_lon)
               if body.anchor_lat is not None and body.anchor_lon is not None else None)
     return await swarm.configure(url=body.url, enabled=body.enabled, anchor=anchor, scale=body.scale)
+
+
+# --------------------------------------------------------------------------- swarm link --
+# Two-way link with the agentic drone swarm (app/drone/swarm_link.py): filtered drone log,
+# tasking from the panel, and the recheck-and-replan reasoner.
+from app.drone import swarm_link  # noqa: E402
+
+
+class LinkTask(BaseModel):
+    action: str = Field(pattern=r"^(assign_drone|assign_unit|unassign|recall|recheck|update|close|cancel|new_task|replan|orchestrator|autonomy)$")
+    incident_id: str | None = Field(default=None, max_length=40)
+    drone_id: str | None = Field(default=None, max_length=20)
+    drone_ids: list[str] | None = None
+    resource_id: str | None = Field(default=None, max_length=40)
+    resource_ids: list[str] | None = None
+    kind: str | None = Field(default=None, max_length=30)
+    role: str | None = Field(default=None, max_length=20)
+    count: int | None = Field(default=None, ge=1, le=6)
+    payload: list[str] | None = None
+    people: int | None = Field(default=None, ge=0, le=500)
+    severity: int | None = Field(default=None, ge=1, le=5)
+    priority: int | None = Field(default=None, ge=1, le=5)
+    category: str | None = Field(default=None, max_length=40)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    needs: list[str] | None = None
+    note: str | None = Field(default=None, max_length=200)
+    reason: str | None = Field(default=None, max_length=160)
+    value: bool | None = None
+    paused: bool | None = None
+
+
+class LinkConfig(BaseModel):
+    url: str | None = Field(default=None, max_length=300)
+    token: str | None = Field(default=None, max_length=200)
+    auto: bool | None = None
+
+
+def _require_link():
+    link = swarm_link.link()
+    if link is None:
+        raise HTTPException(status_code=409, detail="Swarm link is off. Paste the swarm URL and token in the panel first.")
+    if not link.connected:
+        raise HTTPException(status_code=503, detail=f"Swarm not connected{': ' + link.last_error if link.last_error else ''}.")
+    return link
+
+
+@router.get("/drone/link")
+async def drone_link_status(_: StaffPrincipal, log_after: int = 0) -> dict[str, Any]:
+    return swarm_link.status(log_after)
+
+
+@router.post("/drone/link/task")
+async def drone_link_task(body: LinkTask, who: StaffPrincipal) -> dict[str, Any]:
+    link = _require_link()
+    try:
+        out = await link.task(body.model_dump(exclude_none=True), by=(who.full_name or "officer")[:40])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=f"Swarm did not answer: {type(exc).__name__}") from exc
+    if not out.get("ok") and "plan" not in out:
+        raise HTTPException(status_code=422, detail=f"Swarm refused: {out.get('error')}")
+    return out
+
+
+@router.post("/drone/link/plans/{plan_id}/{decision}")
+async def drone_link_plan(plan_id: str, decision: str, who: StaffPrincipal) -> dict[str, Any]:
+    link = _require_link() if decision == "approve" else swarm_link.link()
+    if link is None:
+        raise HTTPException(status_code=409, detail="Swarm link is off.")
+    try:
+        if decision == "approve":
+            return await link.apply_plan(plan_id, by=(who.full_name or "officer")[:40])
+        if decision == "reject":
+            return link.reject_plan(plan_id, by=(who.full_name or "officer")[:40])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown plan") from exc
+    raise HTTPException(status_code=400, detail="decision must be approve or reject")
+
+
+@router.post("/drone/link/config")
+async def drone_link_config(body: LinkConfig, _: StaffPrincipal) -> dict[str, Any]:
+    if body.url is not None or body.token is not None:
+        url = (body.url or (swarm_link.link().url if swarm_link.link() else "")).strip()
+        if url.startswith("http"):
+            url = "ws" + url[4:]
+        url = url.rstrip("/")
+        if url and not url.endswith("/ops/ws"):
+            url += "/ops/ws"
+        if not url.startswith(("ws://", "wss://")):
+            raise HTTPException(status_code=400, detail="URL must be the swarm's https:// or wss:// address")
+        token = body.token if body.token is not None else (swarm_link.link().token if swarm_link.link() else "")
+        await swarm_link.start(url=url, token=token.strip())
+    if body.auto is not None and swarm_link.link():
+        swarm_link.link().auto = body.auto
+    return swarm_link.status()
